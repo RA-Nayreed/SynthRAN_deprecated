@@ -218,7 +218,7 @@ class ReferenceAlignedPhysicalIntent:
 R2LAB_OAI_BAND78_REFERENCE = OaiRadioReference(
     ssb=NrArfcn(621_312, ArfcnSemantic.SSB),
     point_a=NrArfcn(620_040, ArfcnSemantic.POINT_A),
-    carrier_prbs=162,
+    carrier_prbs=106,
     subcarrier_spacing_khz=30,
     tx_paths=2,
     rx_paths=2,
