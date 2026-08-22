@@ -94,19 +94,19 @@ class R2LabPhysicalDeploymentPlanTests(unittest.TestCase):
         self.assertFalse(payload["safety"]["virtual_adapter_modified"])
         self.assertFalse(payload["safety"]["live_acceptance_claimed"])
 
-    def test_reference_aligned_plan_uses_distinct_carrier_and_ssb(self) -> None:
+    def test_reference_aligned_plan_preserves_carrier_and_ssb_semantics(self) -> None:
         payload = build_physical_deployment_plan(
             run_id="r2lab-physical-frequency"
         ).to_dict()
         intent = payload["radio_intent"]
         carrier = intent["profile"]["carrier"]
         ssb = intent["expected_ssb"]
-        self.assertEqual(621_984, carrier["arfcn"])
+        self.assertEqual(621_312, carrier["arfcn"])
         self.assertEqual("carrier-center", carrier["semantic"])
         self.assertEqual(621_312, ssb["arfcn"])
         self.assertEqual("ssb", ssb["semantic"])
-        self.assertNotEqual(carrier["arfcn"], ssb["arfcn"])
-        self.assertEqual(60, intent["profile"]["channel_bandwidth_mhz"])
+        self.assertEqual(carrier["arfcn"], ssb["arfcn"])
+        self.assertEqual(40, intent["profile"]["channel_bandwidth_mhz"])
         self.assertEqual(2, intent["profile"]["nof_antennas_dl"])
         self.assertEqual(2, intent["profile"]["nof_antennas_ul"])
 
@@ -146,16 +146,20 @@ class R2LabPhysicalRenderTests(unittest.TestCase):
         payload = rendered.to_dict()
         config = payload["gnb_config"]
         cell = config["cell_cfg"]
-        self.assertEqual(621_984, cell["dl_arfcn"])
+        self.assertEqual(621_312, cell["dl_arfcn"])
         self.assertEqual(78, cell["band"])
-        self.assertEqual(60, cell["channel_bandwidth_MHz"])
+        self.assertEqual(40, cell["channel_bandwidth_MHz"])
         self.assertEqual(30, cell["common_scs"])
         self.assertEqual(2, cell["nof_antennas_dl"])
         self.assertEqual(2, cell["nof_antennas_ul"])
         self.assertEqual([{"sst": 1}], cell["slicing"])
-        self.assertEqual(621_312, config["synthran_review"]["expected_ssb_arfcn"])
-        self.assertEqual(620_040, config["synthran_review"]["reference_point_a_arfcn"])
-        self.assertFalse(config["synthran_review"]["live_accepted"])
+        review = config["synthran_review"]
+        self.assertEqual(621_312, review["expected_ssb_arfcn"])
+        self.assertEqual(620_040, review["reference_point_a_arfcn"])
+        self.assertEqual(106, review["reference_carrier_prbs"])
+        self.assertEqual(30, review["reference_scs_khz"])
+        self.assertEqual(40, review["reference_nominal_bandwidth_mhz"])
+        self.assertFalse(review["live_accepted"])
 
     def test_render_matches_pinned_cu_cp_and_remote_control_shape(self) -> None:
         config = render_physical_srsran(
@@ -254,15 +258,17 @@ class R2LabPhysicalChartTests(unittest.TestCase):
         )
         self.assertNotIn("synthran_review", config)
         self.assertTrue(bundle["review"]["reference_aligned"])
+        self.assertEqual(106, bundle["review"]["reference_carrier_prbs"])
+        self.assertEqual(40, bundle["review"]["reference_nominal_bandwidth_mhz"])
         self.assertTrue(bundle["review"]["image_digest_locked"])
         self.assertFalse(bundle["review"]["live_accepted"])
 
-    def test_bundle_preserves_60mhz_2x2_and_removes_srsue_overrides(self) -> None:
+    def test_bundle_preserves_40mhz_2x2_and_removes_srsue_overrides(self) -> None:
         cell = build_physical_chart_bundle(
             lock=self.lock, plan=self.plan, bindings=self.bindings
         ).to_dict()["values"]["gnbConfig"]["cell_cfg"]
-        self.assertEqual(621_984, cell["dl_arfcn"])
-        self.assertEqual(60, cell["channel_bandwidth_MHz"])
+        self.assertEqual(621_312, cell["dl_arfcn"])
+        self.assertEqual(40, cell["channel_bandwidth_MHz"])
         self.assertEqual(2, cell["nof_antennas_dl"])
         self.assertEqual(2, cell["nof_antennas_ul"])
         self.assertNotIn("pdcch", cell)
@@ -400,9 +406,9 @@ data:
       device_driver: uhd
       device_args: addr=192.0.2.103,type=n3xx
     cell_cfg:
-      dl_arfcn: 621984
+      dl_arfcn: 621312
       band: 78
-      channel_bandwidth_MHz: 60
+      channel_bandwidth_MHz: 40
       common_scs: 30
       nof_antennas_dl: 2
       nof_antennas_ul: 2
@@ -428,12 +434,18 @@ spec:
         ).to_dict()
         self.assertEqual(0, payload["replicas"])
         self.assertEqual("Recreate", payload["strategy"])
-        self.assertEqual(621_984, payload["carrier_arfcn"])
-        self.assertEqual(60, payload["channel_bandwidth_mhz"])
+        self.assertEqual(621_312, payload["carrier_arfcn"])
+        self.assertEqual(40, payload["channel_bandwidth_mhz"])
         self.assertEqual(2, payload["antennas_dl"])
         self.assertEqual(2, payload["antennas_ul"])
         self.assertEqual("offline-render-validated", payload["acceptance"])
         self.assertEqual(64, len(payload["sha256"]))
+
+    def test_render_rejects_stale_smoke003_radio_values(self) -> None:
+        stale = self.valid_render().replace("dl_arfcn: 621312", "dl_arfcn: 621984")
+        stale = stale.replace("channel_bandwidth_MHz: 40", "channel_bandwidth_MHz: 60")
+        with self.assertRaisesRegex(R2LabPhysicalHelmError, "reviewed chart intent"):
+            validate_physical_helm_render(text=stale, bundle=self.bundle)
 
     def test_render_rejects_nonzero_replicas_or_rolling_strategy(self) -> None:
         with self.assertRaisesRegex(R2LabPhysicalHelmError, "remain stopped"):
@@ -497,7 +509,7 @@ spec:
             runner=runner,
         )
         self.assertEqual(self.valid_render(), text)
-        self.assertEqual(621_984, evidence.carrier_arfcn)
+        self.assertEqual(621_312, evidence.carrier_arfcn)
         self.assertEqual(("helm", "version", "--short"), commands[0])
         self.assertEqual("template", commands[1][1])
         self.assertIn("--values", commands[1])
