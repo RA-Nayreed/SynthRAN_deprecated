@@ -23,22 +23,85 @@ class FakeRunner:
         self.ping_failures = ping_failures
         self.commands: list[tuple[str, ...]] = []
         self.ping_attempts = 0
+        self.power: dict[str, str] = {}
 
     @staticmethod
     def remote(command: tuple[str, ...]) -> tuple[str, ...]:
         split = command.index("--")
         return command[split + 2 :]
 
+    @staticmethod
+    def _qfit_node(qfit: str) -> int:
+        return int(qfit.removeprefix("qfit"))
+
     def __call__(self, command, timeout_seconds: int) -> CommandResult:
         value = tuple(command)
         self.commands.append(value)
         remote = self.remote(value)
+
+        if remote == ("true",):
+            return CommandResult(0, "", "")
         if remote == ("rhubarbe", "leases", "--check"):
             return CommandResult(0 if self.lease_ok else 1, "", "")
+
+        if remote[:3] == ("rhubarbe", "pdu", "on") and len(remote) == 4:
+            resource = remote[3]
+            self.power[resource] = "on"
+            return CommandResult(
+                0,
+                f"pdu2 chain-0@outlet-1 ({resource}): ON (28W)\n",
+                "",
+            )
+        if remote[:3] == ("rhubarbe", "pdu", "off") and len(remote) == 4:
+            resource = remote[3]
+            self.power[resource] = "off"
+            # Live smoke 002 proved that a successful OFF may return rc=1.
+            return CommandResult(
+                1,
+                f"pdu2 chain-0@outlet-1 ({resource}): OFF\n",
+                "",
+            )
+        if remote[:3] == ("rhubarbe", "pdu", "status") and len(remote) == 4:
+            resource = remote[3]
+            state = self.power.get(resource)
+            if state == "on":
+                return CommandResult(
+                    0,
+                    f"pdu2 chain-0@outlet-1 ({resource}): ON (28W)\n",
+                    "",
+                )
+            if state == "off":
+                return CommandResult(
+                    0,
+                    f"pdu2 chain-0@outlet-1 ({resource}): OFF\n",
+                    "",
+                )
+            return CommandResult(0, "", "")
+
+        if remote[:2] == ("qfit", "on") and len(remote) == 3:
+            qfit = remote[2]
+            self.power[qfit] = "on"
+            node = self._qfit_node(qfit)
+            return CommandResult(0, f"reboot{node:02d}:ok\n", "")
+        if remote[:2] == ("qfit", "off") and len(remote) == 3:
+            qfit = remote[2]
+            self.power[qfit] = "off"
+            node = self._qfit_node(qfit)
+            return CommandResult(0, f"reboot{node:02d}:ok\n", "")
+        if remote[:2] == ("rhubarbe", "status") and len(remote) == 3:
+            node = int(remote[2])
+            qfit = f"qfit{node:02d}"
+            state = self.power.get(qfit)
+            if state in {"on", "off"}:
+                return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
+            return CommandResult(0, "", "")
+
         if remote[:1] == ("ping",):
             self.ping_attempts += 1
             if self.ping_attempts <= self.ping_failures:
                 return CommandResult(1, "", "")
+            return CommandResult(0, "", "")
+
         return CommandResult(0, "", "")
 
     @property
@@ -83,7 +146,7 @@ class R2LabTests(unittest.TestCase):
         self.assertIn("oulu_user@faraday.inria.fr", command)
         self.assertNotIn("password", " ".join(command).lower())
 
-    def test_plan_redacts_slice_and_forbids_global_cleanup(self) -> None:
+    def test_plan_redacts_slice_and_requires_state_verification(self) -> None:
         selection = R2LabSelection.build(
             slice_name="private_slice", radio="n300", ue="qhat01"
         )
@@ -96,6 +159,9 @@ class R2LabTests(unittest.TestCase):
         self.assertEqual("reuse-active", payload["lease_action"])
         self.assertFalse(payload["safety"]["password_storage"])
         self.assertFalse(payload["safety"]["global_power_off"])
+        self.assertFalse(payload["safety"]["mutation_returncode_is_state_truth"])
+        self.assertTrue(payload["safety"]["claim_release_requires_proven_clean_state"])
+        self.assertIn("pdu status n300", "\n".join(payload["commands"]))
 
     def test_doctor_is_read_only_and_requires_active_lease(self) -> None:
         selection = R2LabSelection.build(
@@ -125,7 +191,7 @@ class R2LabTests(unittest.TestCase):
         self.assertFalse(report.ready)
         self.assertEqual("gateway", report.checks[-1].name)
 
-    def test_prepare_checks_lease_before_every_mutation_and_claims_resources(self) -> None:
+    def test_prepare_checks_lease_and_proves_each_power_transition(self) -> None:
         selection = R2LabSelection.build(
             slice_name="oulu_user", radio="n300", ue="qhat01"
         )
@@ -151,22 +217,25 @@ class R2LabTests(unittest.TestCase):
             self.assertNotIn("oulu_user", result.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual([20, 10], waits)
 
-        remote = runner.remote_commands
         expected = [
             ("rhubarbe", "leases", "--check"),
             ("rhubarbe", "leases", "--check"),
             ("rhubarbe", "pdu", "on", "n300"),
+            ("rhubarbe", "pdu", "status", "n300"),
             ("rhubarbe", "leases", "--check"),
             ("rhubarbe", "pdu", "off", "qhat01"),
+            ("rhubarbe", "pdu", "status", "qhat01"),
             ("rhubarbe", "leases", "--check"),
             ("rhubarbe", "pdu", "on", "qhat01"),
+            ("rhubarbe", "pdu", "status", "qhat01"),
             ("ping", "-c", "1", "-W", "1", "qhat01"),
             ("ping", "-c", "1", "-W", "1", "qhat01"),
             ("rhubarbe", "leases", "--check"),
         ]
-        self.assertEqual(expected, remote)
-        self.assertFalse(any("all-off" in command for command in map(" ".join, remote)))
-        self.assertFalse(any("bye" in command for command in map(" ".join, remote)))
+        self.assertEqual(expected, runner.remote_commands)
+        joined = "\n".join(" ".join(command) for command in runner.remote_commands)
+        self.assertNotIn("all-off", joined)
+        self.assertNotIn("rhubarbe bye", joined)
 
     def test_prepare_fails_before_mutation_without_a_lease(self) -> None:
         selection = R2LabSelection.build(
@@ -215,7 +284,7 @@ class R2LabTests(unittest.TestCase):
             self.assertIn("gateway command could not complete", log)
             self.assertNotIn("private remote details", log)
 
-    def test_qfit_prepare_uses_only_selected_qfit_commands(self) -> None:
+    def test_qfit_prepare_proves_selected_qfit_state(self) -> None:
         selection = R2LabSelection.build(
             slice_name="oulu_user", radio="n320", ue="qfit07"
         )
@@ -232,9 +301,10 @@ class R2LabTests(unittest.TestCase):
         remote = runner.remote_commands
         self.assertIn(("qfit", "off", "qfit07"), remote)
         self.assertIn(("qfit", "on", "qfit07"), remote)
+        self.assertGreaterEqual(remote.count(("rhubarbe", "status", "7")), 2)
         self.assertNotIn(("rhubarbe", "pdu", "off", "qfit07"), remote)
 
-    def test_release_requires_exact_local_claim_and_powers_only_owned_pair(self) -> None:
+    def test_release_requires_exact_claim_and_proves_both_resources_off(self) -> None:
         selection = R2LabSelection.build(
             slice_name="oulu_user", radio="n300", ue="qhat01"
         )
@@ -261,13 +331,16 @@ class R2LabTests(unittest.TestCase):
             manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
             self.assertEqual("released", manifest["status"])
             self.assertEqual("released", manifest["resource_claim"])
+            self.assertTrue(manifest["cleanup"]["claim_releasable"])
 
         self.assertEqual(
             [
                 ("rhubarbe", "leases", "--check"),
                 ("rhubarbe", "pdu", "off", "qhat01"),
+                ("rhubarbe", "pdu", "status", "qhat01"),
                 ("rhubarbe", "leases", "--check"),
                 ("rhubarbe", "pdu", "off", "n300"),
+                ("rhubarbe", "pdu", "status", "n300"),
             ],
             runner.remote_commands,
         )
@@ -306,11 +379,11 @@ class R2LabTests(unittest.TestCase):
                     runner=runner,
                 )
 
-    def test_failed_release_retains_claim_for_explicit_retry(self) -> None:
+    def test_rc1_off_is_accepted_when_exact_status_proves_off(self) -> None:
         selection = R2LabSelection.build(
             slice_name="oulu_user", radio="n300", ue="qhat01"
         )
-        plan = build_plan(run_id="r2lab-test-07", selection=selection)
+        plan = build_plan(run_id="r2lab-test-live-rc1", selection=selection)
         runner = FakeRunner()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "r2lab"
@@ -321,20 +394,44 @@ class R2LabTests(unittest.TestCase):
                 sleeper=lambda _: None,
                 reachability_attempts=1,
             )
+            result = execute_release(
+                run_id=plan.run_id,
+                slice_name="oulu_user",
+                run_root=root,
+                runner=runner,
+            )
+            self.assertEqual("released", result.status)
+            self.assertFalse((root / "active.json").exists())
 
-            class RadioOffFailure(FakeRunner):
-                def __call__(self, command, timeout_seconds: int) -> CommandResult:
-                    result = super().__call__(command, timeout_seconds)
-                    if self.remote(tuple(command)) == (
-                        "rhubarbe",
-                        "pdu",
-                        "off",
-                        "n300",
-                    ):
-                        return CommandResult(1, "", "")
-                    return result
+    def test_wrong_radio_status_retains_claim(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qhat01"
+        )
+        plan = build_plan(run_id="r2lab-test-07", selection=selection)
+        runner = FakeRunner()
 
-            failing = RadioOffFailure()
+        class RadioStatusFailure(FakeRunner):
+            def __call__(self, command, timeout_seconds: int) -> CommandResult:
+                remote = self.remote(tuple(command))
+                if remote == ("rhubarbe", "pdu", "status", "n300"):
+                    self.commands.append(tuple(command))
+                    return CommandResult(
+                        0,
+                        "pdu2 chain-0@outlet-1 (n300): ON (28W)\n",
+                        "",
+                    )
+                return super().__call__(command, timeout_seconds)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            execute_prepare(
+                plan=plan,
+                run_root=root,
+                runner=runner,
+                sleeper=lambda _: None,
+                reachability_attempts=1,
+            )
+            failing = RadioStatusFailure()
             with self.assertRaises(R2LabResourceError):
                 execute_release(
                     run_id=plan.run_id,
@@ -348,6 +445,47 @@ class R2LabTests(unittest.TestCase):
             )
             self.assertEqual("release-failed", manifest["status"])
             self.assertEqual("held", manifest["resource_claim"])
+            self.assertEqual(["n300"], manifest["cleanup"]["unresolved_resources"])
+
+    def test_unresolved_ue_cleanup_still_attempts_exact_radio_cleanup(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qhat01"
+        )
+        plan = build_plan(run_id="r2lab-test-ue-unknown", selection=selection)
+        setup = FakeRunner()
+
+        class UnknownUeStatus(FakeRunner):
+            def __call__(self, command, timeout_seconds: int) -> CommandResult:
+                remote = self.remote(tuple(command))
+                if remote == ("rhubarbe", "pdu", "status", "qhat01"):
+                    self.commands.append(tuple(command))
+                    return CommandResult(0, "", "")
+                return super().__call__(command, timeout_seconds)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            execute_prepare(
+                plan=plan,
+                run_root=root,
+                runner=setup,
+                sleeper=lambda _: None,
+                reachability_attempts=1,
+            )
+            failing = UnknownUeStatus()
+            with self.assertRaises(R2LabResourceError):
+                execute_release(
+                    run_id=plan.run_id,
+                    slice_name="oulu_user",
+                    run_root=root,
+                    runner=failing,
+                )
+            self.assertIn(("rhubarbe", "pdu", "off", "n300"), failing.remote_commands)
+            self.assertIn(("rhubarbe", "pdu", "status", "n300"), failing.remote_commands)
+            self.assertTrue((root / "active.json").exists())
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(["qhat01"], manifest["cleanup"]["unresolved_resources"])
 
     def test_run_id_is_never_reused(self) -> None:
         selection = R2LabSelection.build(

@@ -1,6 +1,6 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-08-19T03:09:41Z",
+  "resolved_at_utc": "2026-08-22T01:40:00Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/sopnode/5g_ansible.git",
@@ -85,6 +85,14 @@
       "digest": "sha256:89ceaebc6adddb9900b3cae01316fadea8660aeff6ce60e1b335ba0a9d0ff9cd",
       "platform": "linux/amd64",
       "role": "Golden path srsRAN RFSIM gNB",
+      "license": "NOASSERTION"
+    },
+    "srsran_gnb_physical": {
+      "image": "docker.io/r2labuser/srsran-gnb-uhd-csi",
+      "tag": "v1.0.0.21",
+      "digest": "sha256:7c3bd04fca5e241e9e245c52cc5882bb47c522a55c32b5ed1b9a1ed8fc56a7f2",
+      "platform": "linux/amd64",
+      "role": "Physical R2Lab N300 srsRAN gNB",
       "license": "NOASSERTION"
     },
     "srsran_ue": {
