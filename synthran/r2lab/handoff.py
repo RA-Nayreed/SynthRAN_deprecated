@@ -108,7 +108,9 @@ def _checked(
     return result
 
 
-def _parse_existing_deployment(text: str, *, expected_owner: str) -> tuple[bool, int | None]:
+def _parse_existing_deployment(
+    text: str, *, allowed_owners: set[str]
+) -> tuple[bool, int | None]:
     if not text.strip():
         return False, None
     try:
@@ -125,9 +127,9 @@ def _parse_existing_deployment(text: str, *, expected_owner: str) -> tuple[bool,
     desired = spec.get("replicas")
     if not isinstance(labels, dict):
         raise R2LabPhysicalHandoffError("existing physical gNB Deployment ownership is missing")
-    if labels.get(DEPLOYMENT_RUN_LABEL) != expected_owner:
+    if labels.get(DEPLOYMENT_RUN_LABEL) not in allowed_owners:
         raise R2LabPhysicalHandoffError(
-            "existing physical gNB Deployment is not owned by the expected previous run"
+            "existing physical gNB Deployment has an unexpected run owner"
         )
     if not isinstance(desired, int) or isinstance(desired, bool):
         raise R2LabPhysicalHandoffError("existing physical gNB replica state is malformed")
@@ -222,8 +224,10 @@ def execute_physical_namespace_handoff(
             "Open5GS namespace is owned by neither the expected previous run nor the new run"
         )
 
-    expected_deployment_owner = (
-        to_run_id if namespace_owner == to_run_id else from_run_id
+    allowed_deployment_owners = (
+        {from_run_id, to_run_id}
+        if namespace_owner == to_run_id
+        else {from_run_id}
     )
     existing = _checked(
         runner=runner,
@@ -242,7 +246,7 @@ def execute_physical_namespace_handoff(
         label="existing physical gNB Deployment query",
     ).stdout
     deployment_present, desired = _parse_existing_deployment(
-        existing, expected_owner=expected_deployment_owner
+        existing, allowed_owners=allowed_deployment_owners
     )
 
     pod_count = _parse_pod_count(
