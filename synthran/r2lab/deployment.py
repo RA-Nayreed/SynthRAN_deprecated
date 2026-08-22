@@ -259,25 +259,33 @@ class PhysicalSrsranRender:
                 "physical render must expose the pinned-chart remote control port"
             )
         amf = cu_cp["amf"]
+        reviewed = r2lab_oai_aligned_candidate().profile
         if ru_sdr.get("device_driver") != "uhd":
             raise R2LabPhysicalRenderError("physical render must use the UHD radio driver")
         if "rfsim" in json.dumps(self.gnb_config).lower():
             raise R2LabPhysicalRenderError("physical render must not contain RFSIM settings")
-        if cell_cfg.get("band") != 78:
+        if cell_cfg.get("dl_arfcn") != reviewed.carrier.value:
             raise R2LabPhysicalRenderError(
-                "physical render must stay in the reviewed band 78 checkpoint"
+                "physical render carrier does not match the reviewed R2Lab reference"
             )
-        if cell_cfg.get("channel_bandwidth_MHz") != 60:
+        if cell_cfg.get("band") != reviewed.band:
             raise R2LabPhysicalRenderError(
-                "physical render must preserve the reviewed 60 MHz intent"
+                "physical render band does not match the reviewed R2Lab reference"
             )
-        if cell_cfg.get("common_scs") != 30:
+        if cell_cfg.get("channel_bandwidth_MHz") != reviewed.channel_bandwidth_mhz:
             raise R2LabPhysicalRenderError(
-                "physical render must preserve the reviewed 30 kHz SCS"
+                "physical render bandwidth does not match the reviewed R2Lab reference"
             )
-        if cell_cfg.get("nof_antennas_dl") != 2 or cell_cfg.get("nof_antennas_ul") != 2:
+        if cell_cfg.get("common_scs") != reviewed.common_scs_khz:
             raise R2LabPhysicalRenderError(
-                "physical render must preserve the reviewed 2x2 intent"
+                "physical render SCS does not match the reviewed R2Lab reference"
+            )
+        if (
+            cell_cfg.get("nof_antennas_dl") != reviewed.nof_antennas_dl
+            or cell_cfg.get("nof_antennas_ul") != reviewed.nof_antennas_ul
+        ):
+            raise R2LabPhysicalRenderError(
+                "physical render antenna count does not match the reviewed R2Lab reference"
             )
         if "pdcch" in cell_cfg or "prach" in cell_cfg:
             raise R2LabPhysicalRenderError(
@@ -396,6 +404,9 @@ def render_physical_srsran(plan: R2LabPhysicalDeploymentPlan) -> PhysicalSrsranR
             "carrier_semantic": profile.carrier.semantic.value,
             "expected_ssb_arfcn": intent.expected_ssb.value,
             "reference_point_a_arfcn": intent.reference.point_a.value,
+            "reference_carrier_prbs": intent.reference.carrier_prbs,
+            "reference_scs_khz": intent.reference.subcarrier_spacing_khz,
+            "reference_nominal_bandwidth_mhz": profile.channel_bandwidth_mhz,
             "reference_aligned": True,
             "live_accepted": False,
         },
@@ -780,9 +791,22 @@ def validate_physical_helm_render(
     bandwidth = _integer_after(text, "channel_bandwidth_MHz")
     antennas_dl = _integer_after(text, "nof_antennas_dl")
     antennas_ul = _integer_after(text, "nof_antennas_ul")
-    if carrier != 621_984 or bandwidth != 60 or antennas_dl != 2 or antennas_ul != 2:
+    gnb_config = bundle.values.get("gnbConfig")
+    cell_cfg = gnb_config.get("cell_cfg") if isinstance(gnb_config, dict) else None
+    if not isinstance(cell_cfg, dict):
+        raise R2LabPhysicalHelmError("physical chart bundle cell intent is missing")
+    expected_carrier = cell_cfg.get("dl_arfcn")
+    expected_bandwidth = cell_cfg.get("channel_bandwidth_MHz")
+    expected_antennas_dl = cell_cfg.get("nof_antennas_dl")
+    expected_antennas_ul = cell_cfg.get("nof_antennas_ul")
+    if (
+        carrier != expected_carrier
+        or bandwidth != expected_bandwidth
+        or antennas_dl != expected_antennas_dl
+        or antennas_ul != expected_antennas_ul
+    ):
         raise R2LabPhysicalHelmError(
-            "rendered physical radio values do not match the reviewed offline intent"
+            "rendered physical radio values do not match the reviewed chart intent"
         )
     lowered = text.lower()
     if "coreset0_index" in lowered or "prach_config_index" in lowered:
@@ -1226,6 +1250,16 @@ def execute_stopped_physical_staging(
     if render_evidence.replicas != 0 or render_evidence.strategy != "Recreate":
         raise R2LabPhysicalStagingError(
             "physical render evidence is not stopped and singleton-safe"
+        )
+    reviewed = r2lab_oai_aligned_candidate().profile
+    if (
+        render_evidence.carrier_arfcn != reviewed.carrier.value
+        or render_evidence.channel_bandwidth_mhz != reviewed.channel_bandwidth_mhz
+        or render_evidence.antennas_dl != reviewed.nof_antennas_dl
+        or render_evidence.antennas_ul != reviewed.nof_antennas_ul
+    ):
+        raise R2LabPhysicalStagingError(
+            "physical render evidence does not match the reviewed R2Lab radio reference"
         )
     if timeout_seconds < 30 or timeout_seconds > 600:
         raise R2LabPhysicalStagingError(
