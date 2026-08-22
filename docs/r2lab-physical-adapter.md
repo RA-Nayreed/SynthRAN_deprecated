@@ -1,6 +1,6 @@
 # R2Lab physical adapter implementation record
 
-This document records the physical network/chart work that followed `r2lab-smoke-002`: what was inspected, how each issue was discovered, and how the result is encoded in the consolidated R2Lab package.
+This document records the physical network/chart work that followed `r2lab-smoke-002`: what was inspected, how each issue was discovered, how smoke 003 corrected one earlier RF interpretation, and how the result is encoded in the consolidated R2Lab package.
 
 The live chronology is in `docs/r2lab-smoke-002.md`. The broader implementation chronology is in `docs/r2lab-smoke-002-development-log.md`. Package structure is documented in `docs/r2lab-code-architecture.md`.
 
@@ -10,7 +10,7 @@ The accepted `synthran.fiveg_ansible` adapter remains RFSIM-only. Physical suppo
 
 The physical backend has different invariants: UHD/N300 instead of ZMQ/RFSIM, one physical SDR owner at a time, a COTS qfit modem instead of srsUE, explicit carrier/SSB/Point-A semantics, exact provider-state evidence, a dedicated physical image digest, and a chart Deployment that must be staged stopped and started without overlapping owners.
 
-Those behaviors now live together in `synthran/r2lab/deployment.py`, with provider semantics in `provider.py` and radio/UE semantics in `radio.py`.
+Those behaviors live together in `synthran/r2lab/deployment.py`, with provider semantics in `provider.py` and radio/UE semantics in `radio.py`.
 
 ## Exact pinned sources reviewed
 
@@ -24,9 +24,7 @@ srsran_helm
 8dfb9890d127734cdcd6eee9df8c5d09b1a8076a
 ```
 
-### How this was discovered
-
-During smoke-002 we had already proven that the generic virtual deployment path could not simply be reused for N300. After the run, the exact commits recorded in `dependencies.lock.yml` were opened and the N300 values, Deployment template, and physical retry tasks were inspected directly. This made the differences between the accepted RFSIM path and the physical path concrete instead of inferred.
+The R2Lab OAI radio reference was also checked against the repository source `sopnode/oai5g-rru`, specifically `ran-config/conf/gnb.band78.sa.fr1.106PRB.2x2.usrpn310.conf`.
 
 ## Discovery: the pinned chart matches useful N300 topology, but is not safe enough by itself
 
@@ -39,27 +37,15 @@ The pinned srsRAN chart established useful structure:
 - the RAN node is selected explicitly;
 - the chart exposes the remote-control port through `gnbConfig.remote_control`.
 
-### How it was discovered
+The canonical render in `synthran/r2lab/deployment.py` follows the chart's real `cu_cp.amf` structure. SynthRAN review metadata is kept outside the final `gnbConfig` so it cannot become an unknown srsRAN key.
 
-The exact pinned values file and chart templates were read side by side with the configuration that had actually worked during smoke-002.
-
-### Implementation consequence
-
-The canonical render in `synthran/r2lab/deployment.py` was changed to the chart's real `cu_cp.amf` structure. SynthRAN review metadata is kept outside the final `gnbConfig` so it cannot become an unknown srsRAN key.
-
-The same upstream values also contain CORESET/PRACH settings explicitly described as matching srsUE capabilities. They are deliberately absent from the qfit/COTS candidate.
+The same upstream values also contain CORESET/PRACH settings explicitly described as matching srsUE capabilities. They are deliberately absent from the qfit/COTS candidate until independently reviewed for the COTS UE path.
 
 ## Discovery: normal Deployment replacement can create two physical gNB owners
 
 During the live run, a normal Kubernetes replacement briefly left a terminating gNB while a replacement pod attempted to start. Both competed for one N300 UHD device.
 
-The pinned Deployment template was then inspected and found to contain a hard-coded:
-
-```text
-replicas: 1
-```
-
-with no explicit non-overlapping replacement strategy.
+The pinned Deployment template was then inspected and found to contain a hard-coded `replicas: 1` with no explicit non-overlapping replacement strategy.
 
 ### Implementation consequence
 
@@ -82,13 +68,9 @@ The guarded chart overlay also makes replica count values-driven and installs `R
 
 The exact Deployment template renders `repository:tag`. Smoke-002, however, had exercised a specific UHD image digest.
 
-### How it was discovered
-
-The live pod image was captured during the run, then compared with the exact pinned Deployment template and `dependencies.lock.yml`.
-
 ### Implementation consequence
 
-The lock now contains separate virtual and physical srsRAN gNB entries. The virtual RFSIM lock is unchanged. `srsran_gnb_physical` records the reviewed UHD/N300 image and digest.
+The lock contains separate virtual and physical srsRAN gNB entries. The virtual RFSIM lock is unchanged. `srsran_gnb_physical` records the reviewed UHD/N300 image and digest.
 
 The guarded chart overlay changes the reviewed image expression to:
 
@@ -108,62 +90,61 @@ The physical values disable that sidecar. Offline render validation rejects a re
 
 ## Discovery: the upstream N300 retry path has incompatible ownership semantics
 
-The exact pinned `fiveg_ansible` physical tasks were inspected. For N300/N320 the upstream path can:
+The exact pinned `fiveg_ansible` physical tasks were inspected. For N300/N320 the upstream path can uninstall/retry the release, inspect the first returned pod, and swap paired radio IP addresses after failure.
 
-- uninstall the existing `srsran-gnb` release;
-- retry deployment;
-- inspect the first returned pod when deciding readiness;
-- swap paired radio IP addresses after failure;
-- remove the failed release before another attempt.
+Those behaviors are reasonable for a human recovery playbook, but not for SynthRAN's research-evidence contract. Automatic IP swapping changes the tested hardware binding, and selecting the first pod is unsafe during replacement.
 
-### Why this matters
+SynthRAN therefore consumes the pinned chart contract through its reviewed overlay and singleton lifecycle rather than using that retry behavior as the production ownership model.
 
-Those behaviors are reasonable for a human-oriented recovery playbook, but not for SynthRAN's research-evidence contract. Automatic IP swapping changes the tested hardware binding, and selecting the first pod is unsafe during replacement.
+## RF reference correction: smoke 003 supersedes the initial smoke-002 interpretation
 
-### Implementation consequence
+After smoke-002, the OAI SSB and Point-A fields were correctly recognized as distinct semantics, but the PR initially transcribed the carrier width incorrectly as 162 PRBs. That produced a derived 60 MHz candidate with carrier-center ARFCN 621984.
 
-SynthRAN does not call that N300 retry role as its production lifecycle. The physical deployment subsystem consumes the pinned chart contract directly through the reviewed overlay and singleton lifecycle.
+Smoke 003 showed that this candidate was internally streamable to the N300 but did not produce a cell visible to qfit07. A direct re-check of the actual R2Lab OAI N310 source then found the transcription error.
 
-## Discovery: SSB ARFCN is not the carrier-center ARFCN
-
-After smoke-002, the R2Lab OAI reference was inspected more carefully. It records separate values for:
-
-- SSB ARFCN `621312`;
-- Point-A ARFCN `620040`;
-- 162 PRBs at 30 kHz SCS;
-- two TX and two RX paths.
-
-The final smoke-002 test had reused `621312` as the srsRAN `dl_arfcn`. That was not a faithful translation because `dl_arfcn` is the carrier center in this configuration.
-
-### Derivation
+The reviewed source records:
 
 ```text
-162 PRB x 12 subcarriers x 30 kHz = 58.32 MHz occupied grid
-half grid = 29.16 MHz
-29.16 MHz / 15 kHz FR1 ARFCN raster = 1944 steps
-620040 + 1944 = carrier-center ARFCN 621984
+absoluteFrequencySSB       621312
+dl_absoluteFrequencyPointA 620040
+dl_carrierBandwidth        106 PRBs
+subcarrier spacing         30 kHz
+TX/RX paths                2x2
 ```
 
-### Implementation consequence
+### Correct derivation
 
-`synthran/r2lab/radio.py` models carrier center, SSB, and Point A as different semantics. The reviewed offline candidate is:
+```text
+106 PRB x 12 subcarriers x 30 kHz = 38.16 MHz occupied grid
+half grid = 19.08 MHz
+19.08 MHz / 15 kHz FR1 ARFCN raster = 1272 steps
+620040 + 1272 = carrier-center ARFCN 621312
+```
+
+The corrected reviewed offline candidate is therefore:
 
 ```text
 band 78
-carrier-center ARFCN 621984 (~3329.76 MHz)
+carrier-center ARFCN 621312 (~3319.68 MHz)
 expected SSB ARFCN 621312
-nominal bandwidth 60 MHz
+nominal bandwidth 40 MHz
 common SCS 30 kHz
 2x2 antennas
 ```
 
-The candidate remains offline-only until a COTS UE acquires the rendered cell in a controlled follow-up run.
+Carrier-center and SSB remain different semantic types even though this source happens to place both at the same numeric ARFCN.
+
+### Implementation consequence
+
+`synthran/r2lab/radio.py` now stores `106` PRBs for the reviewed R2Lab OAI reference. The old `162/60/621984` candidate is retained only in a negative regression demonstrating that the stale smoke-003 profile is rejected.
+
+`PhysicalSrsranRender.validate()` derives its expected radio values from the reviewed candidate. `validate_physical_helm_render()` compares the rendered text against the validated chart intent rather than a second hard-coded radio tuple. `execute_stopped_physical_staging()` independently rejects render evidence whose carrier, bandwidth, or antenna counts do not match the reviewed R2Lab candidate before any cluster write.
+
+This corrected candidate remains offline-only until a follow-up physical run proves COTS UE cell acquisition.
 
 ## One coherent deployment subsystem
 
-The first implementation pass split the physical pipeline across plan/render/chart/workspace/Helm/artifact/staging/lifecycle modules. That made individual units isolated but made the complete operation unnecessarily hard to follow.
-
-After architecture review, those responsibilities were consolidated into `synthran/r2lab/deployment.py` as one subsystem. The internal boundaries are still explicit through dataclasses and functions, but the developer can now follow the physical path in one module:
+The first implementation pass split the physical pipeline across plan/render/chart/workspace/Helm/artifact/staging/lifecycle modules. After architecture review, those responsibilities were consolidated into `synthran/r2lab/deployment.py` as one subsystem.
 
 ```text
 reviewed radio intent
@@ -178,8 +159,6 @@ reviewed radio intent
   -> singleton start lifecycle
 ```
 
-This structural correction is described in `docs/r2lab-code-architecture.md`.
-
 ## Offline Helm render gate
 
 Before Kubernetes is contacted, the deployment subsystem verifies the locally locked Helm version, runs only `helm template`, and rejects the output unless it proves:
@@ -187,8 +166,7 @@ Before Kubernetes is contacted, the deployment subsystem verifies the locally lo
 - exactly the digest-locked physical gNB image;
 - zero replicas;
 - `Recreate`;
-- carrier ARFCN `621984`;
-- 60 MHz bandwidth;
+- the carrier ARFCN and nominal bandwidth derived from the reviewed R2Lab candidate (`621312`, 40 MHz at the current checkpoint);
 - 2 downlink and 2 uplink antenna paths;
 - no inherited srsUE-specific CORESET/PRACH override;
 - no optional mutable log sidecar;
@@ -196,10 +174,15 @@ Before Kubernetes is contacted, the deployment subsystem verifies the locally lo
 
 Successful validation returns a SHA-256 render hash. It is still offline evidence, not live acceptance.
 
+A dedicated regression also feeds the stale smoke-003 `621984 / 60 MHz` values into Helm validation and requires rejection.
+
 ## Stopped-only cluster staging
 
-The staging boundary can transfer and install only the already-reviewed artifact while keeping the gNB stopped. Before Helm staging it requires:
+The staging boundary can transfer and install only the already-reviewed artifact while keeping the gNB stopped. Before any remote mutation it now also checks that the render evidence matches the current reviewed radio candidate.
 
+Before Helm staging it requires:
+
+- reviewed carrier/bandwidth/antenna evidence;
 - fresh SLICES reservation authority;
 - matching f2/f3 allocation ownership;
 - strict known-host SSH;
@@ -213,11 +196,19 @@ After staging it again requires desired replicas `0` and pod count `0`.
 
 This operation does not power the N300, does not touch qfit, and does not claim physical acceptance.
 
+A smoke-gate regression verifies that stale smoke-003 render evidence is rejected with zero provider/cluster commands issued.
+
+## Smoke-003 transport evidence
+
+Smoke 003 proved that the stale RF candidate was nevertheless being delivered to the N300 rather than getting stuck in the UHD transport path. Over a three-second observation window, the gNB pod's `ru1` interface increased by roughly 1.51 GB TX and 1.52 GB RX.
+
+That result narrowed the failure from generic radio transport to the transmitted cell/profile itself. It is the reason the source reference was re-audited instead of treating the N300 link as failed.
+
 ## qfit runtime evidence
 
-Smoke-002 showed that “UE works” cannot be one boolean. Cell visibility, registration, packet-service attachment, address assignment, and user-plane traffic are different stages.
+Cell visibility, registration, packet-service attachment, address assignment, and user-plane traffic are different acceptance stages.
 
-`synthran/r2lab/radio.py` therefore classifies already-collected qfit evidence into conservative states for:
+`synthran/r2lab/radio.py` classifies already-collected qfit evidence into conservative states for:
 
 - NR-SA cell acquisition / no service / other service / unknown;
 - registration / searching / not registered / unknown;
@@ -225,6 +216,8 @@ Smoke-002 showed that “UE works” cannot be one boolean. Cell visibility, reg
 - IPv4 present / absent / unknown.
 
 Packet attachment plus IPv4 can become PDU-session evidence only after cell acquisition and registration. User-plane acceptance still requires a separate traffic probe.
+
+Smoke 003 also showed that provider power plus ping reachability is not enough to declare a qfit/FIT UE management-ready. The live path required FIT OS provisioning, strict SSH trust, external USB power, and RM500Q enumeration before modem probes were meaningful. Destructive image loading must remain an explicit operator-approved lifecycle stage rather than being silently folded into ordinary resource preparation.
 
 ## Ordered physical acceptance
 
@@ -244,26 +237,30 @@ resource authority
   -> workload
 ```
 
-A stage cannot be skipped. A failed stage blocks later acceptance, which preserves the actual smoke-002 truth: lower-layer bring-up succeeded, cell acquisition failed, and later stages were not reached.
+A stage cannot be skipped. A failed stage blocks later acceptance. In smoke 003 the modem reported `No Service` with software radio ON, so cell acquisition failed and packet attach/PDU mutation was not attempted.
 
-## CI discoveries during implementation
+## CI and automation implications
 
-Two earlier CI failures were useful quality signals rather than physical-network failures.
+The PR already contains deterministic coverage for resource preparation, stopped staging, and authorized singleton gNB start. The new RF regressions make the source-of-truth part of that automation boundary: a stale 60 MHz render cannot be staged simply because it is syntactically valid Helm output.
 
-A qfit parser variable with a credential-like name triggered the tracked-source privacy scanner even though it contained only provider status text. The variable was renamed; the scanner was not weakened.
+The remaining orchestration work is to compose the live stages into a single fail-closed smoke workflow while retaining the existing safety rules:
 
-A later foundation text-policy check rejected a literal Kubernetes runtime-state field name. The parser still reads the real JSON field, but constructs that field name from neutral fragments so the product source remains within repository text policy. Another render fixture accidentally contained the virtual backend name in its run ID; the fixture was renamed so the test inspected rendered configuration rather than its own label.
+```text
+external lease
+  -> exact resource authority
+  -> FIT/qfit readiness and explicit provisioning approval
+  -> strict host trust + modem enumeration
+  -> reviewed RF render/staging
+  -> singleton gNB start
+  -> Open5GS/N2
+  -> modem initialization + software radio on
+  -> cell acquisition
+       fail => persist and stop
+  -> registration
+  -> PDU activation
+  -> user plane
+  -> physical workload
+  -> exact cleanup
+```
 
-The full workflow returned green after those corrections before the chart/staging work continued.
-
-## Current boundary
-
-The physical backend now has a reviewed offline chain and a stopped-only staging boundary. Remaining live work is narrower:
-
-- add dedicated fake-runner regression coverage for stopped staging;
-- persist artifact/render/staging hashes into run evidence;
-- bind singleton start to fresh N300 authority/claim and the exact staged artifact;
-- collect sanitized qfit cell/registration/PDU evidence;
-- add an independently verified user-plane probe;
-- connect all observations to the ordered acceptance record;
-- run another controlled physical acceptance attempt only after those gates are green.
+Automatic R2Lab booking remains prohibited. PRACH/TDD parity with the OAI source is a separate review item and must not be changed ad hoc as part of the carrier/bandwidth correction.
