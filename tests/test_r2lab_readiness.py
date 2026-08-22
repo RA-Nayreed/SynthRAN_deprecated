@@ -11,6 +11,9 @@ from synthran.r2lab.readiness import (
 )
 
 
+KNOWN_HOSTS = "/srv/synthran-test/fit07_known_hosts"
+
+
 class ScriptedRunner:
     def __init__(self, script: list[object]) -> None:
         self.script = list(script)
@@ -29,13 +32,13 @@ class R2LabQfitReadinessTests(unittest.TestCase):
     def test_command_set_is_strict_read_only_and_bound_to_fit_node(self) -> None:
         commands = qfit_readiness_commands(
             qfit="qfit07",
-            remote_known_hosts="/home/oulu_user/.synthran/run/fit07_known_hosts",
+            remote_known_hosts=KNOWN_HOSTS,
         )
         rendered = "\n".join(shlex.join(command) for command in commands)
         self.assertIn("http://reboot07/usrpstatus", rendered)
         self.assertIn("root@fit07", rendered)
         self.assertIn("StrictHostKeyChecking=yes", rendered)
-        self.assertIn("UserKnownHostsFile=/home/oulu_user/.synthran/run/fit07_known_hosts", rendered)
+        self.assertIn(f"UserKnownHostsFile={KNOWN_HOSTS}", rendered)
         self.assertIn("/dev/ttyUSB2", rendered)
         self.assertIn("/dev/cdc-wdm0", rendered)
         self.assertIn("wwan0", rendered)
@@ -60,7 +63,7 @@ class R2LabQfitReadinessTests(unittest.TestCase):
         )
         evidence = execute_qfit_readiness(
             qfit="qfit07",
-            remote_known_hosts="/home/oulu_user/.synthran/run/fit07_known_hosts",
+            remote_known_hosts=KNOWN_HOSTS,
             runner=runner,
         )
         self.assertTrue(evidence.ready)
@@ -80,7 +83,7 @@ class R2LabQfitReadinessTests(unittest.TestCase):
         )
         evidence = execute_qfit_readiness(
             qfit="qfit07",
-            remote_known_hosts="/home/oulu_user/.synthran/run/fit07_known_hosts",
+            remote_known_hosts=KNOWN_HOSTS,
             runner=runner,
         )
         self.assertFalse(evidence.ready)
@@ -101,7 +104,7 @@ class R2LabQfitReadinessTests(unittest.TestCase):
         )
         evidence = execute_qfit_readiness(
             qfit="qfit07",
-            remote_known_hosts="/home/oulu_user/.synthran/run/fit07_known_hosts",
+            remote_known_hosts=KNOWN_HOSTS,
             runner=runner,
         )
         self.assertFalse(evidence.ready)
