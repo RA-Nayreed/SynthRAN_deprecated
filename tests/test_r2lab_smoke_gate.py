@@ -398,8 +398,8 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             replicas=0,
             strategy="Recreate",
             image_reference="example.invalid/gnb:v1@sha256:" + "b" * 64,
-            carrier_arfcn=621_984,
-            channel_bandwidth_mhz=60,
+            carrier_arfcn=621_312,
+            channel_bandwidth_mhz=40,
             antennas_dl=2,
             antennas_ul=2,
         )
@@ -498,6 +498,40 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             if command[:3] == ("pos", "allocations", "show")
         ]
         self.assertEqual(4, len(allocation_queries))
+
+    def test_staging_rejects_stale_smoke003_render_before_any_cluster_write(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = self.make_artifact(root)
+            known_hosts = root / "known_hosts"
+            known_hosts.write_text("sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8")
+            runner = self.make_runner(artifact)
+            stale = PhysicalHelmRenderEvidence(
+                sha256="c" * 64,
+                replicas=0,
+                strategy="Recreate",
+                image_reference=self.render.image_reference,
+                carrier_arfcn=621_984,
+                channel_bandwidth_mhz=60,
+                antennas_dl=2,
+                antennas_ul=2,
+            )
+
+            with self.assertRaisesRegex(R2LabPhysicalStagingError, "reviewed R2Lab radio reference"):
+                execute_stopped_physical_staging(
+                    lock=self.lock,
+                    artifact=artifact,
+                    render_evidence=stale,
+                    run_id=self.run_id,
+                    owner=self.owner,
+                    reservation_id=self.reservation_id,
+                    allocation_id=self.allocation_id,
+                    known_hosts=known_hosts,
+                    now=self.now,
+                    runner=runner,
+                )
+
+        self.assertEqual([], runner.commands)
 
     def test_staging_refuses_changed_allocation_before_any_cluster_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
