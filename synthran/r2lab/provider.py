@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import re
+import time
 from typing import Callable, Iterable, Sequence
 
 from synthran.live_preflight import CommandResult
@@ -111,6 +112,7 @@ def evaluate_pdu_transition(
 
 
 RemoteRunner = Callable[[Sequence[str], int], CommandResult]
+Sleeper = Callable[[float], None]
 
 
 @dataclass(frozen=True)
@@ -271,11 +273,26 @@ def execute_verified_qfit_transition(
     requested_state: PowerState,
     runner: RemoteRunner,
     timeout_seconds: int,
+    sleeper: Sleeper = time.sleep,
+    status_attempts: int = 60,
+    status_delay_seconds: float = 2.0,
 ) -> VerifiedQfitOperation:
-    """Mutate one qfit and verify its exact R2Lab reboot-node state."""
+    """Mutate one qfit and verify its exact R2Lab reboot-node state.
+
+    ``qfit off`` is asynchronous on the live provider. A successful mutation can
+    therefore still be followed by a truthful ``rebootNN:on`` observation while
+    the FIT host is shutting down. For OFF transitions only, keep observing that
+    exact reboot node for a bounded interval. Unknown/transport-error observations
+    remain unresolved instead of being converted into success.
+    """
 
     if requested_state is PowerState.UNKNOWN:
         raise ValueError("UNKNOWN cannot be requested as a qfit target state")
+    if status_attempts < 1 or status_attempts > 60:
+        raise ValueError("qfit status attempts must be between 1 and 60")
+    if status_delay_seconds < 0:
+        raise ValueError("qfit status delay must not be negative")
+
     node = qfit_node_number(qfit)
     action = "on" if requested_state is PowerState.ON else "off"
 
@@ -289,21 +306,39 @@ def execute_verified_qfit_transition(
         mutation_returncode = mutation.returncode
 
     status_returncode: int | None = None
-    status_stdout = ""
-    status_stderr = ""
     status_transport_error = False
-    try:
-        status = runner(("rhubarbe", "status", str(node)), timeout_seconds)
-    except (RuntimeError, OSError):
-        status_transport_error = True
-    else:
-        status_returncode = status.returncode
-        status_stdout = status.stdout
-        status_stderr = status.stderr
+    observation = QfitStatusObservation(qfit=qfit.strip().lower(), node=node, state=PowerState.UNKNOWN)
 
-    observation = parse_qfit_status(
-        "\n".join(part for part in (status_stdout, status_stderr) if part), qfit=qfit
-    )
+    for attempt in range(1, status_attempts + 1):
+        status_stdout = ""
+        status_stderr = ""
+        try:
+            status = runner(("rhubarbe", "status", str(node)), timeout_seconds)
+        except (RuntimeError, OSError):
+            status_transport_error = True
+            break
+        else:
+            status_returncode = status.returncode
+            status_stdout = status.stdout
+            status_stderr = status.stderr
+
+        observation = parse_qfit_status(
+            "\n".join(part for part in (status_stdout, status_stderr) if part), qfit=qfit
+        )
+        if observation.state is requested_state:
+            break
+
+        # The live qfit shutdown path is asynchronous. Poll only while an OFF
+        # request is still explicitly observed as ON; UNKNOWN remains unresolved,
+        # and ON requests keep their existing one-observation semantics.
+        if not (
+            requested_state is PowerState.OFF
+            and observation.state is PowerState.ON
+            and attempt < status_attempts
+        ):
+            break
+        sleeper(status_delay_seconds)
+
     return VerifiedQfitOperation(
         qfit=observation.qfit,
         requested_state=requested_state,
