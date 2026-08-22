@@ -15,6 +15,8 @@ from synthran.r2lab.deployment import (
     GNB_NAMESPACE,
     GNB_SELECTOR,
     N300_DEVICE_ARGS_PLACEHOLDER,
+    PHYSICAL_GNB_CPU_COUNT,
+    PHYSICAL_GNB_MEMORY,
     PINNED_SRSRAN_HELM_COMMIT,
     VALUES_FILE_NAME,
     PhysicalChartBindings,
@@ -426,6 +428,13 @@ spec:
       containers:
         - name: gnb
           image: {self.expected_image}
+          resources:
+            requests:
+              memory: \"{PHYSICAL_GNB_MEMORY}\"
+              cpu: \"{PHYSICAL_GNB_CPU_COUNT}\"
+            limits:
+              memory: \"{PHYSICAL_GNB_MEMORY}\"
+              cpu: \"{PHYSICAL_GNB_CPU_COUNT}\"
 """
 
     def test_valid_render_is_evidence_but_not_live_acceptance(self) -> None:
