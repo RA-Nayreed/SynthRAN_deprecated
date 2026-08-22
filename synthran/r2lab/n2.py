@@ -59,7 +59,7 @@ def parse_amf_n2_acceptance(text: str, *, expected_peer: str) -> bool:
 
     peer = _expected_peer(expected_peer)
     pattern = re.compile(
-        rf"\bgNB-N2\s+accepted\[{re.escape(peer)}\](?::\d+)?\b",
+        rf"\bgNB-N2\s+accepted\[{re.escape(peer)}\](?::\d+)?(?=$|\s)",
         re.IGNORECASE,
     )
     for line in text.splitlines():
