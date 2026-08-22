@@ -222,7 +222,7 @@ class RuntimeClusterRunner:
                                 {
                                     "metadata": {"name": "open5gs-amf-current"},
                                     "status": {
-                                        "phase": "Running",
+                                        POD_RUNTIME_STATE_KEY: "Running",
                                         "containerStatuses": [
                                             {"name": "amf", "ready": True}
                                         ],
