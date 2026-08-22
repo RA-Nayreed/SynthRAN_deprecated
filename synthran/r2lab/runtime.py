@@ -31,6 +31,7 @@ from synthran.r2lab.deployment import (
     GNB_DEPLOYMENT,
     GNB_NAMESPACE,
     GNB_SELECTOR,
+    POD_RUNTIME_STATE_KEY,
     PhysicalStartAuthority,
     parse_gnb_pods_json,
 )
@@ -92,10 +93,10 @@ class GnbN2Evidence:
     pod_count: int | None
     ready_running_count: int | None
     n2_state: N2State
-    n2_source: str
-    peer_fingerprint: str | None
     log_observed: bool
     transport_error: bool
+    n2_source: str = "gnb-log"
+    peer_fingerprint: str | None = None
 
     @property
     def singleton_ready(self) -> bool:
@@ -327,7 +328,7 @@ def _one_ready_pod_name(text: str) -> str | None:
     name = metadata.get("name")
     if not isinstance(name, str) or not _SAFE_POD_RE.fullmatch(name):
         return None
-    if status.get("phase") != "Running":
+    if status.get(POD_RUNTIME_STATE_KEY) != "Running":
         return None
     statuses = status.get("containerStatuses")
     if not isinstance(statuses, list) or not statuses:
