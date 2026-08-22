@@ -29,23 +29,39 @@ The accepted virtual Open5GS + srsRAN + srsUE + RFSIM path remains unchanged.
 - managed qfit07 reachability and modem preparation;
 - exact qfit, gNB, N300, core, and namespace cleanup.
 
-It did **not** establish:
+It did **not** establish UE cell acquisition, registration, PDU session, user plane, or the physical research workload. Post-run inspection also showed that the final smoke-002 frequency test had reused an OAI SSB ARFCN as an srsRAN carrier-center ARFCN, so smoke 002 was not evidence that the R2Lab RF path itself was defective.
 
-- UE cell acquisition;
-- 5G registration;
-- PDU session;
-- UE user plane;
-- the full SynthRAN physical workload.
+`r2lab-smoke-003` progressed further and established:
 
-The qfit modem remained in searching/no-service state and the active scans returned no cells for the three configurations transmitted during that run. Post-run inspection also showed that the final test had reused an OAI SSB ARFCN as an srsRAN carrier-center ARFCN, so smoke 002 is not evidence that the R2Lab RF path itself is defective.
+- active R2Lab lease and exact resource authority;
+- SLICES/POS foundation and Kubernetes;
+- Open5GS;
+- immutable stopped physical staging;
+- one N300-backed srsRAN gNB with no overlapping owner;
+- gNB-to-AMF N2/SCTP, proven from AMF-side evidence;
+- fit07 provisioning with the reviewed `mbim-quectel` image;
+- strict fit07 SSH;
+- external USB power and RM500Q-GL enumeration;
+- SIM readiness and AT transport;
+- Quectel MBIM initialization and software-radio enable;
+- active UHD/IQ transport between the gNB pod and the N300.
 
-No later code work has changed that live truth. The new physical boundaries are regression-tested but are not live accepted yet.
+The `ru1` counters increased by about 1.51 GB TX and 1.52 GB RX over three seconds, so the N300 transport was not stalled.
+
+With the modem software radio proven ON, qfit07 reported:
+
+```text
++QNWINFO: No Service
++C5GREG: 0,0
+```
+
+Cell acquisition therefore failed and the acceptance ladder correctly blocked registration, PDU session, user plane, and workload.
+
+Smoke 003 then exposed an offline source-of-truth error in the branch: the OAI reference had been transcribed as 162 PRBs even though the actual reviewed R2Lab N310 source uses 106 PRBs.
 
 ## Package architecture
 
-The first implementation pass over-applied one-concern-per-file decomposition and produced 18 flat `r2lab_*` implementation modules under `synthran/network/`. That structure has been corrected.
-
-The implementation now lives in one cohesive package:
+The implementation lives in one cohesive package:
 
 ```text
 synthran/r2lab/
@@ -67,7 +83,7 @@ The architecture and the reason for the consolidation are recorded in `docs/r2la
 
 ### Provider state
 
-Exact provider observation is the state truth. The live N300 cleanup demonstrated that `rhubarbe pdu off n300` can return status 1 while the provider reports `OFF`. Mutation and status return codes are therefore diagnostic evidence; the exact selected-resource state decides whether a transition is accepted.
+Exact provider observation is the state truth. Mutation and status return codes are diagnostic evidence; the exact selected-resource state decides whether a transition is accepted.
 
 A mutation timeout does not imply no mutation. The controller still issues the exact provider-state query after a mutation transport failure. Missing or contradictory evidence remains unknown.
 
@@ -94,27 +110,49 @@ scale exact gNB deployment to zero
 
 Ambiguous startup or overlapping pods requests exact scale-to-zero recovery and fails closed.
 
-### Radio semantics
+### Radio semantics and corrected R2Lab source
 
-The reviewed R2Lab OAI reference distinguishes:
+The reviewed R2Lab OAI N310 source `gnb.band78.sa.fr1.106PRB.2x2.usrpn310.conf` records:
 
-- SSB ARFCN 621312;
-- Point-A ARFCN 620040;
-- 162 PRBs at 30 kHz SCS;
+- SSB ARFCN `621312`;
+- Point-A ARFCN `620040`;
+- `106` PRBs at `30 kHz` SCS;
 - 2 TX and 2 RX paths.
 
-The offline reference-aligned srsRAN candidate derives carrier-center ARFCN 621984 (~3329.76 MHz), nominal 60 MHz, 30 kHz SCS, and 2x2 antennas. SSB, Point A, and carrier-center ARFCNs are typed separately so they cannot be silently substituted for one another.
+The occupied resource grid is:
 
-This candidate is not live accepted.
+```text
+106 PRB x 12 subcarriers x 30 kHz = 38.16 MHz
+half grid = 19.08 MHz
+19.08 MHz / 15 kHz FR1 raster = 1272 steps
+620040 + 1272 = carrier-center ARFCN 621312
+```
+
+The corrected offline candidate is therefore:
+
+```text
+band 78
+carrier-center ARFCN 621312 (~3319.68 MHz)
+expected SSB ARFCN 621312
+nominal bandwidth 40 MHz
+common SCS 30 kHz
+2x2 antennas
+```
+
+Carrier-center, SSB, and Point-A remain distinct typed semantics even though the corrected carrier-center and SSB happen to have the same numeric ARFCN.
+
+The previous `162 PRB / 60 MHz / carrier 621984` candidate was a transcription error discovered by smoke 003 and is now explicitly rejected by regression/staging gates.
+
+This corrected candidate is still not live accepted until a new immutable physical run proves cell acquisition.
 
 ## Physical deployment boundary
 
 The physical backend is separate from the accepted RFSIM `fiveg_ansible` adapter.
 
-The R2Lab deployment subsystem now provides:
+The R2Lab deployment subsystem provides:
 
 - a narrow Open5GS/f2 + srsRAN/f3 + N300 deployment plan;
-- canonical physical srsRAN values;
+- canonical physical srsRAN values derived from the reviewed reference;
 - a dedicated digest lock for the UHD gNB image;
 - a guarded overlay for the exact pinned srsRAN Helm chart;
 - values-driven zero replicas and `Recreate` strategy;
@@ -127,11 +165,13 @@ The R2Lab deployment subsystem now provides:
 - fresh R2Lab claim/lease/N300 binding at start;
 - immutable staged/start artifact hashes.
 
+The render validator now derives its expected carrier/bandwidth/antenna values from `r2lab_oai_aligned_candidate()` rather than hard-coding a second set of radio numbers. Helm validation compares rendered values with the reviewed chart intent. Staging independently rejects render evidence that does not match the reviewed R2Lab profile before any cluster write.
+
 The stopped staging operation is intentionally not a radio start. It requires fresh reservation/allocation authority, strict known-host SSH, a run-owned namespace, matching artifact hashes, the locked Helm version, zero desired replicas, and zero gNB pods. It stages only the reviewed artifact at `replicas=0`.
 
 ## Read-only physical runtime boundary
 
-`synthran/r2lab/runtime.py` now provides the live observation path after the gNB starts:
+`synthran/r2lab/runtime.py` provides the live observation path after the gNB starts:
 
 - current run/artifact-bound gNB/N2 proof;
 - current qfit management proof;
@@ -143,9 +183,11 @@ The stopped staging operation is intentionally not a radio start. It requires fr
 
 The runtime verifier does not mutate modem, radio power, Helm, or Kubernetes state.
 
+One smoke-003 gap remains: gNB-side log parsing did not prove N2 even though the AMF showed the exact gNB N2 peer accepted. The composed smoke automation should accept sanitized AMF-side evidence bound to the expected gNB N2 address instead of producing that false negative.
+
 ## Controlled qfit activation boundary
 
-`synthran/r2lab/ue.py` now owns the mutating COTS-UE/session path.
+`synthran/r2lab/ue.py` owns the mutating COTS-UE/session path.
 
 The current activation contract is intentionally narrow:
 
@@ -157,48 +199,19 @@ session   0
 IP type   ipv4
 ```
 
-The upstream `prepare-ue`, `config-ue`, `check-ue`, `start.sh`, and `stop.sh` wrappers were inspected before implementing this boundary. SynthRAN does not call them directly during acceptance because they combine broader modem preparation, subscriber inspection, reset, attach, or cleanup behavior.
-
-The activation sequence is explicit:
-
-```text
-fresh run/N300 authority
-  -> current singleton gNB/N2
-  -> qfit management
-  -> cell acquisition
-  -> registration
-  -> wwan0 up
-  -> software radio on + state proof
-  -> packet attach + state proof
-  -> MBIM session 0 using DNN internet
-  -> IP setup
-  -> attached + IPv4 postcondition proof
-```
+The activation sequence is gated by current authority and observations. Packet attach/PDU mutation must not occur until cell acquisition and registration are proven.
 
 A non-zero mutation return code is diagnostic. The independently observed state decides whether a transition succeeded.
 
-On unresolved activation failure the exact rollback is software-radio off plus `wwan0` down. Cleanup is accepted only when radio-off, packet-detached, and no-IPv4 observations are all proven. Otherwise activation evidence remains `failed-unresolved`.
+On unresolved activation failure the exact rollback is software-radio off plus `wwan0` down. Cleanup is accepted only when radio-off, packet-detached, and no-IPv4 observations are all proven. Otherwise activation evidence remains unresolved.
 
-The active orchestrator intentionally does not mark a detached registered UE as a failed PDU session before attach has actually been attempted.
+Smoke 003 also showed that basic qfit power/reachability is not sufficient preparation evidence for a COTS modem. A complete physical smoke workflow must separately prove the FIT host is booted, strict SSH is established, external USB power is on, and the RM500Q devices are enumerated. Destructive FIT image loading must remain an explicit operator-approved stage rather than being hidden inside ordinary `prepare`.
 
 ## Physical user-plane and workload handoff
 
-After PDU acceptance, the new user-plane entry point refreshes R2Lab authority, singleton gNB/N2, qfit management, and current PDU state before executing the existing bounded `wwan0` traffic proof.
+After PDU acceptance, the user-plane entry point refreshes R2Lab authority, singleton gNB/N2, qfit management, and current PDU state before executing the bounded `wwan0` traffic proof.
 
-After user-plane acceptance, `execute_physical_workload_handoff()` provides an explicit physical-only handoff. It does not silently call the accepted virtual integrated-experiment runtime.
-
-This separation is required because the current virtual workload implementation is coupled to:
-
-```text
-srsUE Deployment ownership
-RFSIM reconciliation
-tun_srsue1
-MQTT sidecar injection into the srsUE pod
-```
-
-Those assumptions are not valid for a COTS qfit UE.
-
-A physical workload result must identify `backend=r2lab`, `interface=wwan0`, the matching run ID, a sanitized evidence digest, acceptance state, and cleanup proof. A virtual/RFSIM result cannot satisfy the physical `workload` acceptance stage.
+After user-plane acceptance, `execute_physical_workload_handoff()` provides an explicit physical-only handoff. A virtual/RFSIM result cannot satisfy the physical workload stage.
 
 ## Physical acceptance model
 
@@ -220,25 +233,56 @@ resource authority
 
 Stages cannot be skipped. A failed stage blocks later acceptance and later stages remain explicitly `not-reached`.
 
+## Automation status
+
+The PR already has deterministic smoke coverage for exact resource control, stopped staging, and authorized singleton gNB start. The acceptance model already blocks advancement after failure.
+
+The remaining product automation is to compose the existing physical stages into one fail-closed smoke workflow/CLI boundary:
+
+```text
+active external R2Lab lease
+  -> exact resource authority
+  -> FIT/qfit readiness
+  -> explicitly approved image provisioning when required
+  -> strict qfit host trust
+  -> external USB + RM500Q enumeration
+  -> corrected offline RF-reference validation
+  -> immutable stopped staging
+  -> exact singleton gNB start
+  -> Open5GS + N2 proof
+  -> Quectel initialization
+  -> software radio ON
+  -> cell acquisition
+       FAIL => persist failure; no attach/PDU
+  -> registration
+  -> packet attach + PDU
+  -> user-plane proof
+  -> physical workload
+  -> exact reverse-order cleanup
+```
+
+Automatic R2Lab reservation/booking remains prohibited.
+
 ## Evidence and development history
 
 Detailed records are maintained in:
 
-- `docs/r2lab-smoke-002.md` — live run chronology and acceptance result;
-- `docs/r2lab-smoke-002-development-log.md` — how live observations became code and how CI issues were diagnosed;
-- `docs/r2lab-physical-adapter.md` — physical chart/adapter investigation;
+- `docs/r2lab-smoke-002.md` — live smoke-002 chronology and acceptance result;
+- `docs/r2lab-smoke-002-development-log.md` — how smoke-002 observations became code, including an explicit smoke-003 correction to the earlier RF interpretation;
+- `docs/r2lab-physical-adapter.md` — physical chart/adapter investigation and corrected RF reference;
 - `docs/r2lab-runtime-verification.md` — read-only qfit/N2 observation design;
 - `docs/r2lab-ue-activation.md` — mutating qfit activation, rollback, and workload-handoff design;
 - `docs/r2lab-code-architecture.md` — package-consolidation rationale and current subsystem boundaries.
 
 ## Remaining work before this checkpoint can merge
 
-The PR remains draft. The implementation boundary is now largely complete offline. Remaining acceptance work is:
+The PR remains draft. Remaining work is:
 
 - keep the complete repository unit/privacy workflow green on the current head;
-- build a physical-specific workload executor behind the new handoff contract rather than reusing the RFSIM experiment runtime;
-- perform another controlled physical acceptance run using the reviewed carrier/SSB/bandwidth/2x2 profile;
-- verify cell acquisition and registration before invoking the new qfit activation boundary;
+- review PRACH/TDD parity separately from the corrected carrier/bandwidth source;
+- compose the live stages into the fail-closed smoke workflow/CLI boundary;
+- perform a fresh immutable run with the corrected `106 PRB / 40 MHz / 621312` candidate;
+- verify cell acquisition and registration before invoking qfit packet activation;
 - verify PDU session and `wwan0` user plane;
 - run the physical workload through the explicit handoff;
 - perform and review exact cleanup evidence.
