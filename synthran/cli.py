@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -40,6 +41,10 @@ from synthran.r2lab.controller import (
     execute_prepare as execute_r2lab_prepare,
     execute_release as execute_r2lab_release,
     run_doctor as run_r2lab_doctor,
+)
+from synthran.r2lab.foundation import (
+    R2LabPhysicalFoundationError,
+    execute_physical_foundation_acceptance,
 )
 from synthran.network.resources import (
     DEFAULT_DURATION_MINUTES,
@@ -375,6 +380,48 @@ def _parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    r2lab_foundation = r2lab_commands.add_parser(
+        "foundation",
+        help="verify and bind the stopped SLICES and Open5GS foundation",
+    )
+    r2lab_foundation.add_argument(
+        "--slice",
+        dest="r2lab_slice",
+        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
+        help="R2Lab slice name (or SYNTHRAN_R2LAB_SLICE)",
+    )
+    r2lab_foundation.add_argument("--run-id", required=True)
+    r2lab_foundation.add_argument("--previous-run-id", required=True)
+    r2lab_foundation.add_argument(
+        "--owner",
+        default=os.environ.get("SYNTHRAN_OWNER"),
+        help="expected SLICES/POS owner (or SYNTHRAN_OWNER)",
+    )
+    r2lab_foundation.add_argument(
+        "--reservation-id",
+        default=os.environ.get("SYNTHRAN_RESERVATION_ID"),
+        help="expected active reservation identifier",
+    )
+    r2lab_foundation.add_argument(
+        "--allocation-id",
+        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
+        help="expected current allocation identifier",
+    )
+    r2lab_foundation.add_argument(
+        "--known-hosts",
+        type=Path,
+        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
+        help="strict SLICES known-hosts path",
+    )
+    r2lab_foundation.add_argument("--timeout", type=int, default=120)
+    r2lab_foundation.add_argument("--json", action="store_true")
+    r2lab_foundation.add_argument(
+        "--run-root",
+        type=Path,
+        default=Path(".synthran/r2lab"),
+        help=argparse.SUPPRESS,
+    )
+
     deps = subcommands.add_parser("deps", help="manage immutable external dependencies")
     deps_commands = deps.add_subparsers(dest="deps_command", required=True)
     sync = deps_commands.add_parser("sync", help="synchronize detached pinned checkouts")
@@ -638,6 +685,40 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
         )
         print(f"R2Lab resources released for run {result.run_id}.")
         print(f"Sanitized manifest: {result.manifest_path}")
+        return 0
+    if args.r2lab_command == "foundation":
+        required = {
+            "--slice or SYNTHRAN_R2LAB_SLICE": args.r2lab_slice,
+            "--owner or SYNTHRAN_OWNER": args.owner,
+            "--reservation-id or SYNTHRAN_RESERVATION_ID": args.reservation_id,
+            "--allocation-id or SYNTHRAN_ALLOCATION_ID": args.allocation_id,
+            "--known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS": args.known_hosts,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise R2LabPhysicalFoundationError(
+                "R2Lab foundation requires " + ", ".join(missing)
+            )
+        result = execute_physical_foundation_acceptance(
+            run_id=args.run_id,
+            previous_run_id=args.previous_run_id,
+            slice_name=args.r2lab_slice,
+            owner=args.owner,
+            reservation_id=args.reservation_id,
+            allocation_id=args.allocation_id,
+            known_hosts=Path(args.known_hosts),
+            now=datetime.now(timezone.utc),
+            run_root=args.run_root,
+            timeout_seconds=args.timeout,
+        )
+        print(
+            json.dumps(result.to_dict(), indent=2, sort_keys=True)
+            if args.json
+            else (
+                f"Physical foundation accepted for run {result.run_id}.\n"
+                f"Sanitized evidence: {result.evidence_path}"
+            )
+        )
         return 0
     raise AssertionError("unreachable R2Lab command")
 
@@ -1309,6 +1390,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         LivePreflightError,
         NetworkRuntimeError,
         PrivacyError,
+        R2LabPhysicalFoundationError,
         R2LabResourceError,
         ResearchError,
         ResourcePreparationError,

@@ -83,6 +83,31 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.radio, "n300")
         self.assertEqual(args.ue, "qhat01")
 
+    def test_parser_contains_physical_foundation_command(self) -> None:
+        args = _parser().parse_args(
+            [
+                "r2lab",
+                "foundation",
+                "--slice",
+                "oulu_rnayreed",
+                "--run-id",
+                "r2lab-current-run",
+                "--previous-run-id",
+                "r2lab-previous-run",
+                "--owner",
+                "rnayreed",
+                "--reservation-id",
+                "6360",
+                "--allocation-id",
+                "rnayreed_260824_090000_000001",
+                "--known-hosts",
+                "known_hosts",
+            ]
+        )
+
+        self.assertEqual("foundation", args.r2lab_command)
+        self.assertEqual(Path("known_hosts"), args.known_hosts)
+
 
 if __name__ == "__main__":
     unittest.main()
