@@ -149,10 +149,11 @@ class R2LabQfitPrepareTests(unittest.TestCase):
         self.assertIn(("rhubarbe", "leases", "--check"), commands[:init_index])
         self.assertIn(("rhubarbe", "leases", "--check"), commands[init_index + 1 : radio_index])
 
-        self.assertIn("root@fit07", init_matches[0][1])
-        self.assertIn("root@fit07", radio_matches[0][1])
-        self.assertNotIn("root@qfit07", init_matches[0][1])
-        self.assertNotIn("root@qfit07", radio_matches[0][1])
+        for _, command in (init_matches[0], radio_matches[0]):
+            self.assertIn("root@fit07", command)
+            self.assertNotIn("root@qfit07", command)
+            self.assertIn("UserKnownHostsFile=/home/oulu_user/.ssh/known_hosts", command)
+            self.assertIn("GlobalKnownHostsFile=/dev/null", command)
 
     def test_gateway_maps_joined_qfit_destination_for_ue_and_workload_paths(self) -> None:
         with patch.dict(
@@ -166,6 +167,11 @@ class R2LabQfitPrepareTests(unittest.TestCase):
             )
         self.assertIn("root@fit07", command[-1])
         self.assertNotIn("root@qfit07", command[-1])
+        self.assertIn(
+            "UserKnownHostsFile=/home/oulu_user/.ssh/known_hosts",
+            command[-1],
+        )
+        self.assertIn("GlobalKnownHostsFile=/dev/null", command[-1])
 
 
 if __name__ == "__main__":
