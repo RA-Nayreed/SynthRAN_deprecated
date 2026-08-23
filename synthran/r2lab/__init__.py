@@ -97,6 +97,18 @@ from synthran.r2lab.runtime import (
     parse_n2_log_state,
     verify_gnb_n2,
 )
+
+# The live qfit image requires packet-service attach before registration becomes
+# observable after its reset/init lifecycle. Bind the provider-aligned activation
+# implementation into the UE module so direct and authorized callers share the
+# same reviewed ordering.
+from synthran.r2lab import ue as _ue
+from synthran.r2lab.qfit_activation_provider import (
+    execute_qfit_activation_provider as _provider_execute_qfit_activation,
+)
+
+_ue.execute_qfit_activation = _provider_execute_qfit_activation
+
 from synthran.r2lab.ue import (
     AuthorizedQfitActivationOutcome,
     AuthorizedQfitUserPlaneOutcome,
