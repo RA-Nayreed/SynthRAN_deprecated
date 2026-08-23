@@ -16,15 +16,27 @@ def _mapped_gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
 
     Every nested qfit SSH path enters through the Faraday gateway boundary.
     Keep the logical qfit identifier for provider ownership while translating
-    only explicit ``root@qfitNN`` SSH destinations to ``root@fitNN``.
+    only explicit ``root@qfitNN`` SSH destinations to ``root@fitNN``.  Force
+    nested FIT SSH to use the already-trusted Faraday known-hosts file because
+    the provider SSH client configuration does not select it reliably.
     """
 
     translated = tuple(remote)
+    known_hosts = f"/home/{slice_name}/.ssh/known_hosts"
     for qfit in _controller.SUPPORTED_QFITS:
-        translated = tuple(
-            item.replace(f"root@{qfit}", f"root@fit{qfit[-2:]}")
-            for item in translated
-        )
+        physical = f"fit{qfit[-2:]}"
+        mapped: list[str] = []
+        for item in translated:
+            value = item.replace(f"root@{qfit}", f"root@{physical}")
+            if f"root@{physical}" in value and "UserKnownHostsFile=" not in value:
+                marker = f"-- root@{physical}"
+                replacement = (
+                    f"-o UserKnownHostsFile={known_hosts} "
+                    f"-o GlobalKnownHostsFile=/dev/null {marker}"
+                )
+                value = value.replace(marker, replacement)
+            mapped.append(value)
+        translated = tuple(mapped)
     return _UNMAPPED_GATEWAY_COMMAND(slice_name, *translated)
 
 
