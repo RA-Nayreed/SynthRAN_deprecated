@@ -168,4 +168,4 @@ No live radio or UE mutation was required to implement or test this layer.
 
 ## Remaining live boundary
 
-This code makes the next physical run safer, but it does not make smoke 002 successful retroactively. The next controlled run still has to establish whether the reviewed 60 MHz / 2x2 physical srsRAN candidate is actually acquired by the selected qfit and then prove registration, PDU session, user plane, and finally the SynthRAN workload.
+This code makes the next physical run safer, but it does not make smoke 002 successful retroactively. The next controlled run still has to establish whether the reviewed 40 MHz / 2x2 physical srsRAN candidate is actually acquired by the selected qfit and then prove registration, PDU session, user plane, and finally the SynthRAN workload.

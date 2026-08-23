@@ -45,6 +45,7 @@ n2.py           N2 evidence parsing
 runtime.py      read-only gNB, qfit, and user-plane observation
 ue.py           MBIM activation, rollback, and workload handoff
 handoff.py      external authority handoff
+foundation.py   SLICES, Kubernetes, and Open5GS acceptance proof
 ```
 
 The CLI and tests import this package directly. There is no duplicate R2Lab
@@ -114,6 +115,30 @@ resource authority
 
 A failed stage blocks every later stage. User-plane and workload acceptance each
 refresh current authority and reprove the physical path.
+
+## Foundation acceptance
+
+After `r2lab prepare` has made the selected N300 and qfit ready, the physical
+foundation command verifies both authority domains, both selected Kubernetes
+nodes, exactly one ready AMF, SMF, and UPF pod, a stopped physical gNB, and the
+Open5GS namespace owner. Health checks happen before the only mutation: an exact,
+retry-safe namespace ownership handoff from the previous run to the current run.
+
+```text
+python -m synthran r2lab foundation \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --run-id "$R2LAB_RUN" \
+  --previous-run-id "$PREVIOUS_R2LAB_RUN" \
+  --owner "$SYNTHRAN_OWNER" \
+  --reservation-id "$SYNTHRAN_RESERVATION_ID" \
+  --allocation-id "$SYNTHRAN_ALLOCATION_ID" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+```
+
+Success writes `physical-run.json` beside the R2Lab run manifest and advances
+the immutable acceptance record through Open5GS. The next stage is then gNB/N2.
+Unknown, unready, multiply owned, or inconsistent state fails without creating
+acceptance evidence.
 
 ## Completion criteria
 

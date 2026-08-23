@@ -233,6 +233,27 @@ class R2LabPersistentEvidenceTests(unittest.TestCase):
         self.assertEqual(64, len(payload["gnb_start"]["start_sha256"]))
         self.assertEqual("passed", payload["acceptance"]["stages"][0]["outcome"])
 
+    def test_persisted_evidence_round_trips_through_strict_loader(self) -> None:
+        evidence = PhysicalRunEvidence(run_id="r2lab-evidence").bind_staging(
+            self.staging_payload()
+        ).bind_gnb_start(self.start_payload())
+        for stage in STAGE_ORDER[:5]:
+            evidence = evidence.pass_stage(stage, source=f"evidence-{stage.value}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "physical-run.json"
+            evidence.write_json(target)
+            loaded = PhysicalRunEvidence.read_json(target)
+
+        self.assertEqual(evidence, loaded)
+
+    def test_loader_rejects_inconsistent_derived_acceptance_summary(self) -> None:
+        payload = PhysicalRunEvidence(run_id="r2lab-evidence").to_dict()
+        payload["acceptance"]["next_stage"] = "open5gs"
+
+        with self.assertRaisesRegex(R2LabAcceptanceError, "summary is inconsistent"):
+            PhysicalRunEvidence.from_dict(payload)
+
     def test_no_service_qfit_runtime_records_cell_failure_only(self) -> None:
         evidence = self.prepared_for_qfit_runtime().record_qfit_runtime(
             QfitRuntimeEvidence(

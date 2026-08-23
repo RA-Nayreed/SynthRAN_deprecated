@@ -217,7 +217,7 @@ Cell visibility, registration, packet-service attachment, address assignment, an
 
 Packet attachment plus IPv4 can become PDU-session evidence only after cell acquisition and registration. User-plane acceptance still requires a separate traffic probe.
 
-Smoke 003 also showed that provider power plus ping reachability is not enough to declare a qfit/FIT UE management-ready. The live path required FIT OS provisioning, strict SSH trust, external USB power, and RM500Q enumeration before modem probes were meaningful. Destructive image loading must remain an explicit operator-approved lifecycle stage rather than being silently folded into ordinary resource preparation.
+Smoke 003 also showed that provider power plus ping reachability is not enough to declare a qfit/FIT UE management-ready. The live path required FIT OS provisioning, strict SSH trust, external USB power, and RM500Q enumeration before modem probes were meaningful. Current preparation loads the reviewed FIT image only when exact provider state first proves the selected qfit host off; an already-on host is preserved and must pass the same strict readiness checks.
 
 ## Ordered physical acceptance
 

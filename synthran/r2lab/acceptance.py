@@ -180,6 +180,45 @@ class PhysicalAcceptance:
             "stages": stages,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "PhysicalAcceptance":
+        stages = payload.get("stages")
+        if not isinstance(stages, list) or len(stages) != len(STAGE_ORDER):
+            raise R2LabAcceptanceError("physical acceptance stage list is malformed")
+
+        acceptance = cls()
+        not_reached = False
+        for expected, raw in zip(STAGE_ORDER, stages, strict=True):
+            if not isinstance(raw, dict) or raw.get("stage") != expected.value:
+                raise R2LabAcceptanceError(
+                    "physical acceptance stages are not complete and ordered"
+                )
+            outcome = raw.get("outcome")
+            source = raw.get("source")
+            if outcome == AcceptanceOutcome.NOT_REACHED.value:
+                if source is not None:
+                    raise R2LabAcceptanceError(
+                        "not-reached acceptance stage cannot have a source"
+                    )
+                not_reached = True
+                continue
+            if not_reached:
+                raise R2LabAcceptanceError(
+                    "physical acceptance evidence is not contiguous"
+                )
+            if not isinstance(source, str):
+                raise R2LabAcceptanceError("acceptance evidence source is missing")
+            if outcome == AcceptanceOutcome.PASSED.value:
+                acceptance = acceptance.pass_stage(expected, source=source)
+            elif outcome == AcceptanceOutcome.FAILED.value:
+                acceptance = acceptance.fail_stage(expected, source=source)
+            else:
+                raise R2LabAcceptanceError("physical acceptance outcome is invalid")
+
+        if acceptance.to_dict() != dict(payload):
+            raise R2LabAcceptanceError("physical acceptance summary is inconsistent")
+        return acceptance
+
 
 def _validate_sha256(value: object, label: str) -> str:
     if not isinstance(value, str) or len(value) != 64:
@@ -267,6 +306,21 @@ class StagedPhysicalEvidence:
             "status": "staged-stopped",
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "StagedPhysicalEvidence":
+        if payload.get("status") != "staged-stopped":
+            raise R2LabAcceptanceError("stored staging evidence has an invalid status")
+        evidence = cls(
+            run_id=str(payload.get("run_id", "")),
+            package_sha256=str(payload.get("package_sha256", "")),
+            values_sha256=str(payload.get("values_sha256", "")),
+            render_sha256=str(payload.get("render_sha256", "")),
+            staging_sha256=str(payload.get("staging_sha256", "")),
+        )
+        if evidence.to_dict() != dict(payload):
+            raise R2LabAcceptanceError("stored staging evidence is malformed")
+        return evidence
+
 
 @dataclass(frozen=True)
 class StartedGnbEvidence:
@@ -346,6 +400,22 @@ class StartedGnbEvidence:
             "start_sha256": self.start_sha256,
             "status": "gnb-started",
         }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "StartedGnbEvidence":
+        if payload.get("status") != "gnb-started":
+            raise R2LabAcceptanceError("stored gNB start evidence has an invalid status")
+        evidence = cls(
+            run_id=str(payload.get("run_id", "")),
+            package_sha256=str(payload.get("package_sha256", "")),
+            values_sha256=str(payload.get("values_sha256", "")),
+            render_sha256=str(payload.get("render_sha256", "")),
+            claim_sha256=str(payload.get("claim_sha256", "")),
+            start_sha256=str(payload.get("start_sha256", "")),
+        )
+        if evidence.to_dict() != dict(payload):
+            raise R2LabAcceptanceError("stored gNB start evidence is malformed")
+        return evidence
 
 
 @dataclass(frozen=True)
@@ -511,6 +581,55 @@ class PhysicalRunEvidence:
             "gnb_start": self.gnb_start.to_dict() if self.gnb_start is not None else None,
             "acceptance": self.acceptance.to_dict(),
         }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "PhysicalRunEvidence":
+        if payload.get("schema") != PHYSICAL_RUN_EVIDENCE_SCHEMA:
+            raise R2LabAcceptanceError("physical run evidence schema is unsupported")
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str):
+            raise R2LabAcceptanceError("physical run evidence ID is missing")
+
+        staged_payload = payload.get("staged")
+        if staged_payload is not None and not isinstance(staged_payload, dict):
+            raise R2LabAcceptanceError("stored staging evidence is malformed")
+        start_payload = payload.get("gnb_start")
+        if start_payload is not None and not isinstance(start_payload, dict):
+            raise R2LabAcceptanceError("stored gNB start evidence is malformed")
+        acceptance_payload = payload.get("acceptance")
+        if not isinstance(acceptance_payload, dict):
+            raise R2LabAcceptanceError("stored physical acceptance evidence is malformed")
+
+        evidence = cls(
+            run_id=run_id,
+            staged=(
+                StagedPhysicalEvidence.from_dict(staged_payload)
+                if staged_payload is not None
+                else None
+            ),
+            gnb_start=(
+                StartedGnbEvidence.from_dict(start_payload)
+                if start_payload is not None
+                else None
+            ),
+            acceptance=PhysicalAcceptance.from_dict(acceptance_payload),
+        )
+        if evidence.to_dict() != dict(payload):
+            raise R2LabAcceptanceError("physical run evidence is malformed")
+        return evidence
+
+    @classmethod
+    def read_json(cls, path: Path) -> "PhysicalRunEvidence":
+        path = path.expanduser().resolve()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise R2LabAcceptanceError("physical run evidence file is missing") from exc
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise R2LabAcceptanceError("physical run evidence could not be read") from exc
+        if not isinstance(payload, dict):
+            raise R2LabAcceptanceError("physical run evidence must be one JSON object")
+        return cls.from_dict(payload)
 
     def write_json(self, path: Path) -> Path:
         path = path.expanduser().resolve()
