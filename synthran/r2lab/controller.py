@@ -950,6 +950,19 @@ def execute_prepare(
             ),
             command_timeout=max(timeout_seconds, 60),
         )
+        require_lease("lease-before-qfit-radio-on")
+        remote_required(
+            "qfit-radio-on",
+            *qfit_host_command(
+                plan.selection.slice_name,
+                plan.selection.ue,
+                "mbimcli",
+                "-p",
+                "-d",
+                QFIT_MBIM_DEVICE,
+                "--set-radio-state=on",
+            ),
+        )
     else:
         report("ue-reachability: running...")
         reachable = False
@@ -987,20 +1000,6 @@ def execute_prepare(
             report("ue-reachability: FAILED")
             fail("ue-reachability", "selected UE did not become reachable")
             raise R2LabResourceError("selected R2Lab UE did not become reachable")
-
-        require_lease("lease-before-qfit-radio-on")
-        remote_required(
-            "qfit-radio-on",
-            *qfit_host_command(
-                plan.selection.slice_name,
-                plan.selection.ue,
-                "mbimcli",
-                "-p",
-                "-d",
-                QFIT_MBIM_DEVICE,
-                "--set-radio-state=on",
-            ),
-        )
 
     require_lease("lease-final")
     write_manifest("ready")
