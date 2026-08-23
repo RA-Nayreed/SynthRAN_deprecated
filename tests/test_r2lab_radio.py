@@ -103,7 +103,7 @@ class R2LabRadioProfileTests(unittest.TestCase):
             intent.to_dict()["acceptance"],
         )
 
-    def test_reference_alignment_rejects_stale_smoke003_60mhz_candidate(self) -> None:
+    def test_reference_alignment_rejects_stale_60mhz_candidate(self) -> None:
         intent = ReferenceAlignedPhysicalIntent(
             profile=PhysicalRadioProfile(
                 band=78,
@@ -153,7 +153,7 @@ class R2LabRadioProfileTests(unittest.TestCase):
 
 
 class R2LabQfitRuntimeTests(unittest.TestCase):
-    def test_smoke002_no_service_state_does_not_advance_acceptance(self) -> None:
+    def test_no_service_state_does_not_advance_acceptance(self) -> None:
         evidence = QfitRuntimeEvidence(
             cell=parse_qnwinfo('+QNWINFO: "No Service"\nOK\n'),
             registration=parse_c5greg('+C5GREG: 0,0\nOK\n'),

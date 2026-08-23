@@ -14,14 +14,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-import re
 from typing import Callable, Sequence
 
 from synthran.live_preflight import CommandResult
+from synthran.r2lab.controller import R2LabResourceError, physical_qfit_host
 
 
 RemoteRunner = Callable[[Sequence[str], int], CommandResult]
-_QFIT_RE = re.compile(r"^qfit(?P<node>07|09|18|29|32|34)$")
 _MAX_REMOTE_PATH = 512
 
 
@@ -66,10 +65,11 @@ class QfitReadinessEvidence:
 
 def _qfit_node(qfit: str) -> tuple[str, int]:
     value = qfit.strip().lower()
-    match = _QFIT_RE.fullmatch(value)
-    if match is None:
+    try:
+        host = physical_qfit_host(value)
+    except R2LabResourceError as exc:
         raise R2LabQfitReadinessError("readiness requires one reviewed qfit resource")
-    return value, int(match.group("node"))
+    return value, int(host[-2:])
 
 
 def _remote_known_hosts(value: str) -> str:

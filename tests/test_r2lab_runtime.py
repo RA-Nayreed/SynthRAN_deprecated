@@ -117,7 +117,7 @@ class RuntimeR2LabRunner:
             return CommandResult(0, "", "")
         if remote == ("rhubarbe", "pdu", "status", "n300"):
             return CommandResult(0, "pdu2 chain-0@outlet-1 (n300): ON (28W)\n", "")
-        if remote == ("ping", "-c", "1", "-W", "1", "qfit07"):
+        if remote == ("ping", "-c", "1", "-W", "1", "fit07"):
             return CommandResult(0, "", "")
         if remote == ("curl", "-fsS", "http://reboot07/usrpstatus"):
             return CommandResult(0, "usrpon\n", "")

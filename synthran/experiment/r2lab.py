@@ -84,7 +84,7 @@ from synthran.ingress import IngressSnapshot
 from synthran.iot import write_run_inputs
 from synthran.live_preflight import CommandResult, LivePreflightError, ssh_command
 from synthran.mqtt_collector import collect_mqtt
-from synthran.r2lab.controller import gateway_command
+from synthran.r2lab.controller import qfit_gateway_command
 from synthran.r2lab.ue import PhysicalWorkloadContext, PhysicalWorkloadResult
 
 
@@ -310,23 +310,6 @@ def _validate_qfit(qfit: str) -> str:
     return value
 
 
-def _nested_qfit_command(slice_name: str, qfit: str, *remote: str) -> tuple[str, ...]:
-    qfit = _validate_qfit(qfit)
-    inner = (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "--",
-        f"root@{qfit}",
-        shlex.join(remote),
-    )
-    return gateway_command(slice_name, shlex.join(inner))
-
-
 _RELAY_SCRIPT = r'''
 import os, select, socket, sys
 MARKER = "SYNTHRAN_R2LAB_RELAY"
@@ -385,7 +368,7 @@ def build_qfit_stdio_relay_command(
         raise R2LabPhysicalExperimentError("central broker port is invalid")
     if interface != _QFIT_INTERFACE:
         raise R2LabPhysicalExperimentError("physical relay must bind to wwan0")
-    return _nested_qfit_command(
+    return qfit_gateway_command(
         slice_name,
         qfit,
         "python3",
@@ -426,7 +409,7 @@ def _qfit_read(
     timeout_seconds: int = 30,
 ) -> CommandResult:
     result = _run(
-        _nested_qfit_command(slice_name, qfit, *tuple(command)),
+        qfit_gateway_command(slice_name, qfit, *tuple(command)),
         timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
@@ -500,6 +483,22 @@ print(count)
     return int(value)
 
 
+def _stop_relay_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+                process.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    for stream in (process.stdin, process.stdout):
+        if stream is not None and not stream.closed:
+            stream.close()
+
+
 class _RelayTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = False
     daemon_threads = True
@@ -522,15 +521,7 @@ class _RelayTCPServer(socketserver.ThreadingTCPServer):
         with self.children_lock:
             children = list(self.children)
         for process in children:
-            if process.poll() is None:
-                try:
-                    process.terminate()
-                    process.wait(timeout=3)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
+            _stop_relay_process(process)
 
 
 class _RelayHandler(socketserver.BaseRequestHandler):
@@ -589,15 +580,8 @@ class _RelayHandler(socketserver.BaseRequestHandler):
         incoming.start()
         outgoing.join()
         incoming.join()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-        finally:
-            self.server.unregister_child(process)
+        _stop_relay_process(process)
+        self.server.unregister_child(process)
 
 
 class ManagedQfitRelay:

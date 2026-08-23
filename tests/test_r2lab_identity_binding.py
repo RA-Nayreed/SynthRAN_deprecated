@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from synthran.live_preflight import CommandResult
-from synthran.network.r2lab import (
+from synthran.r2lab.controller import (
     R2LabSelection,
     build_plan,
     execute_prepare,

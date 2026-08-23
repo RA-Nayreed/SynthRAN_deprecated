@@ -11,7 +11,7 @@ import unittest
 from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import load_inventory
 from synthran.live_preflight import CommandResult
-from synthran.network.r2lab import (
+from synthran.r2lab.controller import (
     R2LabSelection,
     build_plan,
     execute_physical_gnb_start,
@@ -41,8 +41,8 @@ RESERVATION_START_FIELD = "start_" + "date"
 RESERVATION_END_FIELD = "end_" + "date"
 
 
-class SmokeRunner:
-    """Deterministic provider double for the complete public smoke lifecycle."""
+class LifecycleRunner:
+    """Deterministic provider double for the complete public lifecycle."""
 
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
@@ -122,20 +122,20 @@ class SmokeRunner:
         return [self.remote(command) for command in self.commands]
 
 
-class R2LabSmokeGateTests(unittest.TestCase):
+class R2LabLifecycleGateTests(unittest.TestCase):
     def test_current_rfsim_golden_path_remains_the_regression_baseline(self) -> None:
         inventory = load_inventory(RFSIM_FIXTURE)
         self.assertEqual("open5gs", inventory.core)
         self.assertEqual("srsRAN", inventory.ran)
         self.assertEqual("rfsim", inventory.radio)
 
-    def test_complete_r2lab_resource_smoke_cycle_is_exact_and_released(self) -> None:
+    def test_complete_r2lab_resource_lifecycle_is_exact_and_released(self) -> None:
         selection = R2LabSelection.build(
             slice_name="oulu_user",
             radio="n300",
             ue="qhat01",
         )
-        runner = SmokeRunner()
+        runner = LifecycleRunner()
 
         doctor = run_doctor(selection=selection, runner=runner)
         self.assertTrue(doctor.ready)
@@ -144,7 +144,7 @@ class R2LabSmokeGateTests(unittest.TestCase):
             runner.remote_commands,
         )
 
-        plan = build_plan(run_id="r2lab-smoke-001", selection=selection)
+        plan = build_plan(run_id="r2lab-lifecycle-001", selection=selection)
         payload = plan.to_dict()
         rendered = plan.render(as_json=True)
         self.assertFalse(payload["execution_enabled"])
@@ -499,7 +499,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         ]
         self.assertEqual(4, len(allocation_queries))
 
-    def test_staging_rejects_stale_smoke003_render_before_any_cluster_write(self) -> None:
+    def test_staging_rejects_stale_render_before_any_cluster_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifact = self.make_artifact(root)
@@ -631,7 +631,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             radio="n300",
             ue="qfit07",
         )
-        provider = SmokeRunner()
+        provider = LifecycleRunner()
         plan = build_plan(run_id=run_id, selection=selection)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -703,7 +703,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             radio="n300",
             ue="qfit07",
         )
-        provider = SmokeRunner()
+        provider = LifecycleRunner()
         plan = build_plan(run_id=run_id, selection=selection)
 
         with tempfile.TemporaryDirectory() as directory:

@@ -22,6 +22,11 @@ from synthran.r2lab.acceptance import (
     PhysicalAcceptanceStage,
     PhysicalRunEvidence,
 )
+from synthran.r2lab.controller import (
+    gateway_command,
+    physical_qfit_host,
+    qfit_gateway_command,
+)
 from synthran.r2lab.deployment import (
     CORE_NODE,
     DEPLOYMENT_PACKAGE_ANNOTATION,
@@ -178,31 +183,6 @@ def _cluster_ssh(known_hosts: Path, *remote: str) -> tuple[str, ...]:
     )
 
 
-def _gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
-    from synthran.r2lab.controller import gateway_command
-
-    return gateway_command(slice_name, *remote)
-
-
-def _qfit_gateway_command(slice_name: str, qfit: str, *remote: str) -> tuple[str, ...]:
-    """Strict nested SSH from Faraday to exactly one reviewed qfit host."""
-
-    qfit = _validate_qfit(qfit)
-    inner = (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "--",
-        f"root@{qfit}",
-        shlex.join(remote),
-    )
-    return _gateway_command(slice_name, shlex.join(inner))
-
-
 def _serial_probe_command(command: str) -> tuple[str, ...]:
     if command not in _ALLOWED_AT_PROBES:
         raise R2LabRuntimeVerificationError("AT probe is not in the sanitized allow-list")
@@ -223,7 +203,7 @@ def _safe_qfit_read(
     *, slice_name: str, qfit: str, command: Sequence[str], runner: Runner, timeout_seconds: int
 ) -> CommandResult | None:
     try:
-        result = runner(_qfit_gateway_command(slice_name, qfit, *tuple(command)), timeout_seconds)
+        result = runner(qfit_gateway_command(slice_name, qfit, *tuple(command)), timeout_seconds)
     except (RuntimeError, OSError):
         return None
     return result if result.returncode == 0 else None
@@ -255,10 +235,21 @@ def execute_qfit_runtime_probe(
 def execute_qfit_management_probe(
     *, slice_name: str, qfit: str, runner: Runner, timeout_seconds: int = 15
 ) -> bool:
-    """Legacy reachability probe; insufficient for UE-management acceptance."""
+    """Prove management reachability of the selected qfit's physical FIT host."""
     qfit = _validate_qfit(qfit)
     try:
-        result = runner(_gateway_command(slice_name, "ping", "-c", "1", "-W", "1", qfit), timeout_seconds)
+        result = runner(
+            gateway_command(
+                slice_name,
+                "ping",
+                "-c",
+                "1",
+                "-W",
+                "1",
+                physical_qfit_host(qfit),
+            ),
+            timeout_seconds,
+        )
     except (RuntimeError, OSError):
         return False
     return result.returncode == 0
@@ -507,7 +498,7 @@ def execute_physical_runtime_verification(
         raise R2LabRuntimeVerificationError("qfit readiness requires an explicit strict remote known-hosts path")
 
     def faraday_runner(command: Sequence[str], command_timeout: int) -> CommandResult:
-        return r2lab_runner(_gateway_command(slice_name, *tuple(command)), command_timeout)
+        return r2lab_runner(gateway_command(slice_name, *tuple(command)), command_timeout)
 
     try:
         readiness = execute_qfit_readiness(qfit=authority.ue, remote_known_hosts=qfit_known_hosts_remote, runner=faraday_runner, timeout_seconds=min(timeout_seconds, 30))
@@ -534,7 +525,7 @@ def execute_physical_runtime_verification(
             raise R2LabRuntimeVerificationError("R2Lab authority changed before user-plane proof")
 
         def qfit_runner(command: Sequence[str], command_timeout: int) -> CommandResult:
-            return r2lab_runner(_qfit_gateway_command(slice_name, authority.ue, *tuple(command)), command_timeout)
+            return r2lab_runner(qfit_gateway_command(slice_name, authority.ue, *tuple(command)), command_timeout)
 
         user_plane = execute_user_plane_probe(peer=user_plane_peer, runner=qfit_runner, command_timeout_seconds=min(timeout_seconds, 60))
         state = state.record_user_plane(user_plane)

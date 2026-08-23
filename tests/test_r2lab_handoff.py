@@ -17,8 +17,8 @@ from synthran.r2lab.handoff import (
 class HandoffRunner:
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
-        self.namespace_owner = "r2lab-smoke-003"
-        self.deployment_owner = "r2lab-smoke-003"
+        self.namespace_owner = "r2lab-previous-run"
+        self.deployment_owner = "r2lab-previous-run"
         self.replicas = 0
         self.pods: list[dict[str, object]] = []
         self.calendar_calls = 0
@@ -119,8 +119,8 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
                 encoding="utf-8",
             )
             return execute_physical_namespace_handoff(
-                from_run_id="r2lab-smoke-003",
-                to_run_id="r2lab-smoke-004",
+                from_run_id="r2lab-previous-run",
+                to_run_id="r2lab-current-run",
                 owner="rnayreed",
                 reservation_id="6360",
                 allocation_id="rnayreed_260822_184302_028689",
@@ -138,7 +138,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
         self.assertTrue(result.deployment_present)
         self.assertEqual(0, result.desired_replicas)
         self.assertEqual(0, result.gnb_pod_count)
-        self.assertEqual("r2lab-smoke-004", runner.namespace_owner)
+        self.assertEqual("r2lab-current-run", runner.namespace_owner)
 
         labels = [
             command
@@ -146,7 +146,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
             if command[:4] == ("kubectl", "label", "namespace", "open5gs")
         ]
         self.assertEqual(1, len(labels))
-        self.assertIn("synthran.run/id=r2lab-smoke-004", labels[0])
+        self.assertIn("synthran.run/id=r2lab-current-run", labels[0])
         self.assertIn("--overwrite", labels[0])
 
         command_text = "\n".join(" ".join(command) for command in runner.commands)
@@ -192,8 +192,8 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
 
         self.assertFalse(second.changed)
         self.assertEqual(labels_before, labels_after)
-        self.assertEqual("r2lab-smoke-003", runner.deployment_owner)
-        self.assertEqual("r2lab-smoke-004", runner.namespace_owner)
+        self.assertEqual("r2lab-previous-run", runner.deployment_owner)
+        self.assertEqual("r2lab-current-run", runner.namespace_owner)
 
     def test_handoff_rejects_unexpected_namespace_owner_before_mutation(self) -> None:
         runner = HandoffRunner()

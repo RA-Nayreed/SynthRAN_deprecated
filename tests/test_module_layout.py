@@ -21,7 +21,6 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue((SOURCE / "network" / "runtime.py").is_file())
         self.assertTrue((SOURCE / "network" / "resources.py").is_file())
         self.assertTrue((SOURCE / "network" / "rfsim.py").is_file())
-        self.assertTrue((SOURCE / "network" / "r2lab.py").is_file())
         self.assertTrue((SOURCE / "operations" / "__init__.py").is_file())
         self.assertTrue((SOURCE / "operations" / "model.py").is_file())
         self.assertTrue((SOURCE / "operations" / "journal.py").is_file())
@@ -91,6 +90,9 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue((SOURCE / "cli.py").is_file())
         self.assertFalse((SOURCE / "entrypoint.py").exists())
         self.assertFalse((SOURCE / "experiment" / "commands.py").exists())
+        self.assertFalse((SOURCE / "network" / "r2lab.py").exists())
+        self.assertFalse((SOURCE / "r2lab" / "_deployment_impl.py").exists())
+        self.assertFalse((SOURCE / "r2lab" / "qfit_activation_provider.py").exists())
 
 
 if __name__ == "__main__":

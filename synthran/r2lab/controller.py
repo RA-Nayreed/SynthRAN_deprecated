@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import time
@@ -57,6 +58,8 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_REACHABILITY_ATTEMPTS = 12
 DEFAULT_REACHABILITY_DELAY_SECONDS = 10.0
 DEFAULT_POWER_SETTLE_SECONDS = 20.0
+QFIT_INITIALIZER = "/usr/local/bin/init.sh"
+QFIT_MBIM_DEVICE = "/dev/cdc-wdm0"
 
 SUPPORTED_RADIOS = frozenset({"n300", "n320"})
 SUPPORTED_QHATS = frozenset(
@@ -217,6 +220,66 @@ def gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
         "--",
         f"{slice_name}@{R2LAB_GATEWAY}",
         *remote,
+    )
+
+
+def physical_qfit_host(qfit: str) -> str:
+    """Map one supported qfit resource to its FIT SSH host."""
+
+    qfit = _validate_ue(qfit)
+    if _ue_kind(qfit) != "qfit":
+        raise R2LabResourceError("qfit host mapping requires a supported qfit UE")
+    return f"fit{qfit[-2:]}"
+
+
+def _qfit_ssh_base(slice_name: str, qfit: str) -> tuple[str, ...]:
+    slice_name = _validate_slice(slice_name)
+    host = physical_qfit_host(qfit)
+    return (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile=/home/{slice_name}/.ssh/known_hosts",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "--",
+        f"root@{host}",
+    )
+
+
+def qfit_host_command(
+    slice_name: str,
+    qfit: str,
+    *remote: str,
+) -> tuple[str, ...]:
+    """Build strict SSH from Faraday to one supported FIT host."""
+
+    if not remote:
+        raise R2LabResourceError("qfit host command requires one explicit remote command")
+    return (
+        *_qfit_ssh_base(slice_name, qfit),
+        *remote,
+    )
+
+
+def qfit_gateway_command(
+    slice_name: str,
+    qfit: str,
+    *remote: str,
+) -> tuple[str, ...]:
+    """Build the complete local-to-Faraday-to-FIT SSH command."""
+
+    if not remote:
+        raise R2LabResourceError("qfit gateway command requires one explicit remote command")
+    nested = (*_qfit_ssh_base(slice_name, qfit), shlex.join(remote))
+    return gateway_command(
+        slice_name,
+        shlex.join(nested),
     )
 
 
@@ -604,8 +667,6 @@ def authorize_physical_start(
     if observed.state is not PowerState.ON:
         raise R2LabResourceError("selected N300 is not proven on for physical gNB start")
 
-    # The filesystem claim is part of the authority boundary, so verify that it
-    # did not change while the remote lease and radio observations were in flight.
     _require_claim(claim_path, run_id=run_id, selection=selection)
     refreshed_claim = _load_json(claim_path, "active R2Lab resource claim")
     if _claim_sha256(refreshed_claim) != claim_digest:
@@ -742,11 +803,20 @@ def execute_prepare(
         write_manifest("failed", stage)
         finish_log()
 
-    def remote_required(stage: str, *command: str) -> CommandResult:
+    def remote_required(
+        stage: str,
+        *command: str,
+        command_timeout: int | None = None,
+    ) -> CommandResult:
         report(f"{stage}: running...")
+        effective_timeout = (
+            timeout_seconds
+            if command_timeout is None
+            else _validate_timeout(command_timeout)
+        )
         try:
             result = runner(
-                gateway_command(plan.selection.slice_name, *command), timeout_seconds
+                gateway_command(plan.selection.slice_name, *command), effective_timeout
             )
         except (R2LabResourceError, OSError) as exc:
             report(f"{stage}: FAILED")
@@ -845,6 +915,11 @@ def execute_prepare(
         require_qfit("ue-power-on", PowerState.ON)
 
     report("ue-reachability: running...")
+    reachability_host = (
+        physical_qfit_host(plan.selection.ue)
+        if plan.selection.ue_kind == "qfit"
+        else plan.selection.ue
+    )
     reachable = False
     for attempt in range(1, reachability_attempts + 1):
         try:
@@ -856,7 +931,7 @@ def execute_prepare(
                     "1",
                     "-W",
                     "1",
-                    plan.selection.ue,
+                    reachability_host,
                 ),
                 timeout_seconds,
             )
@@ -877,6 +952,31 @@ def execute_prepare(
         report("ue-reachability: FAILED")
         fail("ue-reachability", "selected UE did not become reachable")
         raise R2LabResourceError("selected R2Lab UE did not become reachable")
+
+    if plan.selection.ue_kind == "qfit":
+        require_lease("lease-before-qfit-initialize")
+        remote_required(
+            "qfit-initialize",
+            *qfit_host_command(
+                plan.selection.slice_name,
+                plan.selection.ue,
+                QFIT_INITIALIZER,
+            ),
+            command_timeout=max(timeout_seconds, 60),
+        )
+        require_lease("lease-before-qfit-radio-on")
+        remote_required(
+            "qfit-radio-on",
+            *qfit_host_command(
+                plan.selection.slice_name,
+                plan.selection.ue,
+                "mbimcli",
+                "-p",
+                "-d",
+                QFIT_MBIM_DEVICE,
+                "--set-radio-state=on",
+            ),
+        )
 
     require_lease("lease-final")
     write_manifest("ready")

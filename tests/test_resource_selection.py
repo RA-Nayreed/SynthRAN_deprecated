@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from synthran.network.r2lab import SUPPORTED_QFITS, SUPPORTED_QHATS, SUPPORTED_RADIOS
+from synthran.r2lab.controller import SUPPORTED_QFITS, SUPPORTED_QHATS, SUPPORTED_RADIOS
 from synthran.network.resources import SUPPORTED_NODES
 from synthran.resources import (
     ProviderResourceSnapshot,

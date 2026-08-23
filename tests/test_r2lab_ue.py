@@ -152,6 +152,7 @@ class DirectQfitRunner:
         attach_effective: bool = True,
         rollback_effective: bool = True,
         mutation_returncode: int = 0,
+        registration_requires_attach: bool = False,
     ) -> None:
         self.radio_on = False
         self.attached = False
@@ -159,6 +160,7 @@ class DirectQfitRunner:
         self.attach_effective = attach_effective
         self.rollback_effective = rollback_effective
         self.mutation_returncode = mutation_returncode
+        self.registration_requires_attach = registration_requires_attach
         self.commands: list[tuple[str, ...]] = []
 
     def __call__(self, command, timeout_seconds: int) -> CommandResult:
@@ -199,6 +201,11 @@ class DirectQfitRunner:
                 ipv4=Ipv4State.ABSENT,
             )
         return runtime_state(
+            registration=(
+                RegistrationState.NOT_REGISTERED
+                if self.registration_requires_attach and not self.attached
+                else RegistrationState.REGISTERED
+            ),
             packet=(
                 PacketServiceState.ATTACHED
                 if self.attached
@@ -267,7 +274,7 @@ class R2LabQfitActivationExecutionTests(unittest.TestCase):
             runner=runner,
             observer=runner.observe,
             sleeper=lambda seconds: None,
-            registration_attempts=1,
+            radio_attempts=1,
             packet_attempts=1,
             pdu_attempts=1,
             rollback_attempts=1,
@@ -282,6 +289,21 @@ class R2LabQfitActivationExecutionTests(unittest.TestCase):
         self.assertTrue(any(step.returncode == 1 for step in result.steps))
         self.assertFalse(result.to_dict()["raw_modem_output_persisted"])
         self.assertFalse(result.to_dict()["subscriber_identity_queried"])
+
+    def test_packet_attach_precedes_registration_acceptance(self) -> None:
+        runner = DirectQfitRunner(registration_requires_attach=True)
+        result = self.execute(runner)
+        self.assertTrue(result.accepted)
+        self.assertEqual(
+            [
+                "link-up",
+                "radio-on",
+                "attach-packet-service",
+                "connect-session",
+                "configure-ip",
+            ],
+            [step.name for step in result.steps],
+        )
 
     def test_existing_pdu_is_idempotent_and_performs_no_mutation(self) -> None:
         runner = DirectQfitRunner()
@@ -414,7 +436,7 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
     @patch("synthran.r2lab.runtime.execute_qfit_management_probe")
     @patch("synthran.r2lab.runtime.verify_gnb_n2")
     @patch("synthran.r2lab.controller.authorize_physical_start")
-    def test_cell_failure_stops_before_any_activation_mutation(
+    def test_provider_attach_can_precede_registration_acceptance(
         self,
         authorize,
         verify_gnb,
@@ -429,6 +451,7 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
             cell=CellAcquisitionState.NO_SERVICE,
             registration=RegistrationState.NOT_REGISTERED,
         )
+        activate.return_value = self.successful_activation()
         outcome = execute_authorized_qfit_activation(
             evidence=base_evidence(),
             slice_name="oulu_user",
@@ -438,12 +461,21 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
             cluster_runner=lambda command, timeout: CommandResult(0, "", ""),
             sleeper=lambda seconds: None,
         )
-        self.assertIsNone(outcome.activation)
+        self.assertIsNotNone(outcome.activation)
         self.assertEqual(
-            PhysicalAcceptanceStage.CELL_ACQUISITION,
-            outcome.evidence.acceptance.failed_stage,
+            PhysicalAcceptanceStage.USER_PLANE,
+            outcome.evidence.acceptance.next_stage,
         )
-        activate.assert_not_called()
+        for stage in (
+            PhysicalAcceptanceStage.CELL_ACQUISITION,
+            PhysicalAcceptanceStage.REGISTRATION,
+            PhysicalAcceptanceStage.PDU_SESSION,
+        ):
+            self.assertEqual(
+                AcceptanceOutcome.PASSED,
+                outcome.evidence.acceptance.outcome_for(stage),
+            )
+        activate.assert_called_once()
 
     @patch("synthran.r2lab.ue.execute_user_plane_probe")
     @patch("synthran.r2lab.runtime.execute_qfit_runtime_probe")
