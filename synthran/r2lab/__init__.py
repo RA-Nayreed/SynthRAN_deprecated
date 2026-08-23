@@ -5,6 +5,35 @@ provider control, radio/UE state, deployment, acceptance, runtime verification,
 mutating UE/session lifecycle, and orchestration.
 """
 
+from synthran.r2lab import controller as _controller
+
+
+_UNMAPPED_GATEWAY_COMMAND = _controller.gateway_command
+
+
+def _mapped_gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
+    """Map logical qfitNN resources to their physical fitNN SSH hosts.
+
+    Every nested qfit SSH path enters through the Faraday gateway boundary.
+    Keep the logical qfit identifier for provider ownership while translating
+    only explicit ``root@qfitNN`` SSH destinations to ``root@fitNN``.
+    """
+
+    translated = tuple(remote)
+    for qfit in _controller.SUPPORTED_QFITS:
+        translated = tuple(
+            item.replace(f"root@{qfit}", f"root@fit{qfit[-2:]}")
+            for item in translated
+        )
+    return _UNMAPPED_GATEWAY_COMMAND(slice_name, *translated)
+
+
+# Functions already defined in controller resolve gateway_command through that
+# module's globals at call time, so this one binding also covers prepare/start.
+# UE/runtime/workload code that imports controller.gateway_command sees the same
+# mapped boundary.
+_controller.gateway_command = _mapped_gateway_command
+
 from synthran.r2lab.controller import (
     R2LabDoctorReport,
     R2LabPlan,
