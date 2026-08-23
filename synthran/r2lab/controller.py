@@ -58,6 +58,7 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_REACHABILITY_ATTEMPTS = 12
 DEFAULT_REACHABILITY_DELAY_SECONDS = 10.0
 DEFAULT_POWER_SETTLE_SECONDS = 20.0
+QFIT_SSH_WAIT_TIMEOUT_SECONDS = 300
 QFIT_INITIALIZER = "/usr/local/bin/init.sh"
 QFIT_MBIM_DEVICE = "/dev/cdc-wdm0"
 
@@ -333,6 +334,11 @@ class R2LabPlan:
             if self.selection.ue_kind == "qhat"
             else "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>"
         )
+        ue_readiness = (
+            f"ssh <r2lab-slice>@faraday.inria.fr ping -c 1 -W 1 {self.selection.ue}"
+            if self.selection.ue_kind == "qhat"
+            else "ssh <r2lab-slice>@faraday.inria.fr rhubarbe wait <qfit-node>"
+        )
         return {
             "schema": R2LAB_PLAN_SCHEMA,
             "execution_enabled": False,
@@ -355,7 +361,7 @@ class R2LabPlan:
                     else f"ssh <r2lab-slice>@faraday.inria.fr qfit on {self.selection.ue}"
                 ),
                 ue_status,
-                f"ssh <r2lab-slice>@faraday.inria.fr ping -c 1 -W 1 {self.selection.ue}",
+                ue_readiness,
             ],
             "safety": {
                 "global_power_off": False,
@@ -914,47 +920,27 @@ def execute_prepare(
     else:
         require_qfit("ue-power-on", PowerState.ON)
 
-    report("ue-reachability: running...")
-    reachability_host = (
-        physical_qfit_host(plan.selection.ue)
-        if plan.selection.ue_kind == "qfit"
-        else plan.selection.ue
-    )
-    reachable = False
-    for attempt in range(1, reachability_attempts + 1):
-        try:
-            probe = runner(
-                gateway_command(
-                    plan.selection.slice_name,
-                    "ping",
-                    "-c",
-                    "1",
-                    "-W",
-                    "1",
-                    reachability_host,
-                ),
-                timeout_seconds,
-            )
-        except (R2LabResourceError, OSError) as exc:
-            report("ue-reachability: FAILED")
-            fail("ue-reachability", "management reachability probe could not complete")
-            raise R2LabResourceError(
-                "selected R2Lab UE reachability could not be verified"
-            ) from exc
-        if probe.returncode == 0:
-            reachable = True
-            log_lines.append(f"ue-reachability: OK on attempt {attempt}")
-            report("ue-reachability: OK")
-            break
-        if attempt < reachability_attempts:
-            sleeper(reachability_delay_seconds)
-    if not reachable:
-        report("ue-reachability: FAILED")
-        fail("ue-reachability", "selected UE did not become reachable")
-        raise R2LabResourceError("selected R2Lab UE did not become reachable")
-
     if plan.selection.ue_kind == "qfit":
+        qfit_node = str(int(plan.selection.ue[-2:]))
+        require_lease("lease-before-qfit-ssh")
+        remote_required(
+            "qfit-ssh-readiness",
+            "rhubarbe",
+            "wait",
+            qfit_node,
+            command_timeout=QFIT_SSH_WAIT_TIMEOUT_SECONDS,
+        )
         require_lease("lease-before-qfit-initialize")
+        remote_required(
+            "qfit-image-readiness",
+            *qfit_host_command(
+                plan.selection.slice_name,
+                plan.selection.ue,
+                "test",
+                "-x",
+                QFIT_INITIALIZER,
+            ),
+        )
         remote_required(
             "qfit-initialize",
             *qfit_host_command(
@@ -964,6 +950,44 @@ def execute_prepare(
             ),
             command_timeout=max(timeout_seconds, 60),
         )
+    else:
+        report("ue-reachability: running...")
+        reachable = False
+        for attempt in range(1, reachability_attempts + 1):
+            try:
+                probe = runner(
+                    gateway_command(
+                        plan.selection.slice_name,
+                        "ping",
+                        "-c",
+                        "1",
+                        "-W",
+                        "1",
+                        plan.selection.ue,
+                    ),
+                    timeout_seconds,
+                )
+            except (R2LabResourceError, OSError) as exc:
+                report("ue-reachability: FAILED")
+                fail(
+                    "ue-reachability",
+                    "management reachability probe could not complete",
+                )
+                raise R2LabResourceError(
+                    "selected R2Lab UE reachability could not be verified"
+                ) from exc
+            if probe.returncode == 0:
+                reachable = True
+                log_lines.append(f"ue-reachability: OK on attempt {attempt}")
+                report("ue-reachability: OK")
+                break
+            if attempt < reachability_attempts:
+                sleeper(reachability_delay_seconds)
+        if not reachable:
+            report("ue-reachability: FAILED")
+            fail("ue-reachability", "selected UE did not become reachable")
+            raise R2LabResourceError("selected R2Lab UE did not become reachable")
+
         require_lease("lease-before-qfit-radio-on")
         remote_required(
             "qfit-radio-on",
