@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import time
 from typing import Callable, Sequence
 
 from synthran.live_preflight import CommandResult
@@ -55,6 +56,7 @@ from synthran.r2lab.readiness import (
 
 
 Runner = Callable[[Sequence[str], int], CommandResult]
+Sleeper = Callable[[float], None]
 _SAFE_QFIT_RE = re.compile(r"^qfit(?:07|09|18|29|32|34)$")
 _SAFE_POD_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -138,6 +140,56 @@ class GnbN2Evidence:
             "proven": self.proven,
         }
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, object]) -> "GnbN2Evidence":
+        boolean_fields = (
+            "namespace_owned",
+            "deployment_bound",
+            "log_observed",
+            "transport_error",
+            "proven",
+        )
+        count_fields = ("desired_replicas", "pod_count", "ready_running_count")
+        if any(not isinstance(payload.get(field), bool) for field in boolean_fields):
+            raise R2LabRuntimeVerificationError(
+                "stored gNB/N2 evidence contains malformed boolean values"
+            )
+        if any(
+            value is not None
+            and (not isinstance(value, int) or isinstance(value, bool))
+            for value in (payload.get(field) for field in count_fields)
+        ):
+            raise R2LabRuntimeVerificationError(
+                "stored gNB/N2 evidence contains malformed pod counts"
+            )
+        try:
+            n2_state = N2State(str(payload.get("n2_state", "")))
+        except ValueError as exc:
+            raise R2LabRuntimeVerificationError(
+                "stored gNB/N2 evidence has an invalid N2 state"
+            ) from exc
+        evidence = cls(
+            namespace_owned=payload.get("namespace_owned") is True,
+            deployment_bound=payload.get("deployment_bound") is True,
+            desired_replicas=payload.get("desired_replicas"),
+            pod_count=payload.get("pod_count"),
+            ready_running_count=payload.get("ready_running_count"),
+            n2_state=n2_state,
+            n2_source=str(payload.get("n2_source", "")),
+            peer_fingerprint=(
+                str(payload["peer_fingerprint"])
+                if payload.get("peer_fingerprint") is not None
+                else None
+            ),
+            log_observed=payload.get("log_observed") is True,
+            transport_error=payload.get("transport_error") is True,
+        )
+        if evidence.to_dict() != payload:
+            raise R2LabRuntimeVerificationError(
+                "stored gNB/N2 evidence is malformed"
+            )
+        return evidence
+
 
 @dataclass(frozen=True)
 class PhysicalRuntimeVerificationResult:
@@ -148,6 +200,15 @@ class PhysicalRuntimeVerificationResult:
     qfit_readiness: QfitReadinessEvidence | None
     qfit_runtime: QfitRuntimeEvidence | None
     user_plane: UserPlaneProbeEvidence | None
+
+
+@dataclass(frozen=True)
+class PhysicalGnbN2VerificationResult:
+    """Bound singleton and N2 result without entering UE verification."""
+
+    evidence: PhysicalRunEvidence
+    gnb_n2: GnbN2Evidence
+    attempts: int
 
 
 def _validate_digest(value: str, label: str) -> str:
@@ -456,6 +517,91 @@ def _persist(evidence: PhysicalRunEvidence, path: Path | None) -> None:
         evidence.write_json(path)
 
 
+def execute_physical_gnb_n2_verification(
+    *,
+    evidence: PhysicalRunEvidence,
+    slice_name: str,
+    run_root: Path,
+    known_hosts: Path,
+    r2lab_runner: Runner,
+    cluster_runner: Runner,
+    expected_gnb_n2_peer: str | None = None,
+    evidence_path: Path | None = None,
+    timeout_seconds: int = 30,
+    attempts: int = 12,
+    poll_interval_seconds: float = 5.0,
+    sleeper: Sleeper = time.sleep,
+) -> PhysicalGnbN2VerificationResult:
+    """Poll only the run-bound singleton gNB and N2 acceptance boundary."""
+
+    if evidence.gnb_start is None:
+        raise R2LabRuntimeVerificationError(
+            "gNB/N2 verification requires bound gNB start evidence"
+        )
+    if evidence.acceptance.next_stage is not PhysicalAcceptanceStage.GNB_N2:
+        raise R2LabRuntimeVerificationError(
+            "gNB/N2 verification must begin at the gNB/N2 stage"
+        )
+    if attempts < 1 or attempts > 120:
+        raise R2LabRuntimeVerificationError(
+            "gNB/N2 verification attempts must be between 1 and 120"
+        )
+    if poll_interval_seconds < 0 or poll_interval_seconds > 60:
+        raise R2LabRuntimeVerificationError(
+            "gNB/N2 poll interval must be between 0 and 60 seconds"
+        )
+
+    from synthran.r2lab.controller import authorize_physical_start
+
+    observed: GnbN2Evidence | None = None
+    for attempt in range(1, attempts + 1):
+        authority = authorize_physical_start(
+            run_id=evidence.run_id,
+            slice_name=slice_name,
+            run_root=run_root,
+            runner=r2lab_runner,
+            timeout_seconds=timeout_seconds,
+        ).validate()
+        if not _same_start_authority(authority, evidence):
+            raise R2LabRuntimeVerificationError(
+                "R2Lab claim or selected-resource authority changed"
+            )
+        observed = verify_gnb_n2(
+            evidence=evidence,
+            known_hosts=known_hosts,
+            runner=cluster_runner,
+            expected_gnb_n2_peer=expected_gnb_n2_peer,
+            timeout_seconds=timeout_seconds,
+        )
+        if observed.proven:
+            source = (
+                "sanitized-gnb-n2:"
+                f"bound-{int(observed.deployment_bound)}:"
+                f"one-ready-{int(observed.singleton_ready)}:"
+                f"n2-{observed.n2_state.value}:source-{observed.n2_source}"
+            )
+            accepted = evidence.pass_stage(
+                PhysicalAcceptanceStage.GNB_N2,
+                source=source,
+            )
+            _persist(accepted, evidence_path)
+            return PhysicalGnbN2VerificationResult(accepted, observed, attempt)
+        if attempt < attempts:
+            sleeper(poll_interval_seconds)
+
+    if observed is None:
+        raise AssertionError("gNB/N2 verification produced no observation")
+    source = (
+        "sanitized-gnb-n2:"
+        f"bound-{int(observed.deployment_bound)}:"
+        f"one-ready-{int(observed.singleton_ready)}:"
+        f"n2-{observed.n2_state.value}:source-{observed.n2_source}"
+    )
+    failed = evidence.fail_stage(PhysicalAcceptanceStage.GNB_N2, source=source)
+    _persist(failed, evidence_path)
+    return PhysicalGnbN2VerificationResult(failed, observed, attempts)
+
+
 def execute_physical_runtime_verification(
     *,
     evidence: PhysicalRunEvidence,
@@ -475,21 +621,24 @@ def execute_physical_runtime_verification(
     if evidence.acceptance.next_stage is not PhysicalAcceptanceStage.GNB_N2:
         raise R2LabRuntimeVerificationError("runtime verification must begin at the gNB/N2 stage")
 
-    from synthran.r2lab.controller import authorize_physical_start
-
-    authority = authorize_physical_start(run_id=evidence.run_id, slice_name=slice_name, run_root=run_root, runner=r2lab_runner, timeout_seconds=timeout_seconds).validate()
-    if not _same_start_authority(authority, evidence):
-        raise R2LabRuntimeVerificationError("R2Lab claim or selected-resource authority changed")
-    gnb = verify_gnb_n2(evidence=evidence, known_hosts=known_hosts, runner=cluster_runner, expected_gnb_n2_peer=expected_gnb_n2_peer, timeout_seconds=timeout_seconds)
-    state = evidence
-    gnb_source = "sanitized-gnb-n2:" + f"bound-{int(gnb.deployment_bound)}:" + f"one-ready-{int(gnb.singleton_ready)}:" + f"n2-{gnb.n2_state.value}:source-{gnb.n2_source}"
-    if gnb.proven:
-        state = state.pass_stage(PhysicalAcceptanceStage.GNB_N2, source=gnb_source)
-    else:
-        state = state.fail_stage(PhysicalAcceptanceStage.GNB_N2, source=gnb_source)
-        _persist(state, evidence_path)
+    gnb_result = execute_physical_gnb_n2_verification(
+        evidence=evidence,
+        slice_name=slice_name,
+        run_root=run_root,
+        known_hosts=known_hosts,
+        r2lab_runner=r2lab_runner,
+        cluster_runner=cluster_runner,
+        expected_gnb_n2_peer=expected_gnb_n2_peer,
+        evidence_path=evidence_path,
+        timeout_seconds=timeout_seconds,
+        attempts=1,
+    )
+    state = gnb_result.evidence
+    gnb = gnb_result.gnb_n2
+    if not gnb.proven:
         return PhysicalRuntimeVerificationResult(state, gnb, None, None, None)
-    _persist(state, evidence_path)
+
+    from synthran.r2lab.controller import authorize_physical_start
 
     authority = authorize_physical_start(run_id=evidence.run_id, slice_name=slice_name, run_root=run_root, runner=r2lab_runner, timeout_seconds=timeout_seconds).validate()
     if not _same_start_authority(authority, state):

@@ -108,6 +108,59 @@ class CliTests(unittest.TestCase):
         self.assertEqual("foundation", args.r2lab_command)
         self.assertEqual(Path("known_hosts"), args.known_hosts)
 
+    def test_parser_contains_stopped_gnb_and_n2_commands(self) -> None:
+        stage = _parser().parse_args(
+            [
+                "r2lab",
+                "gnb-stage",
+                "--slice",
+                "oulu_rnayreed",
+                "--run-id",
+                "r2lab-current-run",
+                "--owner",
+                "rnayreed",
+                "--reservation-id",
+                "6366",
+                "--allocation-id",
+                "allocation-1",
+                "--known-hosts",
+                "known_hosts",
+                "--amf-n2-address",
+                "10.10.3.200",
+                "--gnb-n2-address",
+                "10.10.3.234",
+                "--n300-address",
+                "10.10.4.203",
+                "--ru-pod-address",
+                "10.10.4.234",
+                "--ru-subnet",
+                "10.10.4.0/24",
+            ]
+        )
+        start = _parser().parse_args(
+            [
+                "r2lab",
+                "gnb-start",
+                "--slice",
+                "oulu_rnayreed",
+                "--run-id",
+                "r2lab-current-run",
+                "--owner",
+                "rnayreed",
+                "--reservation-id",
+                "6366",
+                "--allocation-id",
+                "allocation-1",
+                "--known-hosts",
+                "known_hosts",
+            ]
+        )
+
+        self.assertEqual("gnb-stage", stage.r2lab_command)
+        self.assertEqual("10.10.3.234", stage.gnb_n2_address)
+        self.assertEqual("gnb-start", start.r2lab_command)
+        self.assertEqual(12, start.n2_attempts)
+
 
 if __name__ == "__main__":
     unittest.main()

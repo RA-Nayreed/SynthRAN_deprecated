@@ -28,6 +28,7 @@ from synthran.r2lab.deployment import (
     R2LabPhysicalHelmError,
     build_physical_chart_bundle,
     build_physical_deployment_plan,
+    discover_physical_chart_bindings,
     execute_non_overlapping_gnb_update,
     materialize_physical_chart_workspace,
     overlay_pinned_deployment_template,
@@ -298,6 +299,29 @@ class R2LabPhysicalChartTests(unittest.TestCase):
                 ru_pod_address="203.0.113.240",
                 ru_subnet="192.0.2.0/24",
             ).validate()
+
+    def test_stopped_release_network_bindings_are_discovered_read_only(self) -> None:
+        values = build_physical_chart_bundle(
+            lock=self.lock,
+            plan=self.plan,
+            bindings=self.bindings,
+        ).to_dict()["values"]
+
+        def runner(command, _timeout_seconds: int) -> CommandResult:
+            rendered = " ".join(command)
+            self.assertIn("StrictHostKeyChecking=yes", rendered)
+            self.assertIn("helm get values", rendered)
+            return CommandResult(0, json.dumps(values), "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            known_hosts = Path(directory) / "known_hosts"
+            known_hosts.write_text("fixture\n", encoding="utf-8")
+            discovered = discover_physical_chart_bindings(
+                known_hosts=known_hosts,
+                runner=runner,
+            )
+
+        self.assertEqual(self.bindings, discovered)
 
     def test_template_overlay_installs_singleton_digest_contract(self) -> None:
         overlaid = overlay_pinned_deployment_template(

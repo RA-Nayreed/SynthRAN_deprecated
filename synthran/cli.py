@@ -46,6 +46,12 @@ from synthran.r2lab.foundation import (
     R2LabPhysicalFoundationError,
     execute_physical_foundation_acceptance,
 )
+from synthran.r2lab.deployment import PhysicalChartBindings
+from synthran.r2lab.gnb import (
+    R2LabPhysicalGnbError,
+    execute_physical_gnb_n2_acceptance,
+    execute_physical_gnb_staging,
+)
 from synthran.network.resources import (
     DEFAULT_DURATION_MINUTES,
     ResourcePreparationError,
@@ -312,6 +318,36 @@ def _add_r2lab_selection_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_physical_authority_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--slice",
+        dest="r2lab_slice",
+        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
+        help="R2Lab slice name (or SYNTHRAN_R2LAB_SLICE)",
+    )
+    parser.add_argument(
+        "--owner",
+        default=os.environ.get("SYNTHRAN_OWNER"),
+        help="expected SLICES/POS owner (or SYNTHRAN_OWNER)",
+    )
+    parser.add_argument(
+        "--reservation-id",
+        default=os.environ.get("SYNTHRAN_RESERVATION_ID"),
+        help="expected active reservation identifier",
+    )
+    parser.add_argument(
+        "--allocation-id",
+        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
+        help="expected current allocation identifier",
+    )
+    parser.add_argument(
+        "--known-hosts",
+        type=Path,
+        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
+        help="strict SLICES known-hosts path",
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="synthran")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -363,12 +399,7 @@ def _parser() -> argparse.ArgumentParser:
     r2lab_release = r2lab_commands.add_parser(
         "release", help="power off only resources owned by one SynthRAN R2Lab run"
     )
-    r2lab_release.add_argument(
-        "--slice",
-        dest="r2lab_slice",
-        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-        help="R2Lab slice name (or SYNTHRAN_R2LAB_SLICE)",
-    )
+    _add_physical_authority_arguments(r2lab_release)
     r2lab_release.add_argument("--run-id", required=True)
     r2lab_release.add_argument(
         "--timeout", type=int, default=DEFAULT_R2LAB_TIMEOUT_SECONDS
@@ -384,38 +415,53 @@ def _parser() -> argparse.ArgumentParser:
         "foundation",
         help="verify and bind the stopped SLICES and Open5GS foundation",
     )
-    r2lab_foundation.add_argument(
-        "--slice",
-        dest="r2lab_slice",
-        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-        help="R2Lab slice name (or SYNTHRAN_R2LAB_SLICE)",
-    )
+    _add_physical_authority_arguments(r2lab_foundation)
     r2lab_foundation.add_argument("--run-id", required=True)
     r2lab_foundation.add_argument("--previous-run-id", required=True)
-    r2lab_foundation.add_argument(
-        "--owner",
-        default=os.environ.get("SYNTHRAN_OWNER"),
-        help="expected SLICES/POS owner (or SYNTHRAN_OWNER)",
-    )
-    r2lab_foundation.add_argument(
-        "--reservation-id",
-        default=os.environ.get("SYNTHRAN_RESERVATION_ID"),
-        help="expected active reservation identifier",
-    )
-    r2lab_foundation.add_argument(
-        "--allocation-id",
-        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
-        help="expected current allocation identifier",
-    )
-    r2lab_foundation.add_argument(
-        "--known-hosts",
-        type=Path,
-        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
-        help="strict SLICES known-hosts path",
-    )
     r2lab_foundation.add_argument("--timeout", type=int, default=120)
     r2lab_foundation.add_argument("--json", action="store_true")
     r2lab_foundation.add_argument(
+        "--run-root",
+        type=Path,
+        default=Path(".synthran/r2lab"),
+        help=argparse.SUPPRESS,
+    )
+
+    r2lab_gnb_stage = r2lab_commands.add_parser(
+        "gnb-stage",
+        help="render and stage the physical gNB while it remains stopped",
+    )
+    _add_physical_authority_arguments(r2lab_gnb_stage)
+    r2lab_gnb_stage.add_argument("--run-id", required=True)
+    r2lab_gnb_stage.add_argument("--amf-n2-address")
+    r2lab_gnb_stage.add_argument("--gnb-n2-address")
+    r2lab_gnb_stage.add_argument("--n300-address")
+    r2lab_gnb_stage.add_argument("--ru-pod-address")
+    r2lab_gnb_stage.add_argument("--ru-subnet")
+    r2lab_gnb_stage.add_argument(
+        "--lock", type=Path, default=Path("dependencies.lock.yml")
+    )
+    r2lab_gnb_stage.add_argument("--deps-root", type=Path, default=Path(".deps"))
+    r2lab_gnb_stage.add_argument("--timeout", type=int, default=120)
+    r2lab_gnb_stage.add_argument("--json", action="store_true")
+    r2lab_gnb_stage.add_argument(
+        "--run-root",
+        type=Path,
+        default=Path(".synthran/r2lab"),
+        help=argparse.SUPPRESS,
+    )
+
+    r2lab_gnb_start = r2lab_commands.add_parser(
+        "gnb-start",
+        help="start one physical gNB and prove its N2 association",
+    )
+    _add_physical_authority_arguments(r2lab_gnb_start)
+    r2lab_gnb_start.add_argument("--run-id", required=True)
+    r2lab_gnb_start.add_argument("--timeout", type=int, default=120)
+    r2lab_gnb_start.add_argument("--n2-attempts", type=int, default=12)
+    r2lab_gnb_start.add_argument("--n2-interval", type=float, default=5.0)
+    r2lab_gnb_start.add_argument("--json", action="store_true")
+    r2lab_gnb_start.add_argument(
         "--run-root",
         type=Path,
         default=Path(".synthran/r2lab"),
@@ -637,6 +683,53 @@ def _r2lab_selection(args: argparse.Namespace) -> R2LabSelection:
     )
 
 
+def _require_physical_authority(
+    args: argparse.Namespace, operation: str
+) -> tuple[str, str, str | None, str | None, Path]:
+    required = {
+        "--slice or SYNTHRAN_R2LAB_SLICE": args.r2lab_slice,
+        "--owner or SYNTHRAN_OWNER": args.owner,
+        "--known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS": args.known_hosts,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise R2LabPhysicalGnbError(
+            f"{operation} requires " + ", ".join(missing)
+        )
+    return (
+        args.r2lab_slice,
+        args.owner,
+        args.reservation_id,
+        args.allocation_id,
+        Path(args.known_hosts),
+    )
+
+
+def _physical_chart_bindings(args: argparse.Namespace) -> PhysicalChartBindings | None:
+    values = {
+        "--amf-n2-address": args.amf_n2_address,
+        "--gnb-n2-address": args.gnb_n2_address,
+        "--n300-address": args.n300_address,
+        "--ru-pod-address": args.ru_pod_address,
+        "--ru-subnet": args.ru_subnet,
+    }
+    supplied = {name for name, value in values.items() if value is not None}
+    if not supplied:
+        return None
+    missing = [name for name, value in values.items() if value is None]
+    if missing:
+        raise R2LabPhysicalGnbError(
+            "explicit physical chart bindings require " + ", ".join(missing)
+        )
+    return PhysicalChartBindings(
+        amf_n2_address=args.amf_n2_address,
+        gnb_n2_address=args.gnb_n2_address,
+        n300_address=args.n300_address,
+        ru_pod_address=args.ru_pod_address,
+        ru_subnet=args.ru_subnet,
+    )
+
+
 def _dispatch_r2lab(args: argparse.Namespace) -> int:
     if args.r2lab_command == "doctor":
         report = run_r2lab_doctor(
@@ -682,6 +775,10 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
             run_root=args.run_root,
             timeout_seconds=args.timeout,
             progress=sys.stdout,
+            owner=args.owner,
+            reservation_id=args.reservation_id,
+            allocation_id=args.allocation_id,
+            known_hosts=(Path(args.known_hosts) if args.known_hosts else None),
         )
         print(f"R2Lab resources released for run {result.run_id}.")
         print(f"Sanitized manifest: {result.manifest_path}")
@@ -720,6 +817,64 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if args.r2lab_command == "gnb-stage":
+        slice_name, owner, reservation_id, allocation_id, known_hosts = (
+            _require_physical_authority(args, "physical gNB staging")
+        )
+        result = execute_physical_gnb_staging(
+            run_id=args.run_id,
+            slice_name=slice_name,
+            owner=owner,
+            reservation_id=reservation_id,
+            allocation_id=allocation_id,
+            known_hosts=known_hosts,
+            now=datetime.now(timezone.utc),
+            bindings=_physical_chart_bindings(args),
+            lock_path=args.lock,
+            deps_root=args.deps_root,
+            run_root=args.run_root,
+            timeout_seconds=args.timeout,
+        )
+        print(
+            json.dumps(result.to_dict(), indent=2, sort_keys=True)
+            if args.json
+            else (
+                f"Physical gNB staged and proven stopped for run {result.run_id}.\n"
+                f"Sanitized evidence: {result.evidence_path}"
+            )
+        )
+        return 0
+    if args.r2lab_command == "gnb-start":
+        slice_name, owner, reservation_id, allocation_id, known_hosts = (
+            _require_physical_authority(args, "physical gNB start")
+        )
+        result = execute_physical_gnb_n2_acceptance(
+            run_id=args.run_id,
+            slice_name=slice_name,
+            owner=owner,
+            reservation_id=reservation_id,
+            allocation_id=allocation_id,
+            known_hosts=known_hosts,
+            now=datetime.now(timezone.utc),
+            run_root=args.run_root,
+            timeout_seconds=args.timeout,
+            attempts=args.n2_attempts,
+            poll_interval_seconds=args.n2_interval,
+        )
+        print(
+            json.dumps(result.to_dict(), indent=2, sort_keys=True)
+            if args.json
+            else (
+                f"Physical gNB and N2 accepted for run {result.run_id}.\n"
+                f"Sanitized evidence: {result.evidence_path}"
+                if result.proven
+                else (
+                    f"Physical gNB N2 was not proven for run {result.run_id}.\n"
+                    f"Sanitized evidence: {result.evidence_path}"
+                )
+            )
+        )
+        return 0 if result.proven else 2
     raise AssertionError("unreachable R2Lab command")
 
 
@@ -1391,6 +1546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         NetworkRuntimeError,
         PrivacyError,
         R2LabPhysicalFoundationError,
+        R2LabPhysicalGnbError,
         R2LabResourceError,
         ResearchError,
         ResourcePreparationError,

@@ -781,6 +781,55 @@ class PhysicalHelmRenderEvidence:
             "acceptance": "offline-render-validated",
         }
 
+    @classmethod
+    def from_dict(
+        cls, payload: Mapping[str, object]
+    ) -> "PhysicalHelmRenderEvidence":
+        if payload.get("acceptance") != "offline-render-validated":
+            raise R2LabPhysicalHelmError(
+                "stored physical render evidence has an invalid acceptance state"
+            )
+        integer_fields = (
+            "replicas",
+            "carrier_arfcn",
+            "channel_bandwidth_mhz",
+            "antennas_dl",
+            "antennas_ul",
+        )
+        if any(
+            not isinstance(payload.get(field), int)
+            or isinstance(payload.get(field), bool)
+            for field in integer_fields
+        ):
+            raise R2LabPhysicalHelmError(
+                "stored physical render evidence contains malformed numeric values"
+            )
+        if any(
+            not isinstance(payload.get(field), str) or not payload.get(field)
+            for field in ("sha256", "strategy", "image_reference")
+        ):
+            raise R2LabPhysicalHelmError(
+                "stored physical render evidence contains malformed text values"
+            )
+        evidence = cls(
+            sha256=str(payload.get("sha256", "")),
+            replicas=payload.get("replicas", -1),
+            strategy=str(payload.get("strategy", "")),
+            image_reference=str(payload.get("image_reference", "")),
+            carrier_arfcn=payload.get("carrier_arfcn", -1),
+            channel_bandwidth_mhz=payload.get("channel_bandwidth_mhz", -1),
+            antennas_dl=payload.get("antennas_dl", -1),
+            antennas_ul=payload.get("antennas_ul", -1),
+        )
+        if evidence.to_dict() != dict(payload):
+            raise R2LabPhysicalHelmError(
+                "stored physical render evidence is malformed"
+            )
+        _validate_sha256_digest(
+            evidence.sha256, "render digest", R2LabPhysicalHelmError
+        )
+        return evidence
+
 
 def _locked_helm_version(lock: DependencyLock, error_type: type[RuntimeError]) -> str:
     tools = lock.raw.get("tools")
@@ -1125,6 +1174,63 @@ class PhysicalStagingResult:
             "hardware_mutation": False,
         }
 
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "PhysicalStagingResult":
+        if payload.get("status") != "staged-stopped":
+            raise R2LabPhysicalStagingError(
+                "stored physical staging result has an invalid status"
+            )
+        if (
+            payload.get("hardware_mutation") is not False
+            or payload.get("namespace_owned") is not True
+            or payload.get("deployment_bound") is not True
+            or payload.get("desired_replicas") != 0
+            or isinstance(payload.get("desired_replicas"), bool)
+            or payload.get("gnb_pod_count") != 0
+            or isinstance(payload.get("gnb_pod_count"), bool)
+        ):
+            raise R2LabPhysicalStagingError(
+                "stored physical staging result is not stopped and ownership-bound"
+            )
+        result = cls(
+            run_id=str(payload.get("run_id", "")),
+            package_sha256=str(payload.get("package_sha256", "")),
+            values_sha256=str(payload.get("values_sha256", "")),
+            render_sha256=str(payload.get("render_sha256", "")),
+            namespace_owned=payload.get("namespace_owned") is True,
+            desired_replicas=payload.get("desired_replicas", -1),
+            gnb_pod_count=payload.get("gnb_pod_count", -1),
+            deployment_bound=payload.get("deployment_bound") is True,
+        )
+        if result.to_dict() != dict(payload):
+            raise R2LabPhysicalStagingError(
+                "stored physical staging result is malformed"
+            )
+        try:
+            validated_run_id = validate_run_id(result.run_id)
+        except Exception as exc:
+            raise R2LabPhysicalStagingError(str(exc)) from exc
+        if validated_run_id != result.run_id:
+            raise R2LabPhysicalStagingError(
+                "stored physical staging run ID is not canonical"
+            )
+        for value, label in (
+            (result.package_sha256, "package digest"),
+            (result.values_sha256, "values digest"),
+            (result.render_sha256, "render digest"),
+        ):
+            _validate_sha256_digest(value, label, R2LabPhysicalStagingError)
+        if (
+            not result.namespace_owned
+            or not result.deployment_bound
+            or result.desired_replicas != 0
+            or result.gnb_pod_count != 0
+        ):
+            raise R2LabPhysicalStagingError(
+                "stored physical staging result is not stopped and ownership-bound"
+            )
+        return result
+
 
 @dataclass(frozen=True)
 class PhysicalGnbStartResult:
@@ -1145,6 +1251,72 @@ class PhysicalGnbStartResult:
             "maximum_observed_pods": self.maximum_observed_pods,
             "started_exactly_one": True,
             "status": "gnb-started",
+            "hardware_mutation": True,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "PhysicalGnbStartResult":
+        if payload.get("status") != "gnb-started":
+            raise R2LabPhysicalStartError(
+                "stored physical gNB start result has an invalid status"
+            )
+        maximum = payload.get("maximum_observed_pods")
+        if (
+            payload.get("hardware_mutation") is not True
+            or payload.get("started_exactly_one") is not True
+            or not isinstance(maximum, int)
+            or isinstance(maximum, bool)
+            or maximum != 1
+        ):
+            raise R2LabPhysicalStartError(
+                "stored physical gNB start result does not prove singleton ownership"
+            )
+        result = cls(
+            run_id=str(payload.get("run_id", "")),
+            package_sha256=str(payload.get("package_sha256", "")),
+            values_sha256=str(payload.get("values_sha256", "")),
+            render_sha256=str(payload.get("render_sha256", "")),
+            claim_sha256=str(payload.get("claim_sha256", "")),
+            maximum_observed_pods=payload.get("maximum_observed_pods", -1),
+        )
+        if result.to_dict() != dict(payload):
+            raise R2LabPhysicalStartError(
+                "stored physical gNB start result is malformed"
+            )
+        try:
+            validated_run_id = validate_run_id(result.run_id)
+        except Exception as exc:
+            raise R2LabPhysicalStartError(str(exc)) from exc
+        if validated_run_id != result.run_id:
+            raise R2LabPhysicalStartError(
+                "stored physical gNB start run ID is not canonical"
+            )
+        for value, label in (
+            (result.package_sha256, "package digest"),
+            (result.values_sha256, "values digest"),
+            (result.render_sha256, "render digest"),
+            (result.claim_sha256, "claim digest"),
+        ):
+            _validate_sha256_digest(value, label, R2LabPhysicalStartError)
+        if result.maximum_observed_pods != 1:
+            raise R2LabPhysicalStartError(
+                "stored physical gNB start result does not prove singleton ownership"
+            )
+        return result
+
+
+@dataclass(frozen=True)
+class PhysicalGnbStopResult:
+    run_id: str
+    desired_replicas: int
+    gnb_pod_count: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "desired_replicas": self.desired_replicas,
+            "gnb_pod_count": self.gnb_pod_count,
+            "status": "gnb-stopped",
             "hardware_mutation": True,
         }
 
@@ -1226,6 +1398,111 @@ def _parse_pods(text: str) -> int:
     return len(items)
 
 
+def discover_physical_chart_bindings(
+    *,
+    known_hosts: Path,
+    runner: Runner,
+    timeout_seconds: int = 60,
+) -> PhysicalChartBindings:
+    """Read the stopped Helm release's accepted network bindings."""
+
+    if timeout_seconds < 5 or timeout_seconds > 300:
+        raise R2LabPhysicalChartError(
+            "physical chart discovery timeout must be between 5 and 300 seconds"
+        )
+    known_hosts = known_hosts.expanduser().resolve()
+    if not known_hosts.is_file():
+        raise R2LabPhysicalChartError("strict SLICES known-hosts file is missing")
+    try:
+        result = runner(
+            _ssh(
+                known_hosts,
+                "helm",
+                "get",
+                "values",
+                RELEASE,
+                "--namespace",
+                NAMESPACE,
+                "--output",
+                "json",
+            ),
+            timeout_seconds,
+        )
+    except Exception as exc:
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values could not be observed"
+        ) from exc
+    if result.returncode != 0:
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values query returned nonzero"
+        )
+    try:
+        values = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values are not JSON"
+        ) from exc
+    if not isinstance(values, dict):
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values are malformed"
+        )
+    gnb_config = values.get("gnbConfig")
+    cu_cp = gnb_config.get("cu_cp") if isinstance(gnb_config, dict) else None
+    amf = cu_cp.get("amf") if isinstance(cu_cp, dict) else None
+    ru_sdr = gnb_config.get("ru_sdr") if isinstance(gnb_config, dict) else None
+    usrp = values.get("usrp")
+    ipam = usrp.get("ipam") if isinstance(usrp, dict) else None
+    if not all(isinstance(item, dict) for item in (amf, ru_sdr, usrp, ipam)):
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values do not contain complete network bindings"
+        )
+    device_args = ru_sdr.get("device_args")
+    match = (
+        re.fullmatch(r"addr=([^,]+),type=n3xx", device_args)
+        if isinstance(device_args, str)
+        else None
+    )
+    if match is None:
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values do not contain reviewed N300 device arguments"
+        )
+    gnb_address = values.get("gnbIp")
+    if gnb_address != amf.get("bind_addr"):
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values disagree on the gNB N2 address"
+        )
+    try:
+        raw_bindings = (
+            amf["addr"],
+            gnb_address,
+            match.group(1),
+            values["ruPodIp"],
+            ipam["subnet"],
+            values.get("n3networkName"),
+            values.get("ru"),
+            values.get("nodeName"),
+        )
+    except (KeyError, TypeError) as exc:
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values are missing a network binding"
+        ) from exc
+    if not all(isinstance(value, str) and value for value in raw_bindings):
+        raise R2LabPhysicalChartError(
+            "stopped physical Helm values contain malformed network bindings"
+        )
+    bindings = PhysicalChartBindings(
+        amf_n2_address=raw_bindings[0],
+        gnb_n2_address=raw_bindings[1],
+        n300_address=raw_bindings[2],
+        ru_pod_address=raw_bindings[3],
+        ru_subnet=raw_bindings[4],
+        n3_network_name=raw_bindings[5],
+        ru_master=raw_bindings[6],
+        node_name=raw_bindings[7],
+    )
+    return bindings.validate()
+
+
 def _deployment_binding_values(
     *,
     run_id: str,
@@ -1303,8 +1580,8 @@ def execute_stopped_physical_staging(
     render_evidence: PhysicalHelmRenderEvidence,
     run_id: str,
     owner: str,
-    reservation_id: str,
-    allocation_id: str,
+    reservation_id: str | None,
+    allocation_id: str | None,
     known_hosts: Path,
     now: datetime,
     runner: Runner,
@@ -1315,8 +1592,10 @@ def execute_stopped_physical_staging(
     except Exception as exc:
         raise R2LabPhysicalStagingError(str(exc)) from exc
     owner = _validate_authority(owner, "owner")
-    reservation_id = _validate_authority(reservation_id, "reservation ID")
-    allocation_id = _validate_authority(allocation_id, "allocation ID")
+    if reservation_id is not None:
+        reservation_id = _validate_authority(reservation_id, "reservation ID")
+    if allocation_id is not None:
+        allocation_id = _validate_authority(allocation_id, "allocation ID")
     if artifact.run_id != run_id:
         raise R2LabPhysicalStagingError("physical artifact run ID does not match staging run")
     if render_evidence.replicas != 0 or render_evidence.strategy != "Recreate":
@@ -1348,7 +1627,7 @@ def execute_stopped_physical_staging(
         raise R2LabPhysicalStagingError("physical chart values digest changed after review")
 
     try:
-        verify_reservation(
+        reservation_id = verify_reservation(
             runner=runner,
             reservation_id=reservation_id,
             owner=owner,
@@ -1356,7 +1635,7 @@ def execute_stopped_physical_staging(
             now=now,
             timeout_seconds=min(timeout_seconds, 60),
         )
-        verify_allocations(
+        allocation_id = verify_allocations(
             runner=runner,
             allocation_id=allocation_id,
             owner=owner,
@@ -1873,8 +2152,8 @@ def execute_authorized_physical_gnb_start(
     authority: PhysicalStartAuthority,
     staging: PhysicalStagingResult,
     owner: str,
-    reservation_id: str,
-    allocation_id: str,
+    reservation_id: str | None,
+    allocation_id: str | None,
     known_hosts: Path,
     now: datetime,
     runner: Runner,
@@ -1906,8 +2185,10 @@ def execute_authorized_physical_gnb_start(
 
     try:
         owner = _validate_authority(owner, "owner")
-        reservation_id = _validate_authority(reservation_id, "reservation ID")
-        allocation_id = _validate_authority(allocation_id, "allocation ID")
+        if reservation_id is not None:
+            reservation_id = _validate_authority(reservation_id, "reservation ID")
+        if allocation_id is not None:
+            allocation_id = _validate_authority(allocation_id, "allocation ID")
     except R2LabPhysicalStagingError as exc:
         raise R2LabPhysicalStartError(str(exc)) from exc
     known_hosts = known_hosts.expanduser().resolve()
@@ -1915,7 +2196,7 @@ def execute_authorized_physical_gnb_start(
         raise R2LabPhysicalStartError("strict SLICES known-hosts file is missing")
 
     try:
-        verify_reservation(
+        reservation_id = verify_reservation(
             runner=runner,
             reservation_id=reservation_id,
             owner=owner,
@@ -1923,7 +2204,7 @@ def execute_authorized_physical_gnb_start(
             now=now,
             timeout_seconds=min(timeout_seconds, 60),
         )
-        verify_allocations(
+        allocation_id = verify_allocations(
             runner=runner,
             allocation_id=allocation_id,
             owner=owner,
@@ -2043,4 +2324,140 @@ def execute_authorized_physical_gnb_start(
         render_sha256=staging.render_sha256,
         claim_sha256=authority.claim_sha256,
         maximum_observed_pods=lifecycle.maximum_observed_pods,
+    )
+
+
+def execute_authorized_physical_gnb_stop(
+    *,
+    staging: PhysicalStagingResult,
+    owner: str,
+    reservation_id: str | None,
+    allocation_id: str | None,
+    known_hosts: Path,
+    now: datetime,
+    runner: Runner,
+    sleeper: Sleeper,
+    timeout_seconds: int = DEFAULT_STAGING_TIMEOUT_SECONDS,
+    shutdown_attempts: int = DEFAULT_POLL_ATTEMPTS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> PhysicalGnbStopResult:
+    """Stop only the artifact-bound gNB Deployment owned by one physical run."""
+
+    staging = PhysicalStagingResult.from_dict(staging.to_dict())
+    if now.tzinfo is None:
+        raise R2LabPhysicalStartError("physical gNB stop time must be timezone-aware")
+    if timeout_seconds < 30 or timeout_seconds > 600:
+        raise R2LabPhysicalStartError(
+            "physical gNB stop timeout must be between 30 and 600 seconds"
+        )
+    if shutdown_attempts < 1 or poll_interval_seconds < 0:
+        raise R2LabPhysicalStartError("physical gNB stop wait settings are invalid")
+    try:
+        owner = _validate_authority(owner, "owner")
+        if reservation_id is not None:
+            reservation_id = _validate_authority(reservation_id, "reservation ID")
+        if allocation_id is not None:
+            allocation_id = _validate_authority(allocation_id, "allocation ID")
+    except R2LabPhysicalStagingError as exc:
+        raise R2LabPhysicalStartError(str(exc)) from exc
+    known_hosts = known_hosts.expanduser().resolve()
+    if not known_hosts.is_file():
+        raise R2LabPhysicalStartError("strict SLICES known-hosts file is missing")
+
+    try:
+        reservation_id = verify_reservation(
+            runner=runner,
+            reservation_id=reservation_id,
+            owner=owner,
+            nodes={CORE_NODE, RAN_NODE},
+            now=now,
+            timeout_seconds=min(timeout_seconds, 60),
+        )
+        allocation_id = verify_allocations(
+            runner=runner,
+            allocation_id=allocation_id,
+            owner=owner,
+            nodes={CORE_NODE, RAN_NODE},
+            timeout_seconds=min(timeout_seconds, 60),
+        )
+    except Exception as exc:
+        raise R2LabPhysicalStartError(
+            "fresh SLICES authority was not proven for gNB stop"
+        ) from exc
+
+    namespace_owner = _checked(
+        runner,
+        _ssh(
+            known_hosts,
+            "kubectl",
+            "get",
+            "namespace",
+            NAMESPACE,
+            "-o",
+            "jsonpath={.metadata.labels.synthran\\.run/id}",
+        ),
+        min(timeout_seconds, 60),
+        "Open5GS namespace ownership query",
+    ).stdout.strip()
+    if namespace_owner != staging.run_id:
+        raise R2LabPhysicalStartError(
+            "Open5GS namespace is not owned by the physical run being stopped"
+        )
+
+    def bound_deployment(*, require_stopped: bool) -> int:
+        deployment = _checked(
+            runner,
+            _ssh(
+                known_hosts,
+                "kubectl",
+                "get",
+                f"deployment/{RELEASE}",
+                "-n",
+                NAMESPACE,
+                "-o",
+                "json",
+            ),
+            min(timeout_seconds, 60),
+            "bound physical gNB Deployment query",
+        ).stdout
+        return _validate_deployment_binding_json(
+            deployment,
+            run_id=staging.run_id,
+            package_sha256=staging.package_sha256,
+            values_sha256=staging.values_sha256,
+            render_sha256=staging.render_sha256,
+            require_stopped=require_stopped,
+            error_type=R2LabPhysicalStartError,
+        )
+
+    bound_deployment(require_stopped=False)
+
+    def cluster_runner(
+        command: Sequence[str], command_timeout: int
+    ) -> CommandResult:
+        return runner(_ssh(known_hosts, *tuple(command)), command_timeout)
+
+    if _request_scale(cluster_runner, 0, min(timeout_seconds, 60)) != 0:
+        raise R2LabPhysicalStartError("physical gNB scale-to-zero returned nonzero")
+    try:
+        stopped, _maximum = _wait_for_zero(
+            runner=cluster_runner,
+            sleeper=sleeper,
+            timeout_seconds=min(timeout_seconds, 60),
+            attempts=shutdown_attempts,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+    except R2LabGnbLifecycleError as exc:
+        raise R2LabPhysicalStartError(
+            "physical gNB stop state became unobservable"
+        ) from exc
+    if not stopped:
+        raise R2LabPhysicalStartError(
+            "physical gNB did not reach a proven zero-pod state"
+        )
+    desired = bound_deployment(require_stopped=True)
+    return PhysicalGnbStopResult(
+        run_id=staging.run_id,
+        desired_replicas=desired,
+        gnb_pod_count=0,
     )

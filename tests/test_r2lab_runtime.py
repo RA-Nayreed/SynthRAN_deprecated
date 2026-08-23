@@ -25,6 +25,7 @@ from synthran.r2lab.deployment import (
 from synthran.r2lab.runtime import (
     N2State,
     R2LabRuntimeVerificationError,
+    execute_physical_gnb_n2_verification,
     execute_physical_runtime_verification,
     execute_qfit_runtime_probe,
     parse_n2_log_state,
@@ -432,6 +433,38 @@ class R2LabPhysicalRuntimeOrchestrationTests(unittest.TestCase):
         self.assertNotIn("198.51.100.2", persisted)
         self.assertNotIn("198.51.100.10", persisted)
         self.assertNotIn("srsran-gnb-current", persisted)
+
+    def test_gnb_n2_boundary_retries_without_entering_ue_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root, known_hosts, evidence, evidence_path = self.prepared_evidence(directory)
+            r2lab = RuntimeR2LabRunner()
+            cluster = RuntimeClusterRunner(gnb_log="gNB starting\n")
+
+            def make_n2_visible(_seconds: float) -> None:
+                cluster.gnb_log = "NGAP: AMF connection established\n"
+
+            result = execute_physical_gnb_n2_verification(
+                evidence=evidence,
+                slice_name=SLICE,
+                run_root=root,
+                known_hosts=known_hosts,
+                r2lab_runner=r2lab,
+                cluster_runner=cluster,
+                evidence_path=evidence_path,
+                attempts=2,
+                poll_interval_seconds=0,
+                sleeper=make_n2_visible,
+            )
+
+        self.assertTrue(result.gnb_n2.proven)
+        self.assertEqual(2, result.attempts)
+        self.assertEqual(
+            PhysicalAcceptanceStage.UE_MANAGEMENT,
+            result.evidence.acceptance.next_stage,
+        )
+        rendered = "\n".join(shlex.join(command) for command in r2lab.commands)
+        self.assertNotIn("AT+QNWINFO", rendered)
+        self.assertNotIn("/dev/cdc-wdm0", rendered)
 
     def test_not_ready_qfit_stops_before_modem_runtime_probes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

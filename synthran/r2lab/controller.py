@@ -22,11 +22,15 @@ from typing import Callable, Mapping, Sequence, TextIO
 
 from synthran.live_preflight import CommandResult
 from synthran.network.runtime import validate_run_id
+from synthran.r2lab.acceptance import PhysicalRunEvidence, R2LabAcceptanceError
 from synthran.r2lab.deployment import (
     PhysicalGnbStartResult,
     PhysicalStagingResult,
     PhysicalStartAuthority,
+    R2LabPhysicalStagingError,
+    R2LabPhysicalStartError,
     execute_authorized_physical_gnb_start,
+    execute_authorized_physical_gnb_stop,
 )
 from synthran.r2lab.provider import (
     CleanupEvidence,
@@ -1184,8 +1188,8 @@ def execute_physical_gnb_start(
     slice_name: str,
     staging: PhysicalStagingResult,
     owner: str,
-    reservation_id: str,
-    allocation_id: str,
+    reservation_id: str | None,
+    allocation_id: str | None,
     known_hosts: Path,
     now: datetime,
     run_root: Path = Path(".synthran/r2lab"),
@@ -1242,8 +1246,15 @@ def execute_release(
     runner: Runner = subprocess_runner,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     progress: TextIO | None = None,
+    owner: str | None = None,
+    reservation_id: str | None = None,
+    allocation_id: str | None = None,
+    known_hosts: Path | None = None,
+    now: datetime | None = None,
+    cluster_runner: Runner = subprocess_runner,
+    sleeper: Sleeper = time.sleep,
 ) -> R2LabResult:
-    """Prove both exact resources off before releasing one local claim."""
+    """Stop a bound gNB, prove exact resources off, then release one claim."""
 
     run_id = _validate_run(run_id)
     slice_name = _validate_slice(slice_name)
@@ -1309,6 +1320,70 @@ def execute_release(
         log_lines.append(f"{stage}: OK")
         report(f"{stage}: OK")
         return True
+
+    physical_evidence_path = run_directory / "physical-run.json"
+    if physical_evidence_path.exists():
+        try:
+            physical_evidence = PhysicalRunEvidence.read_json(
+                physical_evidence_path
+            )
+        except R2LabAcceptanceError as exc:
+            raise R2LabResourceError(
+                "physical run evidence is unreadable; release was not started"
+            ) from exc
+        if physical_evidence.run_id != run_id:
+            raise R2LabResourceError(
+                "physical run evidence belongs to another release claim"
+            )
+        if physical_evidence.gnb_start is not None:
+            required = {
+                "owner": owner,
+                "strict SLICES known-hosts": known_hosts,
+            }
+            missing = [label for label, value in required.items() if value is None]
+            if missing:
+                raise R2LabResourceError(
+                    "physical release requires " + ", ".join(missing)
+                )
+            try:
+                staging_payload = _load_json(
+                    run_directory / "physical" / "physical-staging.json",
+                    "physical staging result",
+                )
+                staging = PhysicalStagingResult.from_dict(staging_payload)
+            except (R2LabResourceError, R2LabPhysicalStagingError) as exc:
+                raise R2LabResourceError(
+                    "physical staging evidence is unreadable; release was not started"
+                ) from exc
+            report("gnb-scale-zero-release: running...")
+            try:
+                stopped = execute_authorized_physical_gnb_stop(
+                    staging=staging,
+                    owner=owner,
+                    reservation_id=reservation_id,
+                    allocation_id=allocation_id,
+                    known_hosts=known_hosts,
+                    now=now or _utc_now(),
+                    runner=cluster_runner,
+                    sleeper=sleeper,
+                    timeout_seconds=max(timeout_seconds, 30),
+                )
+            except R2LabPhysicalStartError as exc:
+                log_lines.append(
+                    "gnb-scale-zero-release: FAIL - exact stopped state was not proven"
+                )
+                write_manifest("release-failed", "gnb-scale-zero-release")
+                finish_log()
+                report("gnb-scale-zero-release: FAILED")
+                raise R2LabResourceError(
+                    "physical gNB could not be proven stopped; hardware release was not attempted"
+                ) from exc
+            if stopped.desired_replicas != 0 or stopped.gnb_pod_count != 0:
+                raise R2LabResourceError(
+                    "physical gNB stop returned an inconsistent result"
+                )
+            log_lines.append("gnb-scale-zero-release: OK - state=proven-zero-pods")
+            report("gnb-scale-zero-release: OK")
 
     def unknown(resource: str, stage: str, source: str) -> CleanupEvidence:
         return CleanupEvidence(
