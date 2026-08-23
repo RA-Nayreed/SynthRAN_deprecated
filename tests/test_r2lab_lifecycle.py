@@ -12,6 +12,7 @@ from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import load_inventory
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.controller import (
+    QFIT_IMAGE,
     R2LabSelection,
     build_plan,
     execute_physical_gnb_start,
@@ -113,6 +114,13 @@ class LifecycleRunner:
             state = self.power.get(qfit, "off")
             if state in {"on", "off"}:
                 return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
+            return CommandResult(0, "", "")
+        if (
+            remote[:4] == ("rhubarbe", "load", "-i", QFIT_IMAGE)
+            and len(remote) == 5
+        ):
+            node = int(remote[4])
+            self.power[f"qfit{node:02d}"] = "on"
             return CommandResult(0, "", "")
         if remote == ("curl", "-fsS", "http://reboot07/usrpstatus"):
             return CommandResult(0, f"usrp{self.qfit_usb_power}\n", "")

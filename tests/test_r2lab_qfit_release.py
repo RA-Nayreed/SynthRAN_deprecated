@@ -7,6 +7,7 @@ import unittest
 
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.controller import (
+    QFIT_IMAGE,
     R2LabResourceError,
     R2LabSelection,
     build_plan,
@@ -53,6 +54,9 @@ class QfitLifecycleRunner:
             return CommandResult(0, "reboot07:ok\n", "")
         if remote == ("rhubarbe", "status", "7"):
             return CommandResult(0, f"reboot07:{self.qfit_state}\n", "")
+        if remote == ("rhubarbe", "load", "-i", QFIT_IMAGE, "7"):
+            self.qfit_state = "on"
+            return CommandResult(0, "", "")
 
         if remote == ("curl", "-fsS", "http://reboot07/usrpstatus"):
             return CommandResult(0, f"usrp{self.qfit_usb_state}\n", "")

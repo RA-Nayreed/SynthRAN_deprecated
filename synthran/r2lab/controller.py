@@ -69,7 +69,9 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_REACHABILITY_ATTEMPTS = 12
 DEFAULT_REACHABILITY_DELAY_SECONDS = 10.0
 DEFAULT_POWER_SETTLE_SECONDS = 20.0
+QFIT_IMAGE_LOAD_TIMEOUT_SECONDS = 300
 QFIT_SSH_WAIT_TIMEOUT_SECONDS = 300
+QFIT_IMAGE = "mbim-quectel-any-dnn"
 QFIT_INITIALIZER = "/usr/local/bin/init.sh"
 
 SUPPORTED_RADIOS = frozenset({"n300", "n320"})
@@ -349,7 +351,10 @@ class R2LabPlan:
             qfit_host = f"fit{qfit_node:02d}"
             ue_commands = [
                 "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>",
-                f"ssh <r2lab-slice>@faraday.inria.fr qfit on {self.selection.ue}",
+                (
+                    "ssh <r2lab-slice>@faraday.inria.fr rhubarbe load "
+                    f"-i {QFIT_IMAGE} <qfit-node>"
+                ),
                 "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>",
                 "ssh <r2lab-slice>@faraday.inria.fr rhubarbe wait <qfit-node>",
                 (
@@ -916,31 +921,11 @@ def execute_prepare(
         )
         report(f"{stage}: OK")
 
-    def require_qfit(stage: str, requested: PowerState) -> None:
-        report(f"{stage}: running...")
-        try:
-            operation = execute_verified_qfit_transition(
-                qfit=plan.selection.ue,
-                requested_state=requested,
-                runner=provider,
-                timeout_seconds=timeout_seconds,
-            )
-        except (R2LabQfitStateError, R2LabResourceError, OSError, ValueError) as exc:
-            report(f"{stage}: FAILED")
-            fail(stage, "provider qfit state could not be resolved")
-            raise R2LabResourceError(
-                f"R2Lab stage {stage} failed; selected qfit state is unresolved"
-            ) from exc
-        if not operation.confirmed:
-            report(f"{stage}: FAILED")
-            fail(stage, f"provider did not prove requested {requested.value} state")
-            raise R2LabResourceError(
-                f"R2Lab stage {stage} failed; selected qfit state is unresolved"
-            )
-        log_lines.append(f"{stage}: OK - state={operation.observed_state.value}")
-        report(f"{stage}: OK")
-
-    def require_qfit_state(stage: str) -> PowerState:
+    def require_qfit_state(
+        stage: str,
+        *,
+        expected: PowerState | None = None,
+    ) -> PowerState:
         report(f"{stage}: running...")
         node = qfit_node_number(plan.selection.ue)
         try:
@@ -960,6 +945,12 @@ def execute_prepare(
         if observation.state is PowerState.UNKNOWN:
             report(f"{stage}: FAILED")
             fail(stage, "provider qfit state is unknown")
+            raise R2LabResourceError(
+                f"R2Lab stage {stage} failed; selected qfit state is unresolved"
+            )
+        if expected is not None and observation.state is not expected:
+            report(f"{stage}: FAILED")
+            fail(stage, f"provider did not prove qfit {expected.value}")
             raise R2LabResourceError(
                 f"R2Lab stage {stage} failed; selected qfit state is unresolved"
             )
@@ -1083,15 +1074,27 @@ def execute_prepare(
         require_pdu("ue-power-on", plan.selection.ue, PowerState.ON)
     else:
         require_lease("lease-before-qfit-state")
+        qfit_node = str(qfit_node_number(plan.selection.ue))
         qfit_state = require_qfit_state("qfit-power-state")
         if qfit_state is PowerState.OFF:
-            require_lease("lease-before-ue-on")
-            require_qfit("ue-power-on", PowerState.ON)
+            require_lease("lease-before-qfit-image-load")
+            remote_required(
+                "qfit-image-load",
+                "rhubarbe",
+                "load",
+                "-i",
+                QFIT_IMAGE,
+                qfit_node,
+                command_timeout=QFIT_IMAGE_LOAD_TIMEOUT_SECONDS,
+            )
+            require_qfit_state(
+                "qfit-power-state-after-image-load",
+                expected=PowerState.ON,
+            )
         else:
             log_lines.append("ue-power-reuse: OK - state=on")
             report("ue-power-reuse: OK")
 
-        qfit_node = str(qfit_node_number(plan.selection.ue))
         require_lease("lease-before-qfit-ssh")
         remote_required(
             "qfit-ssh-readiness",

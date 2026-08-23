@@ -7,6 +7,7 @@ import unittest
 
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.controller import (
+    QFIT_IMAGE,
     QFIT_INITIALIZER,
     R2LabResourceError,
     R2LabSelection,
@@ -27,6 +28,8 @@ class FakeRunner:
         ping_failures: int = 0,
         qfit_ssh_ready: bool = True,
         qfit_initial_state: str | None = "off",
+        qfit_image_load_ok: bool = True,
+        qfit_state_after_load: str = "on",
         qfit_usb_state: str | None = "off",
         qfit_mbim_failures: int = 0,
     ) -> None:
@@ -34,6 +37,8 @@ class FakeRunner:
         self.ping_failures = ping_failures
         self.qfit_ssh_ready = qfit_ssh_ready
         self.qfit_initial_state = qfit_initial_state
+        self.qfit_image_load_ok = qfit_image_load_ok
+        self.qfit_state_after_load = qfit_state_after_load
         self.qfit_usb_state = qfit_usb_state
         self.qfit_mbim_failures = qfit_mbim_failures
         self.commands: list[tuple[str, ...]] = []
@@ -109,6 +114,15 @@ class FakeRunner:
             state = self.power.get(qfit, self.qfit_initial_state)
             if state in {"on", "off"}:
                 return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
+            return CommandResult(0, "", "")
+        if (
+            remote[:4] == ("rhubarbe", "load", "-i", QFIT_IMAGE)
+            and len(remote) == 5
+        ):
+            if not self.qfit_image_load_ok:
+                return CommandResult(1, "", "")
+            node = int(remote[4])
+            self.power[f"qfit{node:02d}"] = self.qfit_state_after_load
             return CommandResult(0, "", "")
         if remote[:2] == ("rhubarbe", "wait") and len(remote) == 3:
             return CommandResult(0 if self.qfit_ssh_ready else 1, "", "")
@@ -225,7 +239,7 @@ class R2LabTests(unittest.TestCase):
         )
 
         self.assertIn("rhubarbe status <qfit-node>", commands)
-        self.assertIn("qfit on qfit07", commands)
+        self.assertIn(f"rhubarbe load -i {QFIT_IMAGE} <qfit-node>", commands)
         self.assertIn("rhubarbe wait <qfit-node>", commands)
         self.assertIn("http://reboot07/usrpstatus", commands)
         self.assertIn("http://reboot07/usrpon", commands)
@@ -370,7 +384,8 @@ class R2LabTests(unittest.TestCase):
             )
         remote = runner.remote_commands
         self.assertNotIn(("qfit", "off", "qfit07"), remote)
-        self.assertIn(("qfit", "on", "qfit07"), remote)
+        self.assertNotIn(("qfit", "on", "qfit07"), remote)
+        self.assertIn(("rhubarbe", "load", "-i", QFIT_IMAGE, "7"), remote)
         self.assertGreaterEqual(remote.count(("rhubarbe", "status", "7")), 2)
         self.assertNotIn(("rhubarbe", "pdu", "off", "qfit07"), remote)
         self.assertIn(("rhubarbe", "wait", "7"), remote)
@@ -404,10 +419,17 @@ class R2LabTests(unittest.TestCase):
         self.assertEqual(1, len(initializer))
         self.assertEqual(1, len(usb_on))
         self.assertEqual(2, len(mbim_readiness))
+        load_index = remote.index(("rhubarbe", "load", "-i", QFIT_IMAGE, "7"))
+        post_load_status_index = remote.index(
+            ("rhubarbe", "status", "7"),
+            load_index,
+        )
         wait_index = remote.index(("rhubarbe", "wait", "7"))
         usb_status_index = remote.index(
             ("curl", "-fsS", "http://reboot07/usrpstatus")
         )
+        self.assertLess(load_index, post_load_status_index)
+        self.assertLess(post_load_status_index, wait_index)
         self.assertLess(wait_index, usb_status_index)
         self.assertLess(usb_status_index, usb_on[0][0])
         self.assertLess(usb_on[0][0], mbim_readiness[0][0])
@@ -447,6 +469,7 @@ class R2LabTests(unittest.TestCase):
         remote = runner.remote_commands
         self.assertNotIn(("qfit", "off", "qfit07"), remote)
         self.assertNotIn(("qfit", "on", "qfit07"), remote)
+        self.assertNotIn(("rhubarbe", "load", "-i", QFIT_IMAGE, "7"), remote)
         self.assertIn(("rhubarbe", "status", "7"), remote)
         self.assertIn(("rhubarbe", "wait", "7"), remote)
         self.assertNotIn(
@@ -479,6 +502,65 @@ class R2LabTests(unittest.TestCase):
         self.assertEqual("qfit-power-state", manifest["failure_stage"])
         self.assertNotIn(("qfit", "off", "qfit07"), runner.remote_commands)
         self.assertNotIn(("qfit", "on", "qfit07"), runner.remote_commands)
+        self.assertNotIn(
+            ("rhubarbe", "load", "-i", QFIT_IMAGE, "7"),
+            runner.remote_commands,
+        )
+
+    def test_qfit_prepare_stops_when_image_load_fails(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-image-load", selection=selection)
+        runner = FakeRunner(qfit_image_load_ok=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            with self.assertRaises(R2LabResourceError):
+                execute_prepare(
+                    plan=plan,
+                    run_root=root,
+                    runner=runner,
+                    sleeper=lambda _: None,
+                )
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("qfit-image-load", manifest["failure_stage"])
+        self.assertEqual("held", manifest["resource_claim"])
+        self.assertIn(
+            ("rhubarbe", "load", "-i", QFIT_IMAGE, "7"),
+            runner.remote_commands,
+        )
+        self.assertNotIn(("rhubarbe", "wait", "7"), runner.remote_commands)
+
+    def test_qfit_prepare_requires_on_state_after_image_load(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-image-state", selection=selection)
+        runner = FakeRunner(qfit_state_after_load="off")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            with self.assertRaises(R2LabResourceError):
+                execute_prepare(
+                    plan=plan,
+                    run_root=root,
+                    runner=runner,
+                    sleeper=lambda _: None,
+                )
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            "qfit-power-state-after-image-load",
+            manifest["failure_stage"],
+        )
+        self.assertEqual("held", manifest["resource_claim"])
+        self.assertNotIn(("rhubarbe", "wait", "7"), runner.remote_commands)
 
     def test_qfit_prepare_stops_before_initialization_without_ssh(self) -> None:
         selection = R2LabSelection.build(
