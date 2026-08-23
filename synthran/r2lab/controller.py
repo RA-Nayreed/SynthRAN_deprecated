@@ -40,6 +40,8 @@ from synthran.r2lab.provider import (
     execute_verified_pdu_transition,
     execute_verified_qfit_transition,
     parse_pdu_status,
+    parse_qfit_status,
+    qfit_node_number,
     release_assessment,
 )
 from synthran.workspace.model import WorkspaceError
@@ -329,16 +331,21 @@ class R2LabPlan:
     selection: R2LabSelection
 
     def to_dict(self) -> dict[str, object]:
-        ue_status = (
-            f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu status {self.selection.ue}"
-            if self.selection.ue_kind == "qhat"
-            else "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>"
-        )
-        ue_readiness = (
-            f"ssh <r2lab-slice>@faraday.inria.fr ping -c 1 -W 1 {self.selection.ue}"
-            if self.selection.ue_kind == "qhat"
-            else "ssh <r2lab-slice>@faraday.inria.fr rhubarbe wait <qfit-node>"
-        )
+        if self.selection.ue_kind == "qhat":
+            ue_commands = [
+                f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu off {self.selection.ue}",
+                f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu status {self.selection.ue}",
+                f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu on {self.selection.ue}",
+                f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu status {self.selection.ue}",
+                f"ssh <r2lab-slice>@faraday.inria.fr ping -c 1 -W 1 {self.selection.ue}",
+            ]
+        else:
+            ue_commands = [
+                "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>",
+                f"ssh <r2lab-slice>@faraday.inria.fr qfit on {self.selection.ue}",
+                "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>",
+                "ssh <r2lab-slice>@faraday.inria.fr rhubarbe wait <qfit-node>",
+            ]
         return {
             "schema": R2LAB_PLAN_SCHEMA,
             "execution_enabled": False,
@@ -349,19 +356,7 @@ class R2LabPlan:
                 "ssh <r2lab-slice>@faraday.inria.fr rhubarbe leases --check",
                 f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu on {self.selection.radio}",
                 f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu status {self.selection.radio}",
-                (
-                    f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu off {self.selection.ue}"
-                    if self.selection.ue_kind == "qhat"
-                    else f"ssh <r2lab-slice>@faraday.inria.fr qfit off {self.selection.ue}"
-                ),
-                ue_status,
-                (
-                    f"ssh <r2lab-slice>@faraday.inria.fr rhubarbe pdu on {self.selection.ue}"
-                    if self.selection.ue_kind == "qhat"
-                    else f"ssh <r2lab-slice>@faraday.inria.fr qfit on {self.selection.ue}"
-                ),
-                ue_status,
-                ue_readiness,
+                *ue_commands,
             ],
             "safety": {
                 "global_power_off": False,
@@ -893,6 +888,33 @@ def execute_prepare(
         log_lines.append(f"{stage}: OK - state={operation.observed_state.value}")
         report(f"{stage}: OK")
 
+    def require_qfit_state(stage: str) -> PowerState:
+        report(f"{stage}: running...")
+        node = qfit_node_number(plan.selection.ue)
+        try:
+            result = provider(("rhubarbe", "status", str(node)), timeout_seconds)
+            observation = parse_qfit_status(
+                "\n".join(
+                    part for part in (result.stdout, result.stderr) if part
+                ),
+                qfit=plan.selection.ue,
+            )
+        except (R2LabQfitStateError, R2LabResourceError, OSError) as exc:
+            report(f"{stage}: FAILED")
+            fail(stage, "provider qfit state could not be resolved")
+            raise R2LabResourceError(
+                f"R2Lab stage {stage} failed; selected qfit state is unresolved"
+            ) from exc
+        if observation.state is PowerState.UNKNOWN:
+            report(f"{stage}: FAILED")
+            fail(stage, "provider qfit state is unknown")
+            raise R2LabResourceError(
+                f"R2Lab stage {stage} failed; selected qfit state is unresolved"
+            )
+        log_lines.append(f"{stage}: OK - state={observation.state.value}")
+        report(f"{stage}: OK")
+        return observation.state
+
     write_manifest("running")
     require_lease("lease-check")
     try:
@@ -907,21 +929,23 @@ def execute_prepare(
     require_lease("lease-before-radio")
     require_pdu("radio-power-on", plan.selection.radio, PowerState.ON)
 
-    require_lease("lease-before-ue-off")
     if plan.selection.ue_kind == "qhat":
+        require_lease("lease-before-ue-off")
         require_pdu("ue-power-off", plan.selection.ue, PowerState.OFF)
-    else:
-        require_qfit("ue-power-off", PowerState.OFF)
-
-    sleeper(power_settle_seconds)
-    require_lease("lease-before-ue-on")
-    if plan.selection.ue_kind == "qhat":
+        sleeper(power_settle_seconds)
+        require_lease("lease-before-ue-on")
         require_pdu("ue-power-on", plan.selection.ue, PowerState.ON)
     else:
-        require_qfit("ue-power-on", PowerState.ON)
+        require_lease("lease-before-qfit-state")
+        qfit_state = require_qfit_state("qfit-power-state")
+        if qfit_state is PowerState.OFF:
+            require_lease("lease-before-ue-on")
+            require_qfit("ue-power-on", PowerState.ON)
+        else:
+            log_lines.append("ue-power-reuse: OK - state=on")
+            report("ue-power-reuse: OK")
 
-    if plan.selection.ue_kind == "qfit":
-        qfit_node = str(int(plan.selection.ue[-2:]))
+        qfit_node = str(qfit_node_number(plan.selection.ue))
         require_lease("lease-before-qfit-ssh")
         remote_required(
             "qfit-ssh-readiness",
@@ -963,7 +987,8 @@ def execute_prepare(
                 "--set-radio-state=on",
             ),
         )
-    else:
+
+    if plan.selection.ue_kind == "qhat":
         report("ue-reachability: running...")
         reachable = False
         for attempt in range(1, reachability_attempts + 1):

@@ -70,8 +70,11 @@ and uses exact CPU and memory requests and limits for predictable gNB placement.
 
 The qfit path maps logical resources such as `qfit07` to physical FIT hosts such
 as `fit07` in one controller function. All nested SSH commands use strict host
-verification. Runtime observation is read-only; modem mutation is isolated in
-the UE activation boundary.
+verification. Preparation powers on a qfit only when provider state proves it
+off. An already-on provisioned node is preserved, but it must pass the R2Lab SSH
+wait and image-contract checks before initialization. Image loading remains an
+explicit operator action. Runtime observation is read-only; modem mutation is
+isolated in the UE activation boundary.
 
 The provider image can reveal registration after packet attachment is requested.
 The mutation order is therefore:

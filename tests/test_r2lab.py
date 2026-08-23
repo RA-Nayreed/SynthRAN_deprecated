@@ -27,10 +27,12 @@ class FakeRunner:
         lease_ok: bool = True,
         ping_failures: int = 0,
         qfit_ssh_ready: bool = True,
+        qfit_initial_state: str | None = "off",
     ) -> None:
         self.lease_ok = lease_ok
         self.ping_failures = ping_failures
         self.qfit_ssh_ready = qfit_ssh_ready
+        self.qfit_initial_state = qfit_initial_state
         self.commands: list[tuple[str, ...]] = []
         self.ping_attempts = 0
         self.power: dict[str, str] = {}
@@ -101,7 +103,7 @@ class FakeRunner:
         if remote[:2] == ("rhubarbe", "status") and len(remote) == 3:
             node = int(remote[2])
             qfit = f"qfit{node:02d}"
-            state = self.power.get(qfit)
+            state = self.power.get(qfit, self.qfit_initial_state)
             if state in {"on", "off"}:
                 return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
             return CommandResult(0, "", "")
@@ -175,6 +177,21 @@ class R2LabTests(unittest.TestCase):
         self.assertFalse(payload["safety"]["mutation_returncode_is_state_truth"])
         self.assertTrue(payload["safety"]["claim_release_requires_proven_clean_state"])
         self.assertIn("pdu status n300", "\n".join(payload["commands"]))
+
+    def test_qfit_plan_reuses_on_state_without_power_off(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        commands = "\n".join(
+            build_plan(
+                run_id="r2lab-test-qfit-plan", selection=selection
+            ).to_dict()["commands"]
+        )
+
+        self.assertIn("rhubarbe status <qfit-node>", commands)
+        self.assertIn("qfit on qfit07", commands)
+        self.assertIn("rhubarbe wait <qfit-node>", commands)
+        self.assertNotIn("qfit off qfit07", commands)
 
     def test_doctor_is_read_only_and_requires_active_lease(self) -> None:
         selection = R2LabSelection.build(
@@ -312,7 +329,7 @@ class R2LabTests(unittest.TestCase):
                 reachability_attempts=1,
             )
         remote = runner.remote_commands
-        self.assertIn(("qfit", "off", "qfit07"), remote)
+        self.assertNotIn(("qfit", "off", "qfit07"), remote)
         self.assertIn(("qfit", "on", "qfit07"), remote)
         self.assertGreaterEqual(remote.count(("rhubarbe", "status", "7")), 2)
         self.assertNotIn(("rhubarbe", "pdu", "off", "qfit07"), remote)
@@ -355,6 +372,54 @@ class R2LabTests(unittest.TestCase):
                 rendered,
             )
             self.assertIn("GlobalKnownHostsFile=/dev/null", rendered)
+
+    def test_qfit_prepare_reuses_provisioned_ready_node(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-reuse", selection=selection)
+        runner = FakeRunner(qfit_initial_state="on")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            execute_prepare(
+                plan=plan,
+                run_root=root,
+                runner=runner,
+                sleeper=lambda _: None,
+            )
+            log = (root / plan.run_id / "r2lab.log").read_text(encoding="utf-8")
+
+        remote = runner.remote_commands
+        self.assertNotIn(("qfit", "off", "qfit07"), remote)
+        self.assertNotIn(("qfit", "on", "qfit07"), remote)
+        self.assertIn(("rhubarbe", "status", "7"), remote)
+        self.assertIn(("rhubarbe", "wait", "7"), remote)
+        self.assertIn("ue-power-reuse: OK - state=on", log)
+
+    def test_qfit_prepare_stops_on_unknown_initial_power_state(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-unknown", selection=selection)
+        runner = FakeRunner(qfit_initial_state=None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            with self.assertRaises(R2LabResourceError):
+                execute_prepare(
+                    plan=plan,
+                    run_root=root,
+                    runner=runner,
+                    sleeper=lambda _: None,
+                )
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("qfit-power-state", manifest["failure_stage"])
+        self.assertNotIn(("qfit", "off", "qfit07"), runner.remote_commands)
+        self.assertNotIn(("qfit", "on", "qfit07"), runner.remote_commands)
 
     def test_qfit_prepare_stops_before_initialization_without_ssh(self) -> None:
         selection = R2LabSelection.build(

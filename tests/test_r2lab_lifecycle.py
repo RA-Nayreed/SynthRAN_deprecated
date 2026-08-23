@@ -109,7 +109,7 @@ class LifecycleRunner:
         if remote[:2] == ("rhubarbe", "status") and len(remote) == 3:
             node = int(remote[2])
             qfit = f"qfit{node:02d}"
-            state = self.power.get(qfit)
+            state = self.power.get(qfit, "off")
             if state in {"on", "off"}:
                 return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
             return CommandResult(0, "", "")
