@@ -16,28 +16,55 @@ def _mapped_gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
 
     Every nested qfit SSH path enters through the Faraday gateway boundary.
     Keep the logical qfit identifier for provider ownership while translating
-    only explicit ``root@qfitNN`` SSH destinations to ``root@fitNN``.  Force
+    only explicit ``root@qfitNN`` SSH destinations to ``root@fitNN``. Force
     nested FIT SSH to use the already-trusted Faraday known-hosts file because
     the provider SSH client configuration does not select it reliably.
     """
 
-    translated = tuple(remote)
     known_hosts = f"/home/{slice_name}/.ssh/known_hosts"
+    translated = [str(item) for item in remote]
+
     for qfit in _controller.SUPPORTED_QFITS:
         physical = f"fit{qfit[-2:]}"
-        mapped: list[str] = []
-        for item in translated:
-            value = item.replace(f"root@{qfit}", f"root@{physical}")
-            if f"root@{physical}" in value and "UserKnownHostsFile=" not in value:
-                marker = f"-- root@{physical}"
-                replacement = (
-                    f"-o UserKnownHostsFile={known_hosts} "
-                    f"-o GlobalKnownHostsFile=/dev/null {marker}"
-                )
-                value = value.replace(marker, replacement)
-            mapped.append(value)
-        translated = tuple(mapped)
-    return _UNMAPPED_GATEWAY_COMMAND(slice_name, *translated)
+        translated = [
+            item.replace(f"root@{qfit}", f"root@{physical}")
+            for item in translated
+        ]
+
+        # Controller prepare uses argv tokens for nested SSH.
+        if (
+            translated
+            and translated[0] == "ssh"
+            and f"root@{physical}" in translated
+            and not any("UserKnownHostsFile=" in item for item in translated)
+        ):
+            try:
+                separator = translated.index("--")
+            except ValueError:
+                separator = -1
+            if separator >= 0:
+                translated[separator:separator] = [
+                    "-o",
+                    f"UserKnownHostsFile={known_hosts}",
+                    "-o",
+                    "GlobalKnownHostsFile=/dev/null",
+                ]
+
+        # UE/runtime/workload paths pass the nested SSH as one shell-escaped
+        # command string, so inject the same trust boundary into that form too.
+        for index, item in enumerate(translated):
+            if f"root@{physical}" not in item or "UserKnownHostsFile=" in item:
+                continue
+            marker = f"-- root@{physical}"
+            if marker not in item:
+                continue
+            replacement = (
+                f"-o UserKnownHostsFile={known_hosts} "
+                f"-o GlobalKnownHostsFile=/dev/null {marker}"
+            )
+            translated[index] = item.replace(marker, replacement)
+
+    return _UNMAPPED_GATEWAY_COMMAND(slice_name, *tuple(translated))
 
 
 # Functions already defined in controller resolve gateway_command through that
