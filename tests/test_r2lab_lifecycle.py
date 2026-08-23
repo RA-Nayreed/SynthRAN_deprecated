@@ -47,6 +47,7 @@ class LifecycleRunner:
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.power: dict[str, str] = {}
+        self.qfit_usb_power = "off"
 
     @staticmethod
     def remote(command: tuple[str, ...]) -> tuple[str, ...]:
@@ -113,6 +114,22 @@ class LifecycleRunner:
             if state in {"on", "off"}:
                 return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
             return CommandResult(0, "", "")
+        if remote == ("curl", "-fsS", "http://reboot07/usrpstatus"):
+            return CommandResult(0, f"usrp{self.qfit_usb_power}\n", "")
+        if remote == ("curl", "-fsS", "http://reboot07/usrpon"):
+            self.qfit_usb_power = "on"
+            return CommandResult(0, "ok\n", "")
+        if remote == ("curl", "-fsS", "http://reboot07/usrpoff"):
+            self.qfit_usb_power = "off"
+            return CommandResult(0, "ok\n", "")
+        if remote[:1] == ("ssh",) and (
+            remote[-3:] in {
+                ("test", "-c", "/dev/ttyUSB2"),
+                ("test", "-c", "/dev/cdc-wdm0"),
+            }
+            or remote[-5:] == ("ip", "link", "show", "dev", "wwan0")
+        ):
+            return CommandResult(0 if self.qfit_usb_power == "on" else 1, "", "")
         if remote[:1] == ("ping",):
             return CommandResult(0, "", "")
         return CommandResult(0, "", "")

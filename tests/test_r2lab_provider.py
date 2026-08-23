@@ -12,8 +12,11 @@ from synthran.r2lab.provider import (
     evaluate_pdu_transition,
     execute_verified_pdu_transition,
     execute_verified_qfit_transition,
+    execute_verified_qfit_usb_transition,
+    observe_qfit_usb_power,
     parse_pdu_status,
     parse_qfit_status,
+    parse_qfit_usb_status,
     qfit_node_number,
     release_assessment,
 )
@@ -332,6 +335,71 @@ class R2LabQfitProviderTests(unittest.TestCase):
         )
         self.assertFalse(result.confirmed)
         self.assertEqual(PowerState.OFF, result.observed_state)
+
+    def test_parses_exact_qfit_usb_states(self) -> None:
+        self.assertEqual(
+            PowerState.ON,
+            parse_qfit_usb_status("usrpon\n", qfit="qfit07").state,
+        )
+        self.assertEqual(
+            PowerState.OFF,
+            parse_qfit_usb_status("usrpoff\n", qfit="qfit07").state,
+        )
+        self.assertEqual(
+            PowerState.UNKNOWN,
+            parse_qfit_usb_status("ok\n", qfit="qfit07").state,
+        )
+
+    def test_qfit_usb_observation_is_read_only_and_exact(self) -> None:
+        runner = ScriptedRunner([CommandResult(0, "usrpon\n", "")])
+        observation = observe_qfit_usb_power(
+            qfit="qfit07",
+            runner=runner,
+            timeout_seconds=30,
+        )
+        self.assertEqual(PowerState.ON, observation.state)
+        self.assertEqual(
+            [("curl", "-fsS", "http://reboot07/usrpstatus")],
+            runner.commands,
+        )
+
+    def test_verified_qfit_usb_transition_uses_exact_endpoint_and_status(self) -> None:
+        runner = ScriptedRunner(
+            [
+                CommandResult(0, "ok\n", ""),
+                CommandResult(0, "usrpoff\n", ""),
+            ]
+        )
+        result = execute_verified_qfit_usb_transition(
+            qfit="qfit07",
+            requested_state=PowerState.OFF,
+            runner=runner,
+            timeout_seconds=30,
+        )
+        self.assertTrue(result.confirmed)
+        self.assertEqual(
+            [
+                ("curl", "-fsS", "http://reboot07/usrpoff"),
+                ("curl", "-fsS", "http://reboot07/usrpstatus"),
+            ],
+            runner.commands,
+        )
+
+    def test_qfit_usb_transition_requires_exact_status_evidence(self) -> None:
+        runner = ScriptedRunner(
+            [
+                CommandResult(0, "ok\n", ""),
+                CommandResult(0, "ok\n", ""),
+            ]
+        )
+        result = execute_verified_qfit_usb_transition(
+            qfit="qfit07",
+            requested_state=PowerState.ON,
+            runner=runner,
+            timeout_seconds=30,
+        )
+        self.assertFalse(result.confirmed)
+        self.assertEqual(PowerState.UNKNOWN, result.observed_state)
 
 
 class R2LabCleanupAssessmentTests(unittest.TestCase):

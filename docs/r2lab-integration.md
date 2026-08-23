@@ -72,9 +72,15 @@ The qfit path maps logical resources such as `qfit07` to physical FIT hosts such
 as `fit07` in one controller function. All nested SSH commands use strict host
 verification. Preparation powers on a qfit only when provider state proves it
 off. An already-on provisioned node is preserved, but it must pass the R2Lab SSH
-wait and image-contract checks before initialization. Image loading remains an
-explicit operator action. Runtime observation is read-only; modem mutation is
-isolated in the UE activation boundary.
+wait before modem preparation. The FIT host and its external modem USB rail are
+separate power boundaries. Preparation observes the exact USB state, powers on
+only an observed-off selected rail, and waits until `/dev/ttyUSB2`,
+`/dev/cdc-wdm0`, and `wwan0` are all present before running the image initializer.
+It reproves that management surface after initialization. Unknown state fails
+closed and retains the claim. Release verifies both the selected USB rail and
+FIT host off before removing the claim. Image loading remains an explicit
+operator action. Software-radio and packet-attachment mutations remain isolated
+in the later UE activation boundary.
 
 The provider image can reveal registration after packet attachment is requested.
 The mutation order is therefore:
