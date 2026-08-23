@@ -450,7 +450,7 @@ spec:
         self.assertEqual("offline-render-validated", payload["acceptance"])
         self.assertEqual(64, len(payload["sha256"]))
 
-    def test_render_rejects_stale_smoke003_radio_values(self) -> None:
+    def test_render_rejects_stale_nonreference_radio_values(self) -> None:
         stale = self.valid_render().replace("dl_arfcn: 621312", "dl_arfcn: 621984")
         stale = stale.replace("channel_bandwidth_MHz: 40", "channel_bandwidth_MHz: 60")
         with self.assertRaisesRegex(R2LabPhysicalHelmError, "reviewed chart intent"):

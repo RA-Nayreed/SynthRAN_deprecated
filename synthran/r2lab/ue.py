@@ -18,7 +18,6 @@ from enum import Enum
 import json
 from pathlib import Path
 import re
-import shlex
 import tempfile
 import time
 from typing import Callable, Mapping, Sequence
@@ -29,6 +28,7 @@ from synthran.r2lab.acceptance import (
     PhysicalAcceptanceStage,
     PhysicalRunEvidence,
 )
+from synthran.r2lab.controller import qfit_gateway_command
 from synthran.r2lab.deployment import PhysicalStartAuthority
 from synthran.r2lab.radio import (
     CellAcquisitionState,
@@ -135,18 +135,18 @@ class QfitActivationRequest:
         _validate_qfit(self.qfit)
         if self.dnn != _QFIT_DNN:
             raise R2LabQfitActivationError(
-                "current physical checkpoint requires the reviewed internet DNN"
+                "physical qfit activation requires the internet DNN"
             )
         if self.interface != _QFIT_INTERFACE:
-            raise R2LabQfitActivationError("current physical checkpoint requires wwan0")
+            raise R2LabQfitActivationError("physical qfit activation requires wwan0")
         if self.device != _QFIT_DEVICE:
             raise R2LabQfitActivationError(
-                "current physical checkpoint requires /dev/cdc-wdm0"
+                "physical qfit activation requires /dev/cdc-wdm0"
             )
         if self.session_id != _QFIT_SESSION_ID:
-            raise R2LabQfitActivationError("current physical checkpoint requires MBIM session 0")
+            raise R2LabQfitActivationError("physical qfit activation requires MBIM session 0")
         if self.ip_type != _QFIT_IP_TYPE:
-            raise R2LabQfitActivationError("current physical checkpoint is IPv4-only")
+            raise R2LabQfitActivationError("physical qfit activation supports IPv4 only")
         return self
 
 
@@ -414,7 +414,7 @@ def execute_qfit_activation(
     observer: RuntimeObserver,
     sleeper: Sleeper = time.sleep,
     timeout_seconds: int = 30,
-    registration_attempts: int = 12,
+    radio_attempts: int = 12,
     packet_attempts: int = 8,
     pdu_attempts: int = 8,
     rollback_attempts: int = 6,
@@ -432,7 +432,7 @@ def execute_qfit_activation(
     request.validate()
     if timeout_seconds < 5 or timeout_seconds > 120:
         raise R2LabQfitActivationError("qfit activation timeout must be between 5 and 120 seconds")
-    if min(registration_attempts, packet_attempts, pdu_attempts, rollback_attempts) < 1:
+    if min(radio_attempts, packet_attempts, pdu_attempts, rollback_attempts) < 1:
         raise R2LabQfitActivationError("qfit activation poll attempts must be positive")
     if poll_interval_seconds < 0 or poll_interval_seconds > 30:
         raise R2LabQfitActivationError("qfit activation poll interval is out of range")
@@ -483,17 +483,10 @@ def execute_qfit_activation(
         runner=runner,
         sleeper=sleeper,
         timeout_seconds=timeout_seconds,
-        attempts=registration_attempts,
+        attempts=radio_attempts,
         poll_interval_seconds=poll_interval_seconds,
     )
-    registered = _wait_runtime(
-        observer=observer,
-        predicate=lambda state: state.cell_acquired and state.registered,
-        sleeper=sleeper,
-        attempts=registration_attempts,
-        poll_interval_seconds=poll_interval_seconds,
-    )
-    if radio is not SoftwareRadioState.ON or not registered.registered:
+    if radio is not SoftwareRadioState.ON:
         clean, final_runtime, final_radio = _rollback_activation(
             commands=commands,
             runner=runner,
@@ -519,6 +512,7 @@ def execute_qfit_activation(
             steps=tuple(steps),
         )
 
+    sleeper(2.0)
     steps.append(
         _run_mutation(
             name="attach-packet-service",
@@ -529,9 +523,7 @@ def execute_qfit_activation(
     )
     attached = _wait_runtime(
         observer=observer,
-        predicate=lambda state: (
-            state.registered and state.packet_service is PacketServiceState.ATTACHED
-        ),
+        predicate=lambda state: state.packet_service is PacketServiceState.ATTACHED,
         sleeper=sleeper,
         attempts=packet_attempts,
         poll_interval_seconds=poll_interval_seconds,
@@ -632,27 +624,6 @@ def execute_qfit_activation(
     )
 
 
-def _qfit_gateway_command(slice_name: str, qfit: str, *remote: str) -> tuple[str, ...]:
-    """Reuse strict Faraday SSH, then fail-closed SSH to one reviewed qfit."""
-
-    from synthran.r2lab.controller import gateway_command
-
-    qfit = _validate_qfit(qfit)
-    inner = (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "--",
-        f"root@{qfit}",
-        shlex.join(remote),
-    )
-    return gateway_command(slice_name, shlex.join(inner))
-
-
 def _same_authority(authority: PhysicalStartAuthority, evidence: PhysicalRunEvidence) -> bool:
     if evidence.gnb_start is None:
         return False
@@ -691,7 +662,7 @@ def execute_authorized_qfit_activation(
     sleeper: Sleeper = time.sleep,
     timeout_seconds: int = 30,
 ) -> AuthorizedQfitActivationOutcome:
-    """Advance gNB -> qfit registration -> PDU with fresh authority at mutation time."""
+    """Establish and record the qfit radio path under fresh physical authority."""
 
     from synthran.r2lab.controller import authorize_physical_start
     from synthran.r2lab.runtime import (
@@ -756,46 +727,33 @@ def execute_authorized_qfit_activation(
             return AuthorizedQfitActivationOutcome(state, None, None)
 
     pre_runtime: QfitRuntimeEvidence | None = None
-    if state.acceptance.next_stage is PhysicalAcceptanceStage.CELL_ACQUISITION:
+    activation_starts_at_cell = (
+        state.acceptance.next_stage is PhysicalAcceptanceStage.CELL_ACQUISITION
+    )
+    if activation_starts_at_cell:
         pre_runtime = execute_qfit_runtime_probe(
             slice_name=slice_name,
             qfit=authority.ue,
             runner=r2lab_runner,
             timeout_seconds=min(timeout_seconds, 30),
         )
-        cell_source = f"qfit-preactivation:cell-{pre_runtime.cell.value}"
-        if not pre_runtime.cell_acquired:
-            state = state.fail_stage(
-                PhysicalAcceptanceStage.CELL_ACQUISITION,
-                source=cell_source,
+        if pre_runtime.pdu_session_established:
+            state = state.record_qfit_runtime(
+                pre_runtime,
+                source="qfit-preactivation",
             )
             _persist(state, evidence_path)
             return AuthorizedQfitActivationOutcome(state, None, pre_runtime)
-        state = state.pass_stage(
-            PhysicalAcceptanceStage.CELL_ACQUISITION,
-            source=cell_source,
-        )
-        registration_source = (
-            f"qfit-preactivation:registration-{pre_runtime.registration.value}"
-        )
-        if not pre_runtime.registered:
-            state = state.fail_stage(
-                PhysicalAcceptanceStage.REGISTRATION,
-                source=registration_source,
-            )
-            _persist(state, evidence_path)
-            return AuthorizedQfitActivationOutcome(state, None, pre_runtime)
-        state = state.pass_stage(
-            PhysicalAcceptanceStage.REGISTRATION,
-            source=registration_source,
-        )
-        _persist(state, evidence_path)
 
-    if state.acceptance.next_stage is not PhysicalAcceptanceStage.PDU_SESSION:
+    if state.acceptance.next_stage not in (
+        PhysicalAcceptanceStage.CELL_ACQUISITION,
+        PhysicalAcceptanceStage.PDU_SESSION,
+    ):
         expected = state.acceptance.next_stage
         label = expected.value if expected is not None else "none"
         raise R2LabQfitActivationError(
-            "qfit activation requires PDU-session as the next acceptance stage; "
+            "qfit activation requires cell-acquisition or PDU-session as the next "
+            "acceptance stage; "
             f"current next stage is {label}"
         )
 
@@ -827,7 +785,7 @@ def execute_authorized_qfit_activation(
 
     def qfit_runner(command: Sequence[str], command_timeout: int) -> CommandResult:
         return r2lab_runner(
-            _qfit_gateway_command(slice_name, authority.ue, *tuple(command)),
+            qfit_gateway_command(slice_name, authority.ue, *tuple(command)),
             command_timeout,
         )
 
@@ -849,15 +807,28 @@ def execute_authorized_qfit_activation(
     if activation_evidence_path is not None:
         activation.write_json(activation_evidence_path)
 
-    pdu_source = (
-        f"qfit-activation:{activation.status}:"
-        f"packet-{activation.final_runtime.packet_service.value}:"
-        f"ipv4-{activation.final_runtime.ipv4.value}"
-    )
-    if activation.accepted:
-        state = state.pass_stage(PhysicalAcceptanceStage.PDU_SESSION, source=pdu_source)
+    activation_source = f"qfit-activation:{activation.status}"
+    if activation_starts_at_cell:
+        state = state.record_qfit_runtime(
+            activation.final_runtime,
+            source=activation_source,
+        )
     else:
-        state = state.fail_stage(PhysicalAcceptanceStage.PDU_SESSION, source=pdu_source)
+        pdu_source = (
+            f"{activation_source}:"
+            f"packet-{activation.final_runtime.packet_service.value}:"
+            f"ipv4-{activation.final_runtime.ipv4.value}"
+        )
+        if activation.accepted:
+            state = state.pass_stage(
+                PhysicalAcceptanceStage.PDU_SESSION,
+                source=pdu_source,
+            )
+        else:
+            state = state.fail_stage(
+                PhysicalAcceptanceStage.PDU_SESSION,
+                source=pdu_source,
+            )
     _persist(state, evidence_path)
     return AuthorizedQfitActivationOutcome(state, activation, pre_runtime)
 
@@ -926,7 +897,7 @@ def execute_authorized_qfit_user_plane(
 
     def qfit_runner(command: Sequence[str], command_timeout: int) -> CommandResult:
         return r2lab_runner(
-            _qfit_gateway_command(slice_name, authority.ue, *tuple(command)),
+            qfit_gateway_command(slice_name, authority.ue, *tuple(command)),
             command_timeout,
         )
 

@@ -29,7 +29,7 @@ from synthran.live_preflight import (
     run_live_preflight,
     save_live_evidence,
 )
-from synthran.network.r2lab import (
+from synthran.r2lab.controller import (
     DEFAULT_TIMEOUT_SECONDS as DEFAULT_R2LAB_TIMEOUT_SECONDS,
     R2LabResourceError,
     R2LabSelection,

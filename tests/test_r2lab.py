@@ -6,13 +6,16 @@ import tempfile
 import unittest
 
 from synthran.live_preflight import CommandResult
-from synthran.network.r2lab import (
+from synthran.r2lab.controller import (
+    QFIT_INITIALIZER,
+    QFIT_MBIM_DEVICE,
     R2LabResourceError,
     R2LabSelection,
     build_plan,
     execute_prepare,
     execute_release,
     gateway_command,
+    qfit_gateway_command,
     run_doctor,
 )
 
@@ -55,7 +58,7 @@ class FakeRunner:
         if remote[:3] == ("rhubarbe", "pdu", "off") and len(remote) == 4:
             resource = remote[3]
             self.power[resource] = "off"
-            # Live smoke 002 proved that a successful OFF may return rc=1.
+            # Provider state remains authoritative when the mutation returns rc=1.
             return CommandResult(
                 1,
                 f"pdu2 chain-0@outlet-1 ({resource}): OFF\n",
@@ -139,11 +142,12 @@ class R2LabTests(unittest.TestCase):
             )
 
     def test_gateway_command_uses_batch_ssh_and_strict_host_keys(self) -> None:
-        command = gateway_command("oulu_user", "rhubarbe", "leases", "--check")
+        slice_name = "oulu_user"
+        command = gateway_command(slice_name, "rhubarbe", "leases", "--check")
         self.assertEqual("ssh", command[0])
         self.assertIn("BatchMode=yes", command)
         self.assertIn("StrictHostKeyChecking=yes", command)
-        self.assertIn("oulu_user@faraday.inria.fr", command)
+        self.assertIn(f"{slice_name}@faraday.inria.fr", command)
         self.assertNotIn("password", " ".join(command).lower())
 
     def test_plan_redacts_slice_and_requires_state_verification(self) -> None:
@@ -303,6 +307,50 @@ class R2LabTests(unittest.TestCase):
         self.assertIn(("qfit", "on", "qfit07"), remote)
         self.assertGreaterEqual(remote.count(("rhubarbe", "status", "7")), 2)
         self.assertNotIn(("rhubarbe", "pdu", "off", "qfit07"), remote)
+        self.assertIn(("ping", "-c", "1", "-W", "1", "fit07"), remote)
+        self.assertNotIn(("ping", "-c", "1", "-W", "1", "qfit07"), remote)
+
+        initializer = [
+            (index, command)
+            for index, command in enumerate(remote)
+            if command[:1] == ("ssh",) and QFIT_INITIALIZER in command
+        ]
+        radio_on = [
+            (index, command)
+            for index, command in enumerate(remote)
+            if command[:1] == ("ssh",)
+            and QFIT_MBIM_DEVICE in command
+            and "--set-radio-state=on" in command
+        ]
+        self.assertEqual(1, len(initializer))
+        self.assertEqual(1, len(radio_on))
+        self.assertLess(initializer[0][0], radio_on[0][0])
+        for _, command in (initializer[0], radio_on[0]):
+            rendered = " ".join(command)
+            self.assertIn("root@fit07", rendered)
+            self.assertNotIn("root@qfit07", rendered)
+            self.assertIn(
+                f"UserKnownHostsFile=/home/{selection.slice_name}/.ssh/known_hosts",
+                rendered,
+            )
+            self.assertIn("GlobalKnownHostsFile=/dev/null", rendered)
+
+    def test_qfit_gateway_command_maps_resource_to_physical_host(self) -> None:
+        slice_name = "oulu_user"
+        command = qfit_gateway_command(
+            slice_name,
+            "qfit07",
+            "mbimcli",
+            "--query-radio-state",
+        )
+        rendered = command[-1]
+        self.assertIn("root@fit07", rendered)
+        self.assertNotIn("root@qfit07", rendered)
+        self.assertIn(
+            f"UserKnownHostsFile=/home/{slice_name}/.ssh/known_hosts",
+            rendered,
+        )
+        self.assertIn("GlobalKnownHostsFile=/dev/null", rendered)
 
     def test_release_requires_exact_claim_and_proves_both_resources_off(self) -> None:
         selection = R2LabSelection.build(

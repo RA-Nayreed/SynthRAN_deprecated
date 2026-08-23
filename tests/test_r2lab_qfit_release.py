@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from synthran.live_preflight import CommandResult
-from synthran.network.r2lab import (
+from synthran.r2lab.controller import (
     R2LabResourceError,
     R2LabSelection,
     build_plan,

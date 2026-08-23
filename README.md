@@ -297,7 +297,7 @@ JSONL remains the append-only audit source; Parquet is the deterministic analysi
     <tr><td align="center">Dependencies</td><td align="center"><a href="docs/dependencies.md">docs/dependencies.md</a></td></tr>
     <tr><td align="center">Security and privacy</td><td align="center"><a href="docs/security.md">docs/security.md</a></td></tr>
     <tr><td align="center">External measurement peer</td><td align="center"><a href="docs/research-measurement-peer.md">docs/research-measurement-peer.md</a></td></tr>
-    <tr><td align="center">Contributor/agent invariants</td><td align="center"><a href="AGENTS.md">AGENTS.md</a></td></tr>
+    <tr><td align="center">Contributor invariants</td><td align="center"><a href="AGENTS.md">AGENTS.md</a></td></tr>
   </tbody>
 </table>
 

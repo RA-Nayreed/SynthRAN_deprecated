@@ -59,7 +59,7 @@ class PhysicalRadioProfile:
 
     def validate(self) -> "PhysicalRadioProfile":
         if self.band != 78:
-            raise R2LabRadioProfileError("current R2Lab N300 checkpoint accepts band 78 only")
+            raise R2LabRadioProfileError("R2Lab N300 profile supports band 78 only")
         if self.carrier.semantic is not ArfcnSemantic.CARRIER_CENTER:
             raise R2LabRadioProfileError(
                 "physical srsRAN dl_arfcn requires a carrier-center ARFCN; "
@@ -146,7 +146,7 @@ def nominal_bandwidth_mhz(reference: OaiRadioReference) -> int:
         ]
     except KeyError as exc:
         raise R2LabRadioProfileError(
-            "reference PRB/SCS pair is not supported by the physical checkpoint"
+            "reference PRB/SCS pair is not supported by the physical profile"
         ) from exc
 
 
@@ -413,7 +413,7 @@ def build_user_plane_ping_command(
     except ValueError as exc:
         raise UserPlaneProbeError("user-plane peer must be a literal IP address") from exc
     if not isinstance(address, ipaddress.IPv4Address):
-        raise UserPlaneProbeError("current qfit user-plane checkpoint is IPv4-only")
+        raise UserPlaneProbeError("qfit user-plane verification supports IPv4 only")
     return (
         "ping",
         "-n",
