@@ -57,6 +57,8 @@ DEFAULT_TIMEOUT_SECONDS = 30
 DEFAULT_REACHABILITY_ATTEMPTS = 12
 DEFAULT_REACHABILITY_DELAY_SECONDS = 10.0
 DEFAULT_POWER_SETTLE_SECONDS = 20.0
+QFIT_INITIALIZER = "/usr/local/bin/init.sh"
+QFIT_MBIM_DEVICE = "/dev/cdc-wdm0"
 
 SUPPORTED_RADIOS = frozenset({"n300", "n320"})
 SUPPORTED_QHATS = frozenset(
@@ -216,6 +218,28 @@ def gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
         *identity_options,
         "--",
         f"{slice_name}@{R2LAB_GATEWAY}",
+        *remote,
+    )
+
+
+def _qfit_host_command(qfit: str, *remote: str) -> tuple[str, ...]:
+    """Build one strict Faraday-to-qfit command for reviewed startup operations."""
+
+    qfit = _validate_ue(qfit)
+    if _ue_kind(qfit) != "qfit":
+        raise R2LabResourceError("qfit host command requires a reviewed qfit UE")
+    if not remote:
+        raise R2LabResourceError("qfit host command requires one explicit remote command")
+    return (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "--",
+        f"root@{qfit}",
         *remote,
     )
 
@@ -604,8 +628,6 @@ def authorize_physical_start(
     if observed.state is not PowerState.ON:
         raise R2LabResourceError("selected N300 is not proven on for physical gNB start")
 
-    # The filesystem claim is part of the authority boundary, so verify that it
-    # did not change while the remote lease and radio observations were in flight.
     _require_claim(claim_path, run_id=run_id, selection=selection)
     refreshed_claim = _load_json(claim_path, "active R2Lab resource claim")
     if _claim_sha256(refreshed_claim) != claim_digest:
@@ -742,11 +764,20 @@ def execute_prepare(
         write_manifest("failed", stage)
         finish_log()
 
-    def remote_required(stage: str, *command: str) -> CommandResult:
+    def remote_required(
+        stage: str,
+        *command: str,
+        command_timeout: int | None = None,
+    ) -> CommandResult:
         report(f"{stage}: running...")
+        effective_timeout = (
+            timeout_seconds
+            if command_timeout is None
+            else _validate_timeout(command_timeout)
+        )
         try:
             result = runner(
-                gateway_command(plan.selection.slice_name, *command), timeout_seconds
+                gateway_command(plan.selection.slice_name, *command), effective_timeout
             )
         except (R2LabResourceError, OSError) as exc:
             report(f"{stage}: FAILED")
@@ -877,6 +908,26 @@ def execute_prepare(
         report("ue-reachability: FAILED")
         fail("ue-reachability", "selected UE did not become reachable")
         raise R2LabResourceError("selected R2Lab UE did not become reachable")
+
+    if plan.selection.ue_kind == "qfit":
+        require_lease("lease-before-qfit-initialize")
+        remote_required(
+            "qfit-initialize",
+            *_qfit_host_command(plan.selection.ue, QFIT_INITIALIZER),
+            command_timeout=max(timeout_seconds, 60),
+        )
+        require_lease("lease-before-qfit-radio-on")
+        remote_required(
+            "qfit-radio-on",
+            *_qfit_host_command(
+                plan.selection.ue,
+                "mbimcli",
+                "-p",
+                "-d",
+                QFIT_MBIM_DEVICE,
+                "--set-radio-state=on",
+            ),
+        )
 
     require_lease("lease-final")
     write_manifest("ready")
