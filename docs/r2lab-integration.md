@@ -59,7 +59,7 @@ surface under `synthran.network`.
 - The N300 is a singleton owner: zero matching gNB pods must be proven before
   release or reconfiguration, and exactly one ready pod must be proven at start.
 - Physical staging is immutable, digest-bound, and stopped at zero replicas.
-- FIT image loading remains an explicit authorized operation.
+- FIT image loading is scoped to the selected qfit and a freshly verified lease.
 - Raw modem output and subscriber identifiers are not persisted.
 
 ## Physical runtime
@@ -70,17 +70,18 @@ and uses exact CPU and memory requests and limits for predictable gNB placement.
 
 The qfit path maps logical resources such as `qfit07` to physical FIT hosts such
 as `fit07` in one controller function. All nested SSH commands use strict host
-verification. Preparation powers on a qfit only when provider state proves it
-off. An already-on provisioned node is preserved, but it must pass the R2Lab SSH
-wait before modem preparation. The FIT host and its external modem USB rail are
-separate power boundaries. Preparation observes the exact USB state, powers on
-only an observed-off selected rail, and waits until `/dev/ttyUSB2`,
+verification. When provider state proves a qfit off, preparation loads the
+reviewed `mbim-quectel-any-dnn` image on that exact FIT node and requires the
+provider to prove the host on before the R2Lab SSH wait. An already-on
+provisioned node is preserved and must still pass the SSH wait before modem
+preparation. The FIT host and its external modem USB rail are separate power
+boundaries. Preparation observes the exact USB state, powers on only an
+observed-off selected rail, and waits until `/dev/ttyUSB2`,
 `/dev/cdc-wdm0`, and `wwan0` are all present before running the image initializer.
 It reproves that management surface after initialization. Unknown state fails
 closed and retains the claim. Release verifies both the selected USB rail and
-FIT host off before removing the claim. Image loading remains an explicit
-operator action. Software-radio and packet-attachment mutations remain isolated
-in the later UE activation boundary.
+FIT host off before removing the claim. Software-radio and packet-attachment
+mutations remain isolated in the later UE activation boundary.
 
 The provider image can reveal registration after packet attachment is requested.
 The mutation order is therefore:
