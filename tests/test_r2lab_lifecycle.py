@@ -11,6 +11,7 @@ import unittest
 from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import load_inventory
 from synthran.live_preflight import CommandResult
+from synthran.r2lab.acceptance import PhysicalRunEvidence, STAGE_ORDER
 from synthran.r2lab.controller import (
     QFIT_IMAGE,
     R2LabSelection,
@@ -30,6 +31,7 @@ from synthran.r2lab.deployment import (
     PhysicalChartArtifact,
     PhysicalHelmRenderEvidence,
     R2LabPhysicalStagingError,
+    execute_authorized_physical_gnb_stop,
     execute_stopped_physical_staging,
 )
 
@@ -720,6 +722,123 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         ]
         self.assertEqual(1, len(scale_one))
         self.assertEqual(1, len(cluster.pods))
+
+    def test_exact_bound_gnb_stop_proves_zero_pods(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = self.make_artifact(root)
+            cluster = self.make_runner(artifact)
+            staging, known_hosts = self.stage(
+                root=root,
+                artifact=artifact,
+                runner=cluster,
+            )
+            cluster.existing_replicas = 1
+            cluster.pods = [cluster.ready_pod()]
+            cluster.commands.clear()
+
+            stopped = execute_authorized_physical_gnb_stop(
+                staging=staging,
+                owner=self.owner,
+                reservation_id=self.reservation_id,
+                allocation_id=self.allocation_id,
+                known_hosts=known_hosts,
+                now=self.now,
+                runner=cluster,
+                sleeper=lambda _: None,
+                timeout_seconds=30,
+            )
+
+        self.assertEqual("gnb-stopped", stopped.to_dict()["status"])
+        self.assertEqual(0, stopped.desired_replicas)
+        self.assertEqual(0, stopped.gnb_pod_count)
+        remotes = [cluster.remote(command) for command in cluster.commands]
+        self.assertEqual(
+            1,
+            sum(
+                remote is not None and "--replicas=0" in remote
+                for remote in remotes
+            ),
+        )
+
+    def test_release_stops_bound_gnb_before_hardware_power_off(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user",
+            radio="n300",
+            ue="qfit07",
+        )
+        provider = LifecycleRunner()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_root = root / "r2lab"
+            execute_prepare(
+                plan=build_plan(run_id=self.run_id, selection=selection),
+                run_root=run_root,
+                runner=provider,
+                sleeper=lambda _: None,
+                reachability_attempts=1,
+            )
+            artifact = self.make_artifact(root)
+            cluster = self.make_runner(artifact)
+            staging, known_hosts = self.stage(
+                root=root,
+                artifact=artifact,
+                runner=cluster,
+            )
+            cluster.existing_replicas = 1
+            cluster.pods = [cluster.ready_pod()]
+            cluster.commands.clear()
+
+            evidence = PhysicalRunEvidence(run_id=self.run_id).bind_staging(
+                staging.to_dict()
+            )
+            evidence = evidence.bind_gnb_start(
+                {
+                    "run_id": self.run_id,
+                    "package_sha256": staging.package_sha256,
+                    "values_sha256": staging.values_sha256,
+                    "render_sha256": staging.render_sha256,
+                    "claim_sha256": "d" * 64,
+                    "maximum_observed_pods": 1,
+                    "started_exactly_one": True,
+                    "status": "gnb-started",
+                    "hardware_mutation": True,
+                }
+            )
+            for stage in STAGE_ORDER[:4]:
+                evidence = evidence.pass_stage(
+                    stage,
+                    source=f"fixture-{stage.value}",
+                )
+            run_directory = run_root / self.run_id
+            evidence.write_json(run_directory / "physical-run.json")
+            physical = run_directory / "physical"
+            physical.mkdir()
+            (physical / "physical-staging.json").write_text(
+                json.dumps(staging.to_dict()),
+                encoding="utf-8",
+            )
+
+            released = execute_release(
+                run_id=self.run_id,
+                slice_name="oulu_user",
+                run_root=run_root,
+                runner=provider,
+                timeout_seconds=30,
+                owner=self.owner,
+                reservation_id=None,
+                allocation_id=None,
+                known_hosts=known_hosts,
+                now=self.now,
+                cluster_runner=cluster,
+                sleeper=lambda _: None,
+            )
+
+        self.assertEqual("released", released.status)
+        self.assertEqual([], cluster.pods)
+        self.assertEqual("off", provider.power["n300"])
+        self.assertEqual("off", provider.qfit_usb_power)
 
     def test_authorized_start_never_scales_up_after_claim_changes(self) -> None:
         run_id = self.run_id

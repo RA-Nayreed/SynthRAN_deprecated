@@ -247,12 +247,12 @@ def _checked_output(
 def verify_reservation(
     *,
     runner: Runner,
-    reservation_id: str,
+    reservation_id: str | None,
     owner: str,
     nodes: set[str],
     now: datetime,
     timeout_seconds: int,
-) -> None:
+) -> str:
     """Verify a current, owned POS calendar record without creating one."""
 
     records = _parse_json_objects(
@@ -271,16 +271,37 @@ def verify_reservation(
         ),
         "POS reservation query",
     )
-    matches = tuple(
-        record
-        for record in records
-        if _first_identifier(record, ("id",), "reservation id") == reservation_id
-    )
+    if reservation_id is None:
+        matches = tuple(
+            record
+            for record in records
+            if _first_text(record, ("owner",), "reservation owner") == owner
+            and _parse_time(record.get("start_date"), "reservation start")
+            <= now
+            < _parse_time(record.get("end_date"), "reservation end")
+            and nodes.issubset(_node_names(record.get("nodes")))
+        )
+    else:
+        matches = tuple(
+            record
+            for record in records
+            if _first_identifier(record, ("id",), "reservation id")
+            == reservation_id
+        )
     if not matches:
-        raise LivePreflightError("reservation id was not found in the POS calendar")
+        raise LivePreflightError(
+            "no matching active reservation was found in the POS calendar"
+            if reservation_id is None
+            else "reservation id was not found in the POS calendar"
+        )
     if len(matches) != 1:
-        raise LivePreflightError("reservation id is ambiguous in the POS calendar")
+        raise LivePreflightError(
+            "active reservation is ambiguous in the POS calendar"
+            if reservation_id is None
+            else "reservation id is ambiguous in the POS calendar"
+        )
     payload = matches[0]
+    observed_id = _first_identifier(payload, ("id",), "reservation id")
     observed_owner = _first_text(payload, ("owner",), "reservation owner")
     observed_nodes = _node_names(payload.get("nodes"))
     starts_at = _parse_time(payload.get("start_date"), "reservation start")
@@ -291,18 +312,20 @@ def verify_reservation(
         raise LivePreflightError("reservation is not active at the current UTC time")
     if not nodes.issubset(observed_nodes):
         raise LivePreflightError("reservation does not cover every selected node")
+    return observed_id
 
 
 def verify_allocations(
     *,
     runner: Runner,
-    allocation_id: str,
+    allocation_id: str | None,
     owner: str,
     nodes: set[str],
     timeout_seconds: int,
-) -> None:
+) -> str:
     """Verify every selected node belongs to one expected, owned allocation."""
 
+    observed_ids: set[str] = set()
     for node in sorted(nodes):
         payload = _parse_json_object(
             _checked_output(
@@ -315,7 +338,7 @@ def verify_allocations(
         )
         observed_id = _first_identifier(payload, ("id",), "allocation id")
         observed_owner = _first_text(payload, ("owner",), "allocation owner")
-        if observed_id != allocation_id:
+        if allocation_id is not None and observed_id != allocation_id:
             raise LivePreflightError(
                 "a selected node is not in the expected allocation"
             )
@@ -323,6 +346,12 @@ def verify_allocations(
             raise LivePreflightError(
                 "a selected node allocation is not owned by the expected operator"
             )
+        observed_ids.add(observed_id)
+    if len(observed_ids) != 1:
+        raise LivePreflightError(
+            "selected nodes do not belong to one common allocation"
+        )
+    return next(iter(observed_ids))
 
 
 def ssh_command(
@@ -777,6 +806,11 @@ def _record(checks: list[LiveCheck], name: str, operation: Callable[[], str]) ->
     return True
 
 
+def _verified_detail(operation: Callable[[], object], detail: str) -> str:
+    operation()
+    return detail
+
+
 def run_live_preflight(
     *,
     inventory: NetworkInventory,
@@ -856,30 +890,30 @@ def run_live_preflight(
         _record(
             checks,
             "reservation",
-            lambda: (
-                verify_reservation(
+            lambda: _verified_detail(
+                lambda: verify_reservation(
                     runner=runner,
                     reservation_id=reservation_id,
                     owner=owner,
                     nodes=nodes,
                     now=observed_at,
                     timeout_seconds=timeout_seconds,
-                )
-                or f"active owned reservation covers {len(nodes)} selected node(s)"
+                ),
+                f"active owned reservation covers {len(nodes)} selected node(s)",
             ),
         )
         _record(
             checks,
             "allocation",
-            lambda: (
-                verify_allocations(
+            lambda: _verified_detail(
+                lambda: verify_allocations(
                     runner=runner,
                     allocation_id=allocation_id,
                     owner=owner,
                     nodes=nodes,
                     timeout_seconds=timeout_seconds,
-                )
-                or f"one owned allocation contains {len(nodes)} selected node(s)"
+                ),
+                f"one owned allocation contains {len(nodes)} selected node(s)",
             ),
         )
         core_ssh_ready = _record(

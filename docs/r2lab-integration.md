@@ -140,6 +140,45 @@ the immutable acceptance record through Open5GS. The next stage is then gNB/N2.
 Unknown, unready, multiply owned, or inconsistent state fails without creating
 acceptance evidence.
 
+## Stopped gNB staging and N2 proof
+
+The gNB command boundary reuses the network bindings from the currently stopped
+physical Helm release, renders the pinned chart in an isolated workspace, checks
+the locked Helm version, packages deterministic artifacts, and stages the exact
+Deployment at zero replicas. Explicit network bindings remain available as an
+all-or-none override when no stopped release exists.
+
+```text
+python -m synthran r2lab gnb-stage \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --run-id "$R2LAB_RUN" \
+  --owner "$SYNTHRAN_OWNER" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
+  --json
+```
+
+Success binds the package, values, and render digests into `physical-run.json`.
+The start command then refreshes both authority domains, proves zero existing
+gNB pods, starts exactly one ready pod, and polls for a current N2 association.
+
+```text
+python -m synthran r2lab gnb-start \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --run-id "$R2LAB_RUN" \
+  --owner "$SYNTHRAN_OWNER" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
+  --json
+```
+
+The gNB commands discover the one active owner reservation and the one common
+allocation for `sopnode-f2` and `sopnode-f3`. The identifier options can still
+pin exact records when desired; ambiguous or split ownership fails closed.
+
+An unsuccessful N2 proof requests an exact scale-to-zero recovery. `r2lab
+release` also detects a bound gNB start and proves that exact Deployment is at
+zero replicas and zero pods before it powers off the qfit and N300 or releases
+the local resource claim.
+
 ## Completion criteria
 
 The physical path is complete only when one immutable authorized run proves:
