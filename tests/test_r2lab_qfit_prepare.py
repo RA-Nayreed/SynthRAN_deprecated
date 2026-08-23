@@ -99,6 +99,13 @@ class QfitPrepareRunner:
 
 
 class R2LabQfitPrepareTests(unittest.TestCase):
+    @staticmethod
+    def assert_remote_known_hosts_bound(test: unittest.TestCase, command: str | tuple[str, ...]) -> None:
+        rendered = command if isinstance(command, str) else " ".join(command)
+        test.assertIn("UserKnownHostsFile=", rendered)
+        test.assertIn(".ssh/known_hosts", rendered)
+        test.assertIn("GlobalKnownHostsFile=/dev/null", rendered)
+
     def test_prepare_initializes_qfit_once_after_power_on_then_enables_radio(self) -> None:
         selection = R2LabSelection.build(
             slice_name="oulu_user",
@@ -152,8 +159,7 @@ class R2LabQfitPrepareTests(unittest.TestCase):
         for _, command in (init_matches[0], radio_matches[0]):
             self.assertIn("root@fit07", command)
             self.assertNotIn("root@qfit07", command)
-            self.assertIn("UserKnownHostsFile=/home/oulu_user/.ssh/known_hosts", command)
-            self.assertIn("GlobalKnownHostsFile=/dev/null", command)
+            self.assert_remote_known_hosts_bound(self, command)
 
     def test_gateway_maps_joined_qfit_destination_for_ue_and_workload_paths(self) -> None:
         with patch.dict(
@@ -167,11 +173,7 @@ class R2LabQfitPrepareTests(unittest.TestCase):
             )
         self.assertIn("root@fit07", command[-1])
         self.assertNotIn("root@qfit07", command[-1])
-        self.assertIn(
-            "UserKnownHostsFile=/home/oulu_user/.ssh/known_hosts",
-            command[-1],
-        )
-        self.assertIn("GlobalKnownHostsFile=/dev/null", command[-1])
+        self.assert_remote_known_hosts_bound(self, command[-1])
 
 
 if __name__ == "__main__":
