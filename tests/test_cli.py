@@ -62,6 +62,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(args.command, "network")
         self.assertEqual(args.network_command, "verify")
 
+    def test_parser_selects_exact_dependencies(self) -> None:
+        args = _parser().parse_args(
+            [
+                "deps",
+                "sync",
+                "--name",
+                "fiveg_ansible",
+                "--name",
+                "srsran_helm",
+            ]
+        )
+
+        self.assertEqual("sync", args.deps_command)
+        self.assertEqual(["fiveg_ansible", "srsran_helm"], args.dependency_names)
+        self.assertFalse(args.all)
+
     def test_parser_contains_r2lab_commands(self) -> None:
         parser = _parser()
         args = parser.parse_args(
@@ -89,17 +105,17 @@ class CliTests(unittest.TestCase):
                 "r2lab",
                 "foundation",
                 "--slice",
-                "oulu_rnayreed",
+                "test_slice",
                 "--run-id",
                 "r2lab-current-run",
                 "--previous-run-id",
                 "r2lab-previous-run",
                 "--owner",
-                "rnayreed",
+                "test-owner",
                 "--reservation-id",
-                "6360",
+                "reservation-1",
                 "--allocation-id",
-                "rnayreed_260824_090000_000001",
+                "allocation-1",
                 "--known-hosts",
                 "known_hosts",
             ]
@@ -114,27 +130,27 @@ class CliTests(unittest.TestCase):
                 "r2lab",
                 "gnb-stage",
                 "--slice",
-                "oulu_rnayreed",
+                "test_slice",
                 "--run-id",
                 "r2lab-current-run",
                 "--owner",
-                "rnayreed",
+                "test-owner",
                 "--reservation-id",
-                "6366",
+                "reservation-1",
                 "--allocation-id",
                 "allocation-1",
                 "--known-hosts",
                 "known_hosts",
                 "--amf-n2-address",
-                "10.10.3.200",
+                "198.51.100.200",
                 "--gnb-n2-address",
-                "10.10.3.234",
+                "198.51.100.234",
                 "--n300-address",
-                "10.10.4.203",
+                "192.0.2.203",
                 "--ru-pod-address",
-                "10.10.4.234",
+                "192.0.2.234",
                 "--ru-subnet",
-                "10.10.4.0/24",
+                "192.0.2.0/24",
             ]
         )
         start = _parser().parse_args(
@@ -142,13 +158,13 @@ class CliTests(unittest.TestCase):
                 "r2lab",
                 "gnb-start",
                 "--slice",
-                "oulu_rnayreed",
+                "test_slice",
                 "--run-id",
                 "r2lab-current-run",
                 "--owner",
-                "rnayreed",
+                "test-owner",
                 "--reservation-id",
-                "6366",
+                "reservation-1",
                 "--allocation-id",
                 "allocation-1",
                 "--known-hosts",
@@ -157,7 +173,7 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertEqual("gnb-stage", stage.r2lab_command)
-        self.assertEqual("10.10.3.234", stage.gnb_n2_address)
+        self.assertEqual("198.51.100.234", stage.gnb_n2_address)
         self.assertEqual("gnb-start", start.r2lab_command)
         self.assertEqual(12, start.n2_attempts)
 

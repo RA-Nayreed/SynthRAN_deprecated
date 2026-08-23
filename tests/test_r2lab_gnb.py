@@ -14,6 +14,7 @@ from synthran.r2lab.acceptance import (
     STAGE_ORDER,
 )
 from synthran.r2lab.deployment import (
+    PHYSICAL_VALUES_SOURCE,
     PhysicalChartBindings,
     PhysicalGnbStartResult,
     PhysicalGnbStopResult,
@@ -58,11 +59,11 @@ def staging_result() -> PhysicalStagingResult:
 class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.bindings = PhysicalChartBindings(
-            amf_n2_address="10.10.3.200",
-            gnb_n2_address="10.10.3.234",
-            n300_address="10.10.4.203",
-            ru_pod_address="10.10.4.234",
-            ru_subnet="10.10.4.0/24",
+            amf_n2_address="198.51.100.200",
+            gnb_n2_address="198.51.100.234",
+            n300_address="192.0.2.203",
+            ru_pod_address="192.0.2.234",
+            ru_subnet="192.0.2.0/24",
         )
 
     @staticmethod
@@ -78,13 +79,21 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
         dependency = next(item for item in lock.git if item.name == "srsran_helm")
         render = PhysicalHelmRenderEvidence(
             sha256="c" * 64,
+            source_values_sha256="e" * 64,
             replicas=0,
             strategy="Recreate",
             image_reference="example.invalid/gnb:v1@sha256:" + "d" * 64,
-            carrier_arfcn=621_312,
-            channel_bandwidth_mhz=40,
-            antennas_dl=2,
-            antennas_ul=2,
+            carrier_arfcn=640_000,
+            band=78,
+            channel_bandwidth_mhz=20,
+            common_scs_khz=30,
+            sample_rate_mhz=61.44,
+            tx_gain_db=35,
+            rx_gain_db=60,
+            ss0_index=0,
+            coreset0_index=12,
+            prach_config_index=1,
+            device_args_sha256="f" * 64,
         )
 
         with tempfile.TemporaryDirectory() as directory:
@@ -98,6 +107,10 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             templates.mkdir(parents=True)
             (templates.parent / "Chart.yaml").write_text(
                 "apiVersion: v2\nname: srsran-gnb\n",
+                encoding="utf-8",
+            )
+            (templates.parent / Path(PHYSICAL_VALUES_SOURCE).name).write_text(
+                "pinned R2Lab values\n",
                 encoding="utf-8",
             )
             (templates / "deployment.yaml").write_text(
@@ -142,9 +155,9 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             ):
                 result = execute_physical_gnb_staging(
                     run_id=RUN_ID,
-                    slice_name="oulu_rnayreed",
-                    owner="rnayreed",
-                    reservation_id="6366",
+                    slice_name="test_slice",
+                    owner="test-owner",
+                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
                     now=NOW,
@@ -155,9 +168,9 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                 )
                 recovered = execute_physical_gnb_staging(
                     run_id=RUN_ID,
-                    slice_name="oulu_rnayreed",
-                    owner="rnayreed",
-                    reservation_id="6366",
+                    slice_name="test_slice",
+                    owner="test-owner",
+                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
                     now=NOW,
@@ -211,7 +224,7 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (physical / "physical-chart.json").write_text(
-                json.dumps({"values": {"gnbIp": "10.10.3.234"}}),
+                json.dumps({"values": {"gnbIp": "198.51.100.234"}}),
                 encoding="utf-8",
             )
             known_hosts = root / "known_hosts"
@@ -237,9 +250,9 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             ):
                 result = execute_physical_gnb_n2_acceptance(
                     run_id=RUN_ID,
-                    slice_name="oulu_rnayreed",
-                    owner="rnayreed",
-                    reservation_id="6366",
+                    slice_name="test_slice",
+                    owner="test-owner",
+                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
                     now=NOW,
@@ -292,7 +305,7 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                 json.dumps(stage.to_dict()), encoding="utf-8"
             )
             (physical / "physical-chart.json").write_text(
-                json.dumps({"values": {"gnbIp": "10.10.3.234"}}),
+                json.dumps({"values": {"gnbIp": "198.51.100.234"}}),
                 encoding="utf-8",
             )
             known_hosts = root / "known_hosts"
@@ -326,9 +339,9 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             ):
                 result = execute_physical_gnb_n2_acceptance(
                     run_id=RUN_ID,
-                    slice_name="oulu_rnayreed",
-                    owner="rnayreed",
-                    reservation_id="6366",
+                    slice_name="test_slice",
+                    owner="test-owner",
+                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
                     now=NOW,

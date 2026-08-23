@@ -10,21 +10,27 @@ The virtual Open5GS, srsRAN, srsUE, and RFSIM path remains unchanged.
 
 Historical R2Lab runs established exact-resource authority, the SLICES/POS and
 Kubernetes foundation, Open5GS, an N300-backed gNB, N2/SCTP, qfit provisioning,
-UHD/IQ transport, and exact cleanup. They also exposed an incorrect transcription
-of the reviewed OAI radio profile. The corrected R2Lab profile is:
+UHD/IQ transport, and exact cleanup. The physical gNB now consumes the exact
+N300 values selected by the pinned R2Lab adapter rather than reconstructing a
+second radio profile inside SynthRAN:
 
 | Setting | Value |
 |---|---:|
 | Band | 78 |
-| Carrier-center ARFCN | 621312 |
-| SSB ARFCN | 621312 |
-| Point-A ARFCN | 620040 |
-| Resource blocks | 106 |
+| Adapter commit | `a0149fc0dde39e2872945a0f3c91e804ece52d4f` |
+| Chart commit | `8dfb9890d127734cdcd6eee9df8c5d09b1a8076a` |
+| Values source | `charts/srsran-gnb/values-n300-n78-20MHz.yaml` |
+| DL ARFCN | 640000 |
 | SCS | 30 kHz |
-| Nominal bandwidth | 40 MHz |
-| TX/RX paths | 2/2 |
+| Channel bandwidth | 20 MHz |
+| Sample rate | 61.44 MHz |
+| TX/RX gain | 35/60 dB |
+| PDCCH | SS0 0, CORESET0 12 |
+| PRACH index | 1 |
 
-The earlier `162 PRB / 60 MHz / 621984` candidate is rejected by validation.
+The source file is copied, hashed, rendered, transferred, and verified without
+radio-field overlays. A rendered value that differs from the pinned source is
+rejected before any cluster write.
 Current live work has observed NR5G-SA registration and an IPv4 PDU address on
 qfit, but these observations do not replace an immutable end-to-end acceptance
 record. User plane, the physical workload, and exact cleanup must still be proven
@@ -66,8 +72,10 @@ surface under `synthran.network`.
 ## Physical runtime
 
 The deployment boundary renders the reviewed Open5GS/f2 and srsRAN/f3 topology,
-pins the UHD image by digest, enforces `Recreate`, validates the radio profile,
+pins the UHD image by digest, enforces `Recreate`, validates the pinned source,
 and uses exact CPU and memory requests and limits for predictable gNB placement.
+SynthRAN overlays only current N2 addresses, namespace and node placement,
+immutable image identity, resources, and stopped singleton safety.
 
 The qfit path maps logical resources such as `qfit07` to physical FIT hosts such
 as `fit07` in one controller function. All nested SSH commands use strict host
@@ -142,6 +150,15 @@ acceptance evidence.
 
 ## Stopped gNB staging and N2 proof
 
+Sync only the two physical configuration dependencies. This leaves unrelated
+checkouts, including a locally modified Contiki-NG tree, untouched:
+
+```text
+python -m synthran deps sync \
+  --name fiveg_ansible \
+  --name srsran_helm
+```
+
 The gNB command boundary reuses the network bindings from the currently stopped
 physical Helm release, renders the pinned chart in an isolated workspace, checks
 the locked Helm version, packages deterministic artifacts, and stages the exact
@@ -183,7 +200,7 @@ the local resource claim.
 
 The physical path is complete only when one immutable authorized run proves:
 
-1. the corrected RF profile and singleton gNB/N2 state;
+1. the pinned R2Lab RF source and singleton gNB/N2 state;
 2. qfit readiness, cell acquisition, registration, and PDU state;
 3. bounded `wwan0` user-plane traffic;
 4. the physical workload through the R2Lab handoff;

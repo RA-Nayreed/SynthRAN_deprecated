@@ -473,7 +473,17 @@ def _parser() -> argparse.ArgumentParser:
     sync = deps_commands.add_parser("sync", help="synchronize detached pinned checkouts")
     sync.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
     sync.add_argument("--root", type=Path, default=Path(".deps"))
-    sync.add_argument("--all", action="store_true", help="include transitive repositories")
+    dependency_selection = sync.add_mutually_exclusive_group()
+    dependency_selection.add_argument(
+        "--all", action="store_true", help="include transitive repositories"
+    )
+    dependency_selection.add_argument(
+        "--name",
+        action="append",
+        dest="dependency_names",
+        metavar="DEPENDENCY",
+        help="synchronize one named dependency; repeat to select more than one",
+    )
     sync.add_argument("--dry-run", action="store_true")
 
     privacy = subcommands.add_parser("privacy", help="scan or redact sensitive context")
@@ -884,6 +894,7 @@ def _deps_sync(args: argparse.Namespace) -> int:
         lock,
         args.root,
         include_transitive=args.all,
+        names=args.dependency_names,
         dry_run=args.dry_run,
         output=sys.stdout,
     )

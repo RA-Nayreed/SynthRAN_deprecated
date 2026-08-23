@@ -278,6 +278,7 @@ class StoppedStagingRunner:
         reservation_id: str,
         allocation_id: str,
         package_sha256: str,
+        source_values_sha256: str,
         values_sha256: str,
         render_sha256: str,
     ) -> None:
@@ -286,6 +287,7 @@ class StoppedStagingRunner:
         self.reservation_id = reservation_id
         self.allocation_id = allocation_id
         self.package_sha256 = package_sha256
+        self.source_values_sha256 = source_values_sha256
         self.values_sha256 = values_sha256
         self.render_sha256 = render_sha256
         self.commands: list[tuple[str, ...]] = []
@@ -361,7 +363,9 @@ class StoppedStagingRunner:
             if self.remote_digest_match:
                 return CommandResult(
                     0,
-                    f"{self.package_sha256}  {remote[1]}\n{self.values_sha256}  {remote[2]}\n",
+                    f"{self.package_sha256}  {remote[1]}\n"
+                    f"{self.source_values_sha256}  {remote[2]}\n"
+                    f"{self.values_sha256}  {remote[3]}\n",
                     "",
                 )
             return CommandResult(
@@ -416,31 +420,49 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
         self.run_id = "r2lab-staging-test"
-        self.owner = "rnayreed"
+        self.owner = "test-owner"
         self.reservation_id = "reservation-1"
         self.allocation_id = "allocation-1"
         self.now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+        self.source_values = "pinned R2Lab values\n"
+        self.source_values_sha256 = hashlib.sha256(
+            self.source_values.encode()
+        ).hexdigest()
         self.render = PhysicalHelmRenderEvidence(
             sha256="a" * 64,
+            source_values_sha256=self.source_values_sha256,
             replicas=0,
             strategy="Recreate",
             image_reference="example.invalid/gnb:v1@sha256:" + "b" * 64,
-            carrier_arfcn=621_312,
-            channel_bandwidth_mhz=40,
-            antennas_dl=2,
-            antennas_ul=2,
+            carrier_arfcn=640_000,
+            band=78,
+            channel_bandwidth_mhz=20,
+            common_scs_khz=30,
+            sample_rate_mhz=61.44,
+            tx_gain_db=35,
+            rx_gain_db=60,
+            ss0_index=0,
+            coreset0_index=12,
+            prach_config_index=1,
+            device_args_sha256="c" * 64,
         )
 
     def make_artifact(self, root: Path) -> PhysicalChartArtifact:
         package = root / f"srsran-gnb-{self.run_id}.tgz"
+        source_values = root / "r2lab-n300-values.yaml"
         values = root / "synthran-physical-values.json"
         package.write_bytes(b"reviewed physical chart")
+        source_values.write_text(self.source_values, encoding="utf-8")
         values.write_text('{"replicas": 0}\n', encoding="utf-8")
         return PhysicalChartArtifact(
             run_id=self.run_id,
             package_path=package,
+            source_values_path=source_values,
             values_path=values,
             package_sha256=hashlib.sha256(package.read_bytes()).hexdigest(),
+            source_values_sha256=hashlib.sha256(
+                source_values.read_bytes()
+            ).hexdigest(),
             values_sha256=hashlib.sha256(values.read_bytes()).hexdigest(),
         )
 
@@ -451,6 +473,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             reservation_id=self.reservation_id,
             allocation_id=self.allocation_id,
             package_sha256=artifact.package_sha256,
+            source_values_sha256=artifact.source_values_sha256,
             values_sha256=artifact.values_sha256,
             render_sha256=self.render.sha256,
         )
@@ -535,16 +558,24 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             runner = self.make_runner(artifact)
             stale = PhysicalHelmRenderEvidence(
                 sha256="c" * 64,
+                source_values_sha256="d" * 64,
                 replicas=0,
                 strategy="Recreate",
                 image_reference=self.render.image_reference,
-                carrier_arfcn=621_984,
-                channel_bandwidth_mhz=60,
-                antennas_dl=2,
-                antennas_ul=2,
+                carrier_arfcn=self.render.carrier_arfcn,
+                band=self.render.band,
+                channel_bandwidth_mhz=self.render.channel_bandwidth_mhz,
+                common_scs_khz=self.render.common_scs_khz,
+                sample_rate_mhz=self.render.sample_rate_mhz,
+                tx_gain_db=self.render.tx_gain_db,
+                rx_gain_db=self.render.rx_gain_db,
+                ss0_index=self.render.ss0_index,
+                coreset0_index=self.render.coreset0_index,
+                prach_config_index=self.render.prach_config_index,
+                device_args_sha256=self.render.device_args_sha256,
             )
 
-            with self.assertRaisesRegex(R2LabPhysicalStagingError, "reviewed R2Lab radio reference"):
+            with self.assertRaisesRegex(R2LabPhysicalStagingError, "source values"):
                 execute_stopped_physical_staging(
                     lock=self.lock,
                     artifact=artifact,
