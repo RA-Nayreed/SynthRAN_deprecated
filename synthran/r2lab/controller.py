@@ -35,14 +35,23 @@ from synthran.r2lab.provider import (
     R2LabPowerStateError,
     R2LabQfitStateError,
     ReleaseAssessment,
+    SUPPORTED_QFITS,
     VerifiedPduOperation,
     VerifiedQfitOperation,
+    VerifiedQfitUsbOperation,
     execute_verified_pdu_transition,
     execute_verified_qfit_transition,
+    execute_verified_qfit_usb_transition,
+    observe_qfit_usb_power,
     parse_pdu_status,
     parse_qfit_status,
     qfit_node_number,
     release_assessment,
+)
+from synthran.r2lab.readiness import (
+    QfitReadinessEvidence,
+    R2LabQfitReadinessError,
+    execute_qfit_readiness,
 )
 from synthran.workspace.model import WorkspaceError
 from synthran.workspace.store import (
@@ -62,7 +71,6 @@ DEFAULT_REACHABILITY_DELAY_SECONDS = 10.0
 DEFAULT_POWER_SETTLE_SECONDS = 20.0
 QFIT_SSH_WAIT_TIMEOUT_SECONDS = 300
 QFIT_INITIALIZER = "/usr/local/bin/init.sh"
-QFIT_MBIM_DEVICE = "/dev/cdc-wdm0"
 
 SUPPORTED_RADIOS = frozenset({"n300", "n320"})
 SUPPORTED_QHATS = frozenset(
@@ -76,9 +84,6 @@ SUPPORTED_QHATS = frozenset(
         "qhat21",
         "qhat22",
     }
-)
-SUPPORTED_QFITS = frozenset(
-    {"qfit07", "qfit09", "qfit18", "qfit29", "qfit32", "qfit34"}
 )
 QMI_QHATS = frozenset({"qhat20", "qhat21", "qhat22"})
 
@@ -340,11 +345,25 @@ class R2LabPlan:
                 f"ssh <r2lab-slice>@faraday.inria.fr ping -c 1 -W 1 {self.selection.ue}",
             ]
         else:
+            qfit_node = qfit_node_number(self.selection.ue)
+            qfit_host = f"fit{qfit_node:02d}"
             ue_commands = [
                 "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>",
                 f"ssh <r2lab-slice>@faraday.inria.fr qfit on {self.selection.ue}",
                 "ssh <r2lab-slice>@faraday.inria.fr rhubarbe status <qfit-node>",
                 "ssh <r2lab-slice>@faraday.inria.fr rhubarbe wait <qfit-node>",
+                (
+                    "ssh <r2lab-slice>@faraday.inria.fr curl -fsS "
+                    f"http://reboot{qfit_node:02d}/usrpstatus"
+                ),
+                (
+                    "ssh <r2lab-slice>@faraday.inria.fr curl -fsS "
+                    f"http://reboot{qfit_node:02d}/usrpon"
+                ),
+                f"ssh <r2lab-slice>@faraday.inria.fr ssh root@{qfit_host} test -c /dev/ttyUSB2",
+                f"ssh <r2lab-slice>@faraday.inria.fr ssh root@{qfit_host} test -c /dev/cdc-wdm0",
+                f"ssh <r2lab-slice>@faraday.inria.fr ssh root@{qfit_host} ip link show dev wwan0",
+                f"ssh <r2lab-slice>@faraday.inria.fr ssh root@{qfit_host} {QFIT_INITIALIZER}",
             ]
         return {
             "schema": R2LAB_PLAN_SCHEMA,
@@ -744,6 +763,39 @@ def _qfit_cleanup_evidence(
     )
 
 
+def _qfit_usb_cleanup_evidence(
+    *, resource: str, stage: str, operation: VerifiedQfitUsbOperation
+) -> CleanupEvidence:
+    source = "qfit-usb-status"
+    if operation.status_transport_error:
+        source = "status-transport-error"
+    elif operation.mutation_transport_error:
+        source = "qfit-usb-status-after-mutation-transport-error"
+    return CleanupEvidence(
+        resource=resource,
+        stage=stage,
+        state=_cleanup_state(operation.observed_state),
+        source=source,
+    )
+
+
+def _combined_qfit_cleanup_evidence(
+    *, resource: str, usb: CleanupEvidence, host: CleanupEvidence
+) -> CleanupEvidence:
+    if usb.clean and host.clean:
+        state = CleanupState.PROVEN_OFF
+    elif CleanupState.PROVEN_ON in {usb.state, host.state}:
+        state = CleanupState.PROVEN_ON
+    else:
+        state = CleanupState.UNKNOWN
+    return CleanupEvidence(
+        resource=resource,
+        stage="ue-power-off-release",
+        state=state,
+        source=f"{usb.source}+{host.source}",
+    )
+
+
 def execute_prepare(
     *,
     plan: R2LabPlan,
@@ -915,6 +967,100 @@ def execute_prepare(
         report(f"{stage}: OK")
         return observation.state
 
+    def require_qfit_usb_state(stage: str) -> PowerState:
+        report(f"{stage}: running...")
+        try:
+            observation = observe_qfit_usb_power(
+                qfit=plan.selection.ue,
+                runner=provider,
+                timeout_seconds=timeout_seconds,
+            )
+        except (R2LabQfitStateError, R2LabResourceError, OSError) as exc:
+            report(f"{stage}: FAILED")
+            fail(stage, "qfit USB state could not be resolved")
+            raise R2LabResourceError(
+                f"R2Lab stage {stage} failed; selected qfit USB state is unresolved"
+            ) from exc
+        if observation.state is PowerState.UNKNOWN:
+            report(f"{stage}: FAILED")
+            fail(stage, "qfit USB state is unknown")
+            raise R2LabResourceError(
+                f"R2Lab stage {stage} failed; selected qfit USB state is unresolved"
+            )
+        log_lines.append(f"{stage}: OK - state={observation.state.value}")
+        report(f"{stage}: OK")
+        return observation.state
+
+    def require_qfit_usb(stage: str, requested: PowerState) -> None:
+        report(f"{stage}: running...")
+        try:
+            operation = execute_verified_qfit_usb_transition(
+                qfit=plan.selection.ue,
+                requested_state=requested,
+                runner=provider,
+                timeout_seconds=timeout_seconds,
+            )
+        except (R2LabQfitStateError, R2LabResourceError, OSError, ValueError) as exc:
+            report(f"{stage}: FAILED")
+            fail(stage, "qfit USB state could not be resolved")
+            raise R2LabResourceError(
+                f"R2Lab stage {stage} failed; selected qfit USB state is unresolved"
+            ) from exc
+        if not operation.confirmed:
+            report(f"{stage}: FAILED")
+            fail(stage, f"provider did not prove requested {requested.value} USB state")
+            raise R2LabResourceError(
+                f"R2Lab stage {stage} failed; selected qfit USB state is unresolved"
+            )
+        log_lines.append(f"{stage}: OK - state={operation.observed_state.value}")
+        report(f"{stage}: OK")
+
+    def wait_for_qfit_readiness(stage: str) -> QfitReadinessEvidence:
+        report(f"{stage}: running...")
+        evidence: QfitReadinessEvidence | None = None
+        for attempt in range(1, reachability_attempts + 1):
+            try:
+                evidence = execute_qfit_readiness(
+                    qfit=plan.selection.ue,
+                    remote_known_hosts=(
+                        f"/home/{plan.selection.slice_name}/.ssh/known_hosts"
+                    ),
+                    runner=provider,
+                    timeout_seconds=min(timeout_seconds, 60),
+                )
+            except R2LabQfitReadinessError as exc:
+                report(f"{stage}: FAILED")
+                fail(stage, "qfit readiness request was invalid")
+                raise R2LabResourceError(
+                    f"R2Lab stage {stage} failed; selected qfit readiness is unresolved"
+                ) from exc
+            if evidence.ready:
+                log_lines.append(f"{stage}: OK on attempt {attempt}")
+                report(f"{stage}: OK")
+                return evidence
+            if attempt < reachability_attempts:
+                sleeper(reachability_delay_seconds)
+
+        assert evidence is not None
+        missing = [
+            name
+            for name, present in (
+                ("usb-power", evidence.usb_power_on),
+                ("strict-ssh", evidence.strict_ssh),
+                ("serial-device", evidence.serial_device_present),
+                ("mbim-device", evidence.mbim_device_present),
+                ("wwan-interface", evidence.wwan_interface_present),
+            )
+            if not present
+        ]
+        if evidence.transport_error:
+            missing.append("transport")
+        report(f"{stage}: FAILED")
+        fail(stage, f"qfit management readiness missing: {','.join(missing)}")
+        raise R2LabResourceError(
+            f"R2Lab stage {stage} failed; selected qfit readiness is unresolved"
+        )
+
     write_manifest("running")
     require_lease("lease-check")
     try:
@@ -954,6 +1100,14 @@ def execute_prepare(
             qfit_node,
             command_timeout=QFIT_SSH_WAIT_TIMEOUT_SECONDS,
         )
+        qfit_usb_state = require_qfit_usb_state("qfit-usb-power-state")
+        if qfit_usb_state is PowerState.OFF:
+            require_lease("lease-before-qfit-usb-on")
+            require_qfit_usb("qfit-usb-power-on", PowerState.ON)
+        else:
+            log_lines.append("qfit-usb-power-reuse: OK - state=on")
+            report("qfit-usb-power-reuse: OK")
+        wait_for_qfit_readiness("qfit-enumeration-readiness")
         require_lease("lease-before-qfit-initialize")
         remote_required(
             "qfit-image-readiness",
@@ -974,19 +1128,7 @@ def execute_prepare(
             ),
             command_timeout=max(timeout_seconds, 60),
         )
-        require_lease("lease-before-qfit-radio-on")
-        remote_required(
-            "qfit-radio-on",
-            *qfit_host_command(
-                plan.selection.slice_name,
-                plan.selection.ue,
-                "mbimcli",
-                "-p",
-                "-d",
-                QFIT_MBIM_DEVICE,
-                "--set-radio-state=on",
-            ),
-        )
+        wait_for_qfit_readiness("qfit-management-readiness")
 
     if plan.selection.ue_kind == "qhat":
         report("ue-reachability: running...")
@@ -1207,25 +1349,72 @@ def execute_release(
                 operation=ue_operation,
             )
     else:
+        usb_stage = "qfit-usb-power-off-release"
+        report(f"{usb_stage}: running...")
         try:
-            qfit_operation = execute_verified_qfit_transition(
+            usb_operation = execute_verified_qfit_usb_transition(
                 qfit=selection.ue,
                 requested_state=PowerState.OFF,
                 runner=provider,
                 timeout_seconds=timeout_seconds,
             )
         except (R2LabQfitStateError, R2LabResourceError, OSError, ValueError):
-            ue_evidence = unknown(
+            usb_evidence = unknown(
                 selection.ue,
-                "ue-power-off-release",
-                "provider-state-unresolved",
+                usb_stage,
+                "qfit-usb-state-unresolved",
             )
         else:
-            ue_evidence = _qfit_cleanup_evidence(
+            usb_evidence = _qfit_usb_cleanup_evidence(
                 resource=selection.ue,
-                stage="ue-power-off-release",
-                operation=qfit_operation,
+                stage=usb_stage,
+                operation=usb_operation,
             )
+        usb_result = "OK" if usb_evidence.clean else "UNRESOLVED"
+        log_lines.append(
+            f"{usb_stage}: {usb_result} - state={usb_evidence.state.value}"
+        )
+        report(f"{usb_stage}: {usb_result}")
+
+        if not lease_ok("lease-before-qfit-host-off"):
+            host_evidence = unknown(
+                selection.ue,
+                "qfit-host-power-off-release",
+                "authority-unavailable",
+            )
+        else:
+            host_stage = "qfit-host-power-off-release"
+            report(f"{host_stage}: running...")
+            try:
+                qfit_operation = execute_verified_qfit_transition(
+                    qfit=selection.ue,
+                    requested_state=PowerState.OFF,
+                    runner=provider,
+                    timeout_seconds=timeout_seconds,
+                )
+            except (R2LabQfitStateError, R2LabResourceError, OSError, ValueError):
+                host_evidence = unknown(
+                    selection.ue,
+                    host_stage,
+                    "provider-state-unresolved",
+                )
+            else:
+                host_evidence = _qfit_cleanup_evidence(
+                    resource=selection.ue,
+                    stage=host_stage,
+                    operation=qfit_operation,
+                )
+            host_result = "OK" if host_evidence.clean else "UNRESOLVED"
+            log_lines.append(
+                f"{host_stage}: {host_result} - state={host_evidence.state.value}"
+            )
+            report(f"{host_stage}: {host_result}")
+
+        ue_evidence = _combined_qfit_cleanup_evidence(
+            resource=selection.ue,
+            usb=usb_evidence,
+            host=host_evidence,
+        )
     log_lines.append(
         f"ue-power-off-release: {'OK' if ue_evidence.clean else 'UNRESOLVED'} - state={ue_evidence.state.value}"
     )

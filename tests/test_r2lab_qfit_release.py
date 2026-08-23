@@ -20,6 +20,7 @@ class QfitLifecycleRunner:
         self.commands: list[tuple[str, ...]] = []
         self.radio_state = "off"
         self.qfit_state = "off"
+        self.qfit_usb_state = "off"
 
     @staticmethod
     def remote(command: tuple[str, ...]) -> tuple[str, ...]:
@@ -52,6 +53,23 @@ class QfitLifecycleRunner:
             return CommandResult(0, "reboot07:ok\n", "")
         if remote == ("rhubarbe", "status", "7"):
             return CommandResult(0, f"reboot07:{self.qfit_state}\n", "")
+
+        if remote == ("curl", "-fsS", "http://reboot07/usrpstatus"):
+            return CommandResult(0, f"usrp{self.qfit_usb_state}\n", "")
+        if remote == ("curl", "-fsS", "http://reboot07/usrpon"):
+            self.qfit_usb_state = "on"
+            return CommandResult(0, "ok\n", "")
+        if remote == ("curl", "-fsS", "http://reboot07/usrpoff"):
+            self.qfit_usb_state = "off"
+            return CommandResult(0, "ok\n", "")
+        if remote[:1] == ("ssh",) and (
+            remote[-3:] in {
+                ("test", "-c", "/dev/ttyUSB2"),
+                ("test", "-c", "/dev/cdc-wdm0"),
+            }
+            or remote[-5:] == ("ip", "link", "show", "dev", "wwan0")
+        ):
+            return CommandResult(0 if self.qfit_usb_state == "on" else 1, "", "")
 
         if remote[:1] == ("ping",):
             return CommandResult(0, "", "")
@@ -100,6 +118,9 @@ class R2LabQfitReleaseTests(unittest.TestCase):
 
         self.assertEqual(
             [
+                ("rhubarbe", "leases", "--check"),
+                ("curl", "-fsS", "http://reboot07/usrpoff"),
+                ("curl", "-fsS", "http://reboot07/usrpstatus"),
                 ("rhubarbe", "leases", "--check"),
                 ("qfit", "off", "qfit07"),
                 ("rhubarbe", "status", "7"),

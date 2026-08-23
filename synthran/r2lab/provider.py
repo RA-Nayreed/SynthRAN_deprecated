@@ -16,6 +16,11 @@ from typing import Callable, Iterable, Sequence
 from synthran.live_preflight import CommandResult
 
 
+SUPPORTED_QFITS = frozenset(
+    {"qfit07", "qfit09", "qfit18", "qfit29", "qfit32", "qfit34"}
+)
+
+
 class R2LabPowerStateError(RuntimeError):
     """Raised when provider PDU state output is contradictory or malformed."""
 
@@ -213,6 +218,15 @@ def qfit_node_number(qfit: str) -> int:
     return node
 
 
+def reviewed_qfit_node_number(qfit: str) -> int:
+    """Return the node number for one reviewed qfit resource."""
+
+    value = qfit.strip().lower()
+    if value not in SUPPORTED_QFITS:
+        raise R2LabQfitStateError("qfit resource is outside the reviewed inventory")
+    return qfit_node_number(value)
+
+
 def parse_qfit_status(output: str, *, qfit: str) -> QfitStatusObservation:
     """Parse exact ``rebootNN:on|off`` provider state for one qfit."""
 
@@ -265,6 +279,133 @@ class VerifiedQfitOperation:
             "mutation_transport_error": self.mutation_transport_error,
             "status_transport_error": self.status_transport_error,
         }
+
+
+@dataclass(frozen=True)
+class QfitUsbPowerObservation:
+    qfit: str
+    node: int
+    state: PowerState
+    status_returncode: int | None
+    transport_error: bool
+
+
+def parse_qfit_usb_status(output: str, *, qfit: str) -> QfitStatusObservation:
+    """Parse the exact external USB power state for one reviewed qfit."""
+
+    value = qfit.strip().lower()
+    node = reviewed_qfit_node_number(value)
+    states: list[PowerState] = []
+    for line in output.splitlines():
+        status = line.strip().lower()
+        if status == "usrpon":
+            states.append(PowerState.ON)
+        elif status == "usrpoff":
+            states.append(PowerState.OFF)
+    if not states:
+        return QfitStatusObservation(qfit=value, node=node, state=PowerState.UNKNOWN)
+    if len(set(states)) != 1:
+        raise R2LabQfitStateError(
+            f"conflicting R2Lab qfit USB state observations for {value}"
+        )
+    return QfitStatusObservation(qfit=value, node=node, state=states[-1])
+
+
+def observe_qfit_usb_power(
+    *,
+    qfit: str,
+    runner: RemoteRunner,
+    timeout_seconds: int,
+) -> QfitUsbPowerObservation:
+    """Observe one qfit USB rail without mutating it."""
+
+    value = qfit.strip().lower()
+    node = reviewed_qfit_node_number(value)
+    status_returncode: int | None = None
+    status_stdout = ""
+    status_stderr = ""
+    transport_error = False
+    try:
+        status = runner(
+            ("curl", "-fsS", f"http://reboot{node:02d}/usrpstatus"),
+            timeout_seconds,
+        )
+    except (RuntimeError, OSError):
+        transport_error = True
+    else:
+        status_returncode = status.returncode
+        status_stdout = status.stdout
+        status_stderr = status.stderr
+
+    observation = parse_qfit_usb_status(
+        "\n".join(part for part in (status_stdout, status_stderr) if part),
+        qfit=value,
+    )
+    return QfitUsbPowerObservation(
+        qfit=observation.qfit,
+        node=observation.node,
+        state=observation.state,
+        status_returncode=status_returncode,
+        transport_error=transport_error,
+    )
+
+
+@dataclass(frozen=True)
+class VerifiedQfitUsbOperation:
+    qfit: str
+    requested_state: PowerState
+    observed_state: PowerState
+    mutation_returncode: int | None
+    status_returncode: int | None
+    mutation_transport_error: bool
+    status_transport_error: bool
+
+    @property
+    def confirmed(self) -> bool:
+        return self.observed_state is self.requested_state
+
+
+def execute_verified_qfit_usb_transition(
+    *,
+    qfit: str,
+    requested_state: PowerState,
+    runner: RemoteRunner,
+    timeout_seconds: int,
+) -> VerifiedQfitUsbOperation:
+    """Mutate one external qfit USB rail and verify its exact state."""
+
+    if requested_state is PowerState.UNKNOWN:
+        raise ValueError("UNKNOWN cannot be requested as a qfit USB target state")
+    value = qfit.strip().lower()
+    node = reviewed_qfit_node_number(value)
+    action = "usrpon" if requested_state is PowerState.ON else "usrpoff"
+
+    mutation_returncode: int | None = None
+    mutation_transport_error = False
+    try:
+        mutation = runner(
+            ("curl", "-fsS", f"http://reboot{node:02d}/{action}"),
+            timeout_seconds,
+        )
+    except (RuntimeError, OSError):
+        mutation_transport_error = True
+    else:
+        mutation_returncode = mutation.returncode
+
+    observation = observe_qfit_usb_power(
+        qfit=value,
+        runner=runner,
+        timeout_seconds=timeout_seconds,
+    )
+    return VerifiedQfitUsbOperation(
+        qfit=value,
+        requested_state=requested_state,
+        observed_state=observation.state,
+        mutation_returncode=mutation_returncode,
+        status_returncode=observation.status_returncode,
+        mutation_transport_error=mutation_transport_error,
+        status_transport_error=observation.transport_error,
+    )
 
 
 def execute_verified_qfit_transition(

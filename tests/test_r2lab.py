@@ -8,7 +8,6 @@ import unittest
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.controller import (
     QFIT_INITIALIZER,
-    QFIT_MBIM_DEVICE,
     R2LabResourceError,
     R2LabSelection,
     build_plan,
@@ -28,11 +27,15 @@ class FakeRunner:
         ping_failures: int = 0,
         qfit_ssh_ready: bool = True,
         qfit_initial_state: str | None = "off",
+        qfit_usb_state: str | None = "off",
+        qfit_mbim_failures: int = 0,
     ) -> None:
         self.lease_ok = lease_ok
         self.ping_failures = ping_failures
         self.qfit_ssh_ready = qfit_ssh_ready
         self.qfit_initial_state = qfit_initial_state
+        self.qfit_usb_state = qfit_usb_state
+        self.qfit_mbim_failures = qfit_mbim_failures
         self.commands: list[tuple[str, ...]] = []
         self.ping_attempts = 0
         self.power: dict[str, str] = {}
@@ -109,6 +112,39 @@ class FakeRunner:
             return CommandResult(0, "", "")
         if remote[:2] == ("rhubarbe", "wait") and len(remote) == 3:
             return CommandResult(0 if self.qfit_ssh_ready else 1, "", "")
+
+        if remote == ("curl", "-fsS", "http://reboot07/usrpstatus"):
+            output = f"usrp{self.qfit_usb_state}\n" if self.qfit_usb_state else ""
+            return CommandResult(0, output, "")
+        if remote == ("curl", "-fsS", "http://reboot07/usrpon"):
+            self.qfit_usb_state = "on"
+            return CommandResult(0, "ok\n", "")
+        if remote == ("curl", "-fsS", "http://reboot07/usrpoff"):
+            self.qfit_usb_state = "off"
+            return CommandResult(0, "ok\n", "")
+
+        if remote[:1] == ("ssh",):
+            if remote[-3:] == ("test", "-c", "/dev/cdc-wdm0"):
+                if self.qfit_mbim_failures:
+                    self.qfit_mbim_failures -= 1
+                    return CommandResult(1, "", "")
+                return CommandResult(
+                    0 if self.qfit_usb_state == "on" else 1,
+                    "",
+                    "",
+                )
+            if remote[-3:] == ("test", "-c", "/dev/ttyUSB2"):
+                return CommandResult(
+                    0 if self.qfit_usb_state == "on" else 1,
+                    "",
+                    "",
+                )
+            if remote[-5:] == ("ip", "link", "show", "dev", "wwan0"):
+                return CommandResult(
+                    0 if self.qfit_usb_state == "on" else 1,
+                    "",
+                    "",
+                )
 
         if remote[:1] == ("ping",):
             self.ping_attempts += 1
@@ -191,6 +227,10 @@ class R2LabTests(unittest.TestCase):
         self.assertIn("rhubarbe status <qfit-node>", commands)
         self.assertIn("qfit on qfit07", commands)
         self.assertIn("rhubarbe wait <qfit-node>", commands)
+        self.assertIn("http://reboot07/usrpstatus", commands)
+        self.assertIn("http://reboot07/usrpon", commands)
+        self.assertIn("test -c /dev/cdc-wdm0", commands)
+        self.assertIn(QFIT_INITIALIZER, commands)
         self.assertNotIn("qfit off qfit07", commands)
 
     def test_doctor_is_read_only_and_requires_active_lease(self) -> None:
@@ -349,21 +389,35 @@ class R2LabTests(unittest.TestCase):
             if command[:1] == ("ssh",) and command[-1:] == (QFIT_INITIALIZER,)
             and command[-3:] != ("test", "-x", QFIT_INITIALIZER)
         ]
-        radio_on = [
+        usb_on = [
+            (index, command)
+            for index, command in enumerate(remote)
+            if command == ("curl", "-fsS", "http://reboot07/usrpon")
+        ]
+        mbim_readiness = [
             (index, command)
             for index, command in enumerate(remote)
             if command[:1] == ("ssh",)
-            and QFIT_MBIM_DEVICE in command
-            and "--set-radio-state=on" in command
+            and command[-3:] == ("test", "-c", "/dev/cdc-wdm0")
         ]
         self.assertEqual(1, len(image_readiness))
         self.assertEqual(1, len(initializer))
-        self.assertEqual(1, len(radio_on))
+        self.assertEqual(1, len(usb_on))
+        self.assertEqual(2, len(mbim_readiness))
         wait_index = remote.index(("rhubarbe", "wait", "7"))
-        self.assertLess(wait_index, image_readiness[0][0])
+        usb_status_index = remote.index(
+            ("curl", "-fsS", "http://reboot07/usrpstatus")
+        )
+        self.assertLess(wait_index, usb_status_index)
+        self.assertLess(usb_status_index, usb_on[0][0])
+        self.assertLess(usb_on[0][0], mbim_readiness[0][0])
+        self.assertLess(mbim_readiness[0][0], image_readiness[0][0])
         self.assertLess(image_readiness[0][0], initializer[0][0])
-        self.assertLess(initializer[0][0], radio_on[0][0])
-        for _, command in (initializer[0], radio_on[0]):
+        self.assertLess(initializer[0][0], mbim_readiness[1][0])
+        self.assertFalse(
+            any("--set-radio-state=on" in command for command in remote)
+        )
+        for _, command in (initializer[0],):
             rendered = " ".join(command)
             self.assertIn("root@fit07", rendered)
             self.assertNotIn("root@qfit07", rendered)
@@ -378,7 +432,7 @@ class R2LabTests(unittest.TestCase):
             slice_name="oulu_user", radio="n300", ue="qfit07"
         )
         plan = build_plan(run_id="r2lab-test-qfit-reuse", selection=selection)
-        runner = FakeRunner(qfit_initial_state="on")
+        runner = FakeRunner(qfit_initial_state="on", qfit_usb_state="on")
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "r2lab"
@@ -395,7 +449,12 @@ class R2LabTests(unittest.TestCase):
         self.assertNotIn(("qfit", "on", "qfit07"), remote)
         self.assertIn(("rhubarbe", "status", "7"), remote)
         self.assertIn(("rhubarbe", "wait", "7"), remote)
+        self.assertNotIn(
+            ("curl", "-fsS", "http://reboot07/usrpon"),
+            remote,
+        )
         self.assertIn("ue-power-reuse: OK - state=on", log)
+        self.assertIn("qfit-usb-power-reuse: OK - state=on", log)
 
     def test_qfit_prepare_stops_on_unknown_initial_power_state(self) -> None:
         selection = R2LabSelection.build(
@@ -452,6 +511,161 @@ class R2LabTests(unittest.TestCase):
                 for command in remote
             )
         )
+
+    def test_qfit_prepare_fails_closed_on_unknown_usb_state(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-usb-unknown", selection=selection)
+        runner = FakeRunner(qfit_usb_state=None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            with self.assertRaises(R2LabResourceError):
+                execute_prepare(
+                    plan=plan,
+                    run_root=root,
+                    runner=runner,
+                    sleeper=lambda _: None,
+                )
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("qfit-usb-power-state", manifest["failure_stage"])
+        self.assertEqual("held", manifest["resource_claim"])
+        self.assertNotIn(
+            ("curl", "-fsS", "http://reboot07/usrpon"),
+            runner.remote_commands,
+        )
+
+    def test_qfit_prepare_retries_modem_enumeration(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-enumeration", selection=selection)
+        runner = FakeRunner(qfit_mbim_failures=1)
+        waits: list[float] = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            execute_prepare(
+                plan=plan,
+                run_root=Path(directory) / "r2lab",
+                runner=runner,
+                sleeper=waits.append,
+                reachability_attempts=2,
+                reachability_delay_seconds=5,
+            )
+
+        self.assertEqual([5], waits)
+        mbim_checks = [
+            command
+            for command in runner.remote_commands
+            if command[-3:] == ("test", "-c", "/dev/cdc-wdm0")
+        ]
+        self.assertEqual(3, len(mbim_checks))
+
+    def test_qfit_prepare_stops_before_initializer_without_enumeration(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-enumeration-fail", selection=selection)
+        runner = FakeRunner(qfit_mbim_failures=2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            with self.assertRaises(R2LabResourceError):
+                execute_prepare(
+                    plan=plan,
+                    run_root=root,
+                    runner=runner,
+                    sleeper=lambda _: None,
+                    reachability_attempts=2,
+                )
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("qfit-enumeration-readiness", manifest["failure_stage"])
+        self.assertFalse(
+            any(command[-1:] == (QFIT_INITIALIZER,) for command in runner.remote_commands)
+        )
+
+    def test_qfit_release_proves_usb_and_host_off(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-release", selection=selection)
+        runner = FakeRunner()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            execute_prepare(
+                plan=plan,
+                run_root=root,
+                runner=runner,
+                sleeper=lambda _: None,
+                reachability_attempts=1,
+            )
+            runner.commands.clear()
+            result = execute_release(
+                run_id=plan.run_id,
+                slice_name=selection.slice_name,
+                run_root=root,
+                runner=runner,
+            )
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+        remote = runner.remote_commands
+        usb_off = remote.index(("curl", "-fsS", "http://reboot07/usrpoff"))
+        usb_status = remote.index(("curl", "-fsS", "http://reboot07/usrpstatus"))
+        host_off = remote.index(("qfit", "off", "qfit07"))
+        self.assertLess(usb_off, usb_status)
+        self.assertLess(usb_status, host_off)
+        self.assertEqual("released", manifest["status"])
+        self.assertTrue(manifest["cleanup"]["claim_releasable"])
+
+    def test_qfit_release_retains_claim_without_exact_usb_state(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-release-unknown", selection=selection)
+        setup = FakeRunner()
+
+        class UnknownUsbStatus(FakeRunner):
+            def __call__(self, command, timeout_seconds: int) -> CommandResult:
+                remote = self.remote(tuple(command))
+                if remote == ("curl", "-fsS", "http://reboot07/usrpstatus"):
+                    self.commands.append(tuple(command))
+                    return CommandResult(0, "", "")
+                return super().__call__(command, timeout_seconds)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            execute_prepare(
+                plan=plan,
+                run_root=root,
+                runner=setup,
+                sleeper=lambda _: None,
+                reachability_attempts=1,
+            )
+            failing = UnknownUsbStatus()
+            with self.assertRaises(R2LabResourceError):
+                execute_release(
+                    run_id=plan.run_id,
+                    slice_name=selection.slice_name,
+                    run_root=root,
+                    runner=failing,
+                )
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue((root / "active.json").exists())
+
+        self.assertEqual("release-failed", manifest["status"])
+        self.assertEqual(["qfit07"], manifest["cleanup"]["unresolved_resources"])
+        self.assertIn(("qfit", "off", "qfit07"), failing.remote_commands)
+        self.assertIn(("rhubarbe", "pdu", "off", "n300"), failing.remote_commands)
 
     def test_qfit_gateway_command_maps_resource_to_physical_host(self) -> None:
         slice_name = "oulu_user"

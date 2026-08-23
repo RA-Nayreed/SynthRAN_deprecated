@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 from typing import Callable, Sequence
 
 from synthran.live_preflight import CommandResult
-from synthran.r2lab.controller import R2LabResourceError, physical_qfit_host
+from synthran.r2lab.provider import R2LabQfitStateError, reviewed_qfit_node_number
 
 
 RemoteRunner = Callable[[Sequence[str], int], CommandResult]
@@ -66,10 +66,10 @@ class QfitReadinessEvidence:
 def _qfit_node(qfit: str) -> tuple[str, int]:
     value = qfit.strip().lower()
     try:
-        host = physical_qfit_host(value)
-    except R2LabResourceError as exc:
+        node = reviewed_qfit_node_number(value)
+    except R2LabQfitStateError as exc:
         raise R2LabQfitReadinessError("readiness requires one reviewed qfit resource")
-    return value, int(host[-2:])
+    return value, node
 
 
 def _remote_known_hosts(value: str) -> str:
