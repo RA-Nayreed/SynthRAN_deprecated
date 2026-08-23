@@ -329,7 +329,8 @@ class R2LabTests(unittest.TestCase):
         initializer = [
             (index, command)
             for index, command in enumerate(remote)
-            if command[:1] == ("ssh",) and QFIT_INITIALIZER in command
+            if command[:1] == ("ssh",) and command[-1:] == (QFIT_INITIALIZER,)
+            and command[-3:] != ("test", "-x", QFIT_INITIALIZER)
         ]
         radio_on = [
             (index, command)
