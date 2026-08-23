@@ -12,6 +12,7 @@ from synthran.r2lab.controller import (
     R2LabSelection,
     build_plan,
     execute_prepare,
+    gateway_command,
 )
 
 
@@ -86,7 +87,7 @@ class QfitPrepareRunner:
         if remote[:1] == ("ping",):
             return CommandResult(0, "", "")
 
-        # Nested strict SSH to the selected qfit for init.sh / MBIM radio-on.
+        # Nested strict SSH to the selected physical FIT host.
         if remote[:1] == ("ssh",):
             return CommandResult(0, "", "")
 
@@ -148,8 +149,23 @@ class R2LabQfitPrepareTests(unittest.TestCase):
         self.assertIn(("rhubarbe", "leases", "--check"), commands[:init_index])
         self.assertIn(("rhubarbe", "leases", "--check"), commands[init_index + 1 : radio_index])
 
-        self.assertIn("root@qfit07", init_matches[0][1])
-        self.assertIn("root@qfit07", radio_matches[0][1])
+        self.assertIn("root@fit07", init_matches[0][1])
+        self.assertIn("root@fit07", radio_matches[0][1])
+        self.assertNotIn("root@qfit07", init_matches[0][1])
+        self.assertNotIn("root@qfit07", radio_matches[0][1])
+
+    def test_gateway_maps_joined_qfit_destination_for_ue_and_workload_paths(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"SYNTHRAN_R2LAB_IDENTITY": "/tmp/synthran-test-identity"},
+            clear=False,
+        ):
+            command = gateway_command(
+                "oulu_user",
+                "ssh -o BatchMode=yes -- root@qfit07 mbimcli --query-radio-state",
+            )
+        self.assertIn("root@fit07", command[-1])
+        self.assertNotIn("root@qfit07", command[-1])
 
 
 if __name__ == "__main__":
