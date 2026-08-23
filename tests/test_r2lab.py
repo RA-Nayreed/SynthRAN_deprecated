@@ -21,9 +21,16 @@ from synthran.r2lab.controller import (
 
 
 class FakeRunner:
-    def __init__(self, *, lease_ok: bool = True, ping_failures: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        lease_ok: bool = True,
+        ping_failures: int = 0,
+        qfit_ssh_ready: bool = True,
+    ) -> None:
         self.lease_ok = lease_ok
         self.ping_failures = ping_failures
+        self.qfit_ssh_ready = qfit_ssh_ready
         self.commands: list[tuple[str, ...]] = []
         self.ping_attempts = 0
         self.power: dict[str, str] = {}
@@ -98,6 +105,8 @@ class FakeRunner:
             if state in {"on", "off"}:
                 return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
             return CommandResult(0, "", "")
+        if remote[:2] == ("rhubarbe", "wait") and len(remote) == 3:
+            return CommandResult(0 if self.qfit_ssh_ready else 1, "", "")
 
         if remote[:1] == ("ping",):
             self.ping_attempts += 1
@@ -307,13 +316,21 @@ class R2LabTests(unittest.TestCase):
         self.assertIn(("qfit", "on", "qfit07"), remote)
         self.assertGreaterEqual(remote.count(("rhubarbe", "status", "7")), 2)
         self.assertNotIn(("rhubarbe", "pdu", "off", "qfit07"), remote)
-        self.assertIn(("ping", "-c", "1", "-W", "1", "fit07"), remote)
+        self.assertIn(("rhubarbe", "wait", "7"), remote)
+        self.assertNotIn(("ping", "-c", "1", "-W", "1", "fit07"), remote)
         self.assertNotIn(("ping", "-c", "1", "-W", "1", "qfit07"), remote)
 
+        image_readiness = [
+            (index, command)
+            for index, command in enumerate(remote)
+            if command[:1] == ("ssh",)
+            and ("test", "-x", QFIT_INITIALIZER) == command[-3:]
+        ]
         initializer = [
             (index, command)
             for index, command in enumerate(remote)
-            if command[:1] == ("ssh",) and QFIT_INITIALIZER in command
+            if command[:1] == ("ssh",) and command[-1:] == (QFIT_INITIALIZER,)
+            and command[-3:] != ("test", "-x", QFIT_INITIALIZER)
         ]
         radio_on = [
             (index, command)
@@ -322,8 +339,12 @@ class R2LabTests(unittest.TestCase):
             and QFIT_MBIM_DEVICE in command
             and "--set-radio-state=on" in command
         ]
+        self.assertEqual(1, len(image_readiness))
         self.assertEqual(1, len(initializer))
         self.assertEqual(1, len(radio_on))
+        wait_index = remote.index(("rhubarbe", "wait", "7"))
+        self.assertLess(wait_index, image_readiness[0][0])
+        self.assertLess(image_readiness[0][0], initializer[0][0])
         self.assertLess(initializer[0][0], radio_on[0][0])
         for _, command in (initializer[0], radio_on[0]):
             rendered = " ".join(command)
@@ -334,6 +355,38 @@ class R2LabTests(unittest.TestCase):
                 rendered,
             )
             self.assertIn("GlobalKnownHostsFile=/dev/null", rendered)
+
+    def test_qfit_prepare_stops_before_initialization_without_ssh(self) -> None:
+        selection = R2LabSelection.build(
+            slice_name="oulu_user", radio="n300", ue="qfit07"
+        )
+        plan = build_plan(run_id="r2lab-test-qfit-ssh", selection=selection)
+        runner = FakeRunner(qfit_ssh_ready=False)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "r2lab"
+            with self.assertRaises(R2LabResourceError):
+                execute_prepare(
+                    plan=plan,
+                    run_root=root,
+                    runner=runner,
+                    sleeper=lambda _: None,
+                )
+            manifest = json.loads(
+                (root / plan.run_id / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("failed", manifest["status"])
+            self.assertEqual("qfit-ssh-readiness", manifest["failure_stage"])
+            self.assertEqual("held", manifest["resource_claim"])
+
+        remote = runner.remote_commands
+        self.assertIn(("rhubarbe", "wait", "7"), remote)
+        self.assertFalse(
+            any(
+                command[:1] == ("ssh",) and QFIT_INITIALIZER in command
+                for command in remote
+            )
+        )
 
     def test_qfit_gateway_command_maps_resource_to_physical_host(self) -> None:
         slice_name = "oulu_user"
