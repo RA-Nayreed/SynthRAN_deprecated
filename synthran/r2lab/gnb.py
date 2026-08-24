@@ -48,9 +48,11 @@ from synthran.r2lab.deployment import (
     render_physical_chart_offline,
 )
 from synthran.r2lab.runtime import (
+    GnbFailureEvidence,
     GnbN2Evidence,
     PhysicalGnbN2VerificationResult,
     R2LabRuntimeVerificationError,
+    capture_gnb_failure_evidence,
     execute_physical_gnb_n2_verification,
 )
 
@@ -83,6 +85,8 @@ class PhysicalGnbN2Summary:
     evidence_path: Path
     observation_path: Path
     verification: PhysicalGnbN2VerificationResult
+    failure_path: Path | None = None
+    failure: GnbFailureEvidence | None = None
 
     @property
     def proven(self) -> bool:
@@ -103,6 +107,10 @@ class PhysicalGnbN2Summary:
             },
             "evidence_path": str(self.evidence_path),
             "observation_path": str(self.observation_path),
+            "failure_path": (
+                str(self.failure_path) if self.failure_path is not None else None
+            ),
+            "failure": self.failure.to_dict() if self.failure is not None else None,
             "gnb_n2": self.verification.gnb_n2.to_dict(),
         }
 
@@ -425,6 +433,25 @@ def _stop_gnb_after_unsuccessful_proof(
     _write_json(stop_path, stopped.to_dict())
 
 
+def _capture_failure_before_stop(
+    *,
+    known_hosts: Path,
+    cluster_runner,
+    timeout_seconds: int,
+    failure_path: Path,
+) -> GnbFailureEvidence | None:
+    try:
+        failure = capture_gnb_failure_evidence(
+            known_hosts=known_hosts,
+            runner=cluster_runner,
+            timeout_seconds=min(timeout_seconds, 60),
+        )
+        _write_json(failure_path, failure.to_dict())
+    except (R2LabRuntimeVerificationError, R2LabPhysicalGnbError, OSError):
+        return None
+    return failure
+
+
 def execute_physical_gnb_n2_acceptance(
     *,
     run_id: str,
@@ -446,6 +473,7 @@ def execute_physical_gnb_n2_acceptance(
     )
     start_path = physical_directory / "physical-gnb-start.json"
     observation_path = physical_directory / "physical-gnb-n2.json"
+    failure_path = physical_directory / "physical-gnb-failure.json"
     stop_path = physical_directory / "physical-gnb-stop.json"
     staging: PhysicalStagingResult | None = None
     started_bound = False
@@ -526,7 +554,14 @@ def execute_physical_gnb_n2_acceptance(
             poll_interval_seconds=poll_interval_seconds,
         )
         _write_json(observation_path, verification.gnb_n2.to_dict())
+        failure = None
         if not verification.proven:
+            failure = _capture_failure_before_stop(
+                known_hosts=known_hosts,
+                cluster_runner=cluster_runner,
+                timeout_seconds=timeout_seconds,
+                failure_path=failure_path,
+            )
             _stop_gnb_after_unsuccessful_proof(
                 staging=staging,
                 owner=owner,
@@ -541,6 +576,8 @@ def execute_physical_gnb_n2_acceptance(
             evidence_path=evidence_path,
             observation_path=observation_path,
             verification=verification,
+            failure_path=failure_path if failure is not None else None,
+            failure=failure,
         )
     except (
         R2LabPhysicalGnbError,
@@ -552,6 +589,12 @@ def execute_physical_gnb_n2_acceptance(
     ) as exc:
         if started_bound and staging is not None and not stop_path.exists():
             try:
+                _capture_failure_before_stop(
+                    known_hosts=known_hosts,
+                    cluster_runner=cluster_runner,
+                    timeout_seconds=timeout_seconds,
+                    failure_path=failure_path,
+                )
                 _stop_gnb_after_unsuccessful_proof(
                     staging=staging,
                     owner=owner,

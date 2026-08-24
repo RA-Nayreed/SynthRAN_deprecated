@@ -25,6 +25,7 @@ from synthran.r2lab.gnb import (
     execute_physical_gnb_staging,
 )
 from synthran.r2lab.runtime import (
+    GnbFailureEvidence,
     GnbN2Evidence,
     N2State,
     PhysicalGnbN2VerificationResult,
@@ -298,6 +299,21 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             claim_sha256="d" * 64,
             maximum_observed_pods=1,
         )
+        failure = GnbFailureEvidence(
+            pod_count=1,
+            pod_state="Running",
+            container_ready=False,
+            restart_count=3,
+            waiting_reason="crash-loop-backoff",
+            last_termination_reason="process-error",
+            last_exit_code=1,
+            last_signal=0,
+            current_log_sha256="e" * 64,
+            previous_log_sha256="f" * 64,
+            classifications=("uhd-device",),
+            failure_class="uhd-device",
+            transport_error=False,
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -345,6 +361,10 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                     "synthran.r2lab.gnb.execute_authorized_physical_gnb_stop",
                     return_value=PhysicalGnbStopResult(RUN_ID, 0, 0),
                 ) as stop,
+                patch(
+                    "synthran.r2lab.gnb.capture_gnb_failure_evidence",
+                    return_value=failure,
+                ) as capture,
             ):
                 result = execute_physical_gnb_n2_acceptance(
                     run_id=RUN_ID,
@@ -359,10 +379,16 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             stop_evidence = json.loads(
                 (physical / "physical-gnb-stop.json").read_text(encoding="utf-8")
             )
+            failure_evidence = json.loads(
+                (physical / "physical-gnb-failure.json").read_text(encoding="utf-8")
+            )
 
         self.assertFalse(result.proven)
+        self.assertEqual("uhd-device", result.to_dict()["failure"]["failure_class"])
+        self.assertEqual(1, capture.call_count)
         self.assertEqual(1, stop.call_count)
         self.assertEqual("gnb-stopped", stop_evidence["status"])
+        self.assertEqual("uhd-device", failure_evidence["failure_class"])
 
 
 if __name__ == "__main__":
