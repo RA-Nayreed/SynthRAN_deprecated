@@ -36,13 +36,17 @@ class HandoffRunner:
 
         if value[:3] == ("pos", "calendar", "list"):
             self.calendar_calls += 1
-            owner = "someone-else" if self.fail_second_authority and self.calendar_calls >= 2 else "rnayreed"
+            owner = (
+                "someone-else"
+                if self.fail_second_authority and self.calendar_calls >= 2
+                else "test-owner"
+            )
             return CommandResult(
                 0,
                 json.dumps(
                     [
                         {
-                            "id": 6360,
+                            "id": "reservation-1",
                             "owner": owner,
                             "nodes": ["sopnode-f2", "sopnode-f3"],
                             "start_date": "2026-08-22 22:30:00",
@@ -58,8 +62,8 @@ class HandoffRunner:
                 0,
                 json.dumps(
                     {
-                        "id": "rnayreed_260822_184302_028689",
-                        "owner": "rnayreed",
+                        "id": "allocation-1",
+                        "owner": "test-owner",
                     }
                 ),
                 "",
@@ -73,6 +77,8 @@ class HandoffRunner:
             return CommandResult(0, self.namespace_owner, "")
 
         if remote[:3] == ("kubectl", "get", "deployment/srsran-gnb"):
+            if any(item.startswith("jsonpath=") for item in remote):
+                return CommandResult(0, self.deployment_owner, "")
             return CommandResult(
                 0,
                 json.dumps(
@@ -96,6 +102,13 @@ class HandoffRunner:
             self.namespace_owner = assignment.split("=", 1)[1]
             return CommandResult(0, "namespace/open5gs labeled\n", "")
 
+        if remote[:3] == ("kubectl", "label", "deployment/srsran-gnb"):
+            assignment = next(
+                item for item in remote if item.startswith("synthran.run/id=")
+            )
+            self.deployment_owner = assignment.split("=", 1)[1]
+            return CommandResult(0, "deployment.apps/srsran-gnb labeled\n", "")
+
         raise AssertionError(f"unexpected remote command: {remote}")
 
     @property
@@ -111,7 +124,13 @@ class HandoffRunner:
 class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
     NOW = datetime(2026, 8, 22, 20, 40, tzinfo=timezone.utc)
 
-    def run_handoff(self, runner: HandoffRunner):
+    def run_handoff(
+        self,
+        runner: HandoffRunner,
+        *,
+        from_run_id: str = "r2lab-previous-run",
+        to_run_id: str = "r2lab-current-run",
+    ):
         with tempfile.TemporaryDirectory() as directory:
             known_hosts = Path(directory) / "known_hosts"
             known_hosts.write_text(
@@ -119,11 +138,11 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
                 encoding="utf-8",
             )
             return execute_physical_namespace_handoff(
-                from_run_id="r2lab-previous-run",
-                to_run_id="r2lab-current-run",
-                owner="rnayreed",
-                reservation_id="6360",
-                allocation_id="rnayreed_260822_184302_028689",
+                from_run_id=from_run_id,
+                to_run_id=to_run_id,
+                owner="test-owner",
+                reservation_id="reservation-1",
+                allocation_id="allocation-1",
                 known_hosts=known_hosts,
                 now=self.NOW,
                 runner=runner,
@@ -139,6 +158,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
         self.assertEqual(0, result.desired_replicas)
         self.assertEqual(0, result.gnb_pod_count)
         self.assertEqual("r2lab-current-run", runner.namespace_owner)
+        self.assertEqual("r2lab-current-run", runner.deployment_owner)
 
         labels = [
             command
@@ -148,6 +168,15 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
         self.assertEqual(1, len(labels))
         self.assertIn("synthran.run/id=r2lab-current-run", labels[0])
         self.assertIn("--overwrite", labels[0])
+
+        deployment_labels = [
+            command
+            for command in runner.remote_commands
+            if command[:3] == ("kubectl", "label", "deployment/srsran-gnb")
+        ]
+        self.assertEqual(1, len(deployment_labels))
+        self.assertIn("synthran.run/id=r2lab-current-run", deployment_labels[0])
+        self.assertIn("--overwrite", deployment_labels[0])
 
         command_text = "\n".join(" ".join(command) for command in runner.commands)
         self.assertNotIn("helm", command_text)
@@ -169,7 +198,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
         self.assertEqual(2, len(reservation_queries))
         self.assertEqual(4, len(allocation_queries))
 
-    def test_retry_after_namespace_write_accepts_old_stopped_deployment_owner(self) -> None:
+    def test_retry_after_complete_handoff_performs_no_write(self) -> None:
         runner = HandoffRunner()
         first = self.run_handoff(runner)
         self.assertTrue(first.changed)
@@ -192,8 +221,45 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
 
         self.assertFalse(second.changed)
         self.assertEqual(labels_before, labels_after)
-        self.assertEqual("r2lab-previous-run", runner.deployment_owner)
+        self.assertEqual("r2lab-current-run", runner.deployment_owner)
         self.assertEqual("r2lab-current-run", runner.namespace_owner)
+
+    def test_retry_completes_partial_deployment_handoff(self) -> None:
+        runner = HandoffRunner()
+        runner.namespace_owner = "r2lab-current-run"
+
+        result = self.run_handoff(runner)
+
+        self.assertTrue(result.changed)
+        self.assertEqual("r2lab-current-run", runner.namespace_owner)
+        self.assertEqual("r2lab-current-run", runner.deployment_owner)
+        namespace_labels = [
+            command
+            for command in runner.remote_commands
+            if command[:4] == ("kubectl", "label", "namespace", "open5gs")
+        ]
+        deployment_labels = [
+            command
+            for command in runner.remote_commands
+            if command[:3] == ("kubectl", "label", "deployment/srsran-gnb")
+        ]
+        self.assertEqual([], namespace_labels)
+        self.assertEqual(1, len(deployment_labels))
+
+    def test_consecutive_handoffs_transfer_namespace_and_deployment(self) -> None:
+        runner = HandoffRunner()
+        first = self.run_handoff(runner)
+        self.assertTrue(first.changed)
+
+        second = self.run_handoff(
+            runner,
+            from_run_id="r2lab-current-run",
+            to_run_id="r2lab-next-run",
+        )
+
+        self.assertTrue(second.changed)
+        self.assertEqual("r2lab-next-run", runner.namespace_owner)
+        self.assertEqual("r2lab-next-run", runner.deployment_owner)
 
     def test_handoff_rejects_unexpected_namespace_owner_before_mutation(self) -> None:
         runner = HandoffRunner()
