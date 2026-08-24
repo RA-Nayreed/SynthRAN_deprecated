@@ -231,6 +231,7 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             known_hosts.write_text("fixture\n", encoding="utf-8")
 
             def verified(**kwargs) -> PhysicalGnbN2VerificationResult:
+                self.assertEqual(2, kwargs["required_consecutive_proofs"])
                 accepted = kwargs["evidence"].pass_stage(
                     PhysicalAcceptanceStage.GNB_N2,
                     source="fixture-gnb-n2",
@@ -312,6 +313,7 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
             known_hosts.write_text("fixture\n", encoding="utf-8")
 
             def failed(**kwargs) -> PhysicalGnbN2VerificationResult:
+                self.assertEqual(2, kwargs["required_consecutive_proofs"])
                 blocked = kwargs["evidence"].fail_stage(
                     PhysicalAcceptanceStage.GNB_N2,
                     source="fixture-no-n2",
