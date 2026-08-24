@@ -484,6 +484,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         root: Path,
         artifact: PhysicalChartArtifact,
         runner: StoppedStagingRunner,
+        reservation_verifier=None,
     ):
         known_hosts = root / "known_hosts"
         known_hosts.write_text("sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8")
@@ -498,6 +499,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             known_hosts=known_hosts,
             now=self.now,
             runner=runner,
+            reservation_verifier=reservation_verifier,
         )
         return result, known_hosts
 
@@ -590,6 +592,38 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                 )
 
         self.assertEqual([], runner.commands)
+
+    def test_staging_accepts_live_lease_verifier_without_calendar_query(self) -> None:
+        verification_count = 0
+
+        def verify_reservation() -> None:
+            nonlocal verification_count
+            verification_count += 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact = self.make_artifact(root)
+            runner = self.make_runner(artifact)
+            self.stage(
+                root=root,
+                artifact=artifact,
+                runner=runner,
+                reservation_verifier=verify_reservation,
+            )
+
+        self.assertEqual(2, verification_count)
+        self.assertFalse(
+            any(
+                command[:3] == ("pos", "calendar", "list")
+                for command in runner.commands
+            )
+        )
+        self.assertTrue(
+            any(
+                command[:3] == ("pos", "allocations", "show")
+                for command in runner.commands
+            )
+        )
 
     def test_staging_refuses_changed_allocation_before_any_cluster_write(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -744,6 +778,12 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         )
         self.assertGreaterEqual(
             provider_remote.count(("rhubarbe", "pdu", "status", "n300")), 2
+        )
+        self.assertFalse(
+            any(
+                command[:3] == ("pos", "calendar", "list")
+                for command in cluster.commands
+            )
         )
         cluster_remote = [cluster.remote(command) for command in cluster.commands]
         scale_one = [
