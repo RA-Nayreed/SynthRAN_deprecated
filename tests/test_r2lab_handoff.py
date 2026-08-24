@@ -130,7 +130,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
         *,
         from_run_id: str = "r2lab-previous-run",
         to_run_id: str = "r2lab-current-run",
-        reservation_verifier=None,
+        additional_authority_verifier=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             known_hosts = Path(directory) / "known_hosts"
@@ -147,7 +147,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
                 known_hosts=known_hosts,
                 now=self.NOW,
                 runner=runner,
-                reservation_verifier=reservation_verifier,
+                additional_authority_verifier=additional_authority_verifier,
             )
 
     def test_handoff_rebinds_only_clean_namespace_and_reobserves_owner(self) -> None:
@@ -200,7 +200,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
         self.assertEqual(2, len(reservation_queries))
         self.assertEqual(4, len(allocation_queries))
 
-    def test_external_reservation_verifier_replaces_calendar_query(self) -> None:
+    def test_additional_authority_preserves_slices_verification(self) -> None:
         runner = HandoffRunner()
         verification_count = 0
 
@@ -210,21 +210,21 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
 
         self.run_handoff(
             runner,
-            reservation_verifier=verify_reservation,
+            additional_authority_verifier=verify_reservation,
         )
 
         self.assertEqual(2, verification_count)
-        self.assertFalse(
-            any(
-                command[:3] == ("pos", "calendar", "list")
-                for command in runner.commands
-            )
-        )
+        reservation_queries = [
+            command
+            for command in runner.commands
+            if command[:3] == ("pos", "calendar", "list")
+        ]
         allocation_queries = [
             command
             for command in runner.commands
             if command[:3] == ("pos", "allocations", "show")
         ]
+        self.assertEqual(2, len(reservation_queries))
         self.assertEqual(4, len(allocation_queries))
 
     def test_retry_after_complete_handoff_performs_no_write(self) -> None:

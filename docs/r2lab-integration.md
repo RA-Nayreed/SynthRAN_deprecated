@@ -138,8 +138,6 @@ python -m synthran r2lab foundation \
   --run-id "$R2LAB_RUN" \
   --previous-run-id "$PREVIOUS_R2LAB_RUN" \
   --owner "$SYNTHRAN_OWNER" \
-  --reservation-id "$SYNTHRAN_RESERVATION_ID" \
-  --allocation-id "$SYNTHRAN_ALLOCATION_ID" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 ```
 
@@ -187,7 +185,7 @@ python -m synthran r2lab gnb-start \
   --json
 ```
 
-The gNB commands discover the one active owner reservation and the one common
+The physical commands discover the one active owner reservation and the one common
 allocation for `sopnode-f2` and `sopnode-f3`. The identifier options can still
 pin exact records when desired; ambiguous or split ownership fails closed.
 

@@ -112,16 +112,14 @@ class CliTests(unittest.TestCase):
                 "r2lab-previous-run",
                 "--owner",
                 "test-owner",
-                "--reservation-id",
-                "reservation-1",
-                "--allocation-id",
-                "allocation-1",
                 "--known-hosts",
                 "known_hosts",
             ]
         )
 
         self.assertEqual("foundation", args.r2lab_command)
+        self.assertIsNone(args.reservation_id)
+        self.assertIsNone(args.allocation_id)
         self.assertEqual(Path("known_hosts"), args.known_hosts)
 
     def test_parser_contains_stopped_gnb_and_n2_commands(self) -> None:

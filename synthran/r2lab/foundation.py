@@ -13,6 +13,7 @@ from synthran.live_preflight import (
     Runner,
     subprocess_runner,
     verify_allocations,
+    verify_reservation,
 )
 from synthran.r2lab.acceptance import (
     PhysicalAcceptanceStage,
@@ -173,15 +174,25 @@ def _require_ready_open5gs_pod(
         )
 
 
-def _verify_slices_allocation(
+def _resolve_slices_authority(
     *,
     runner: Runner,
     owner: str,
-    allocation_id: str,
+    reservation_id: str | None,
+    allocation_id: str | None,
+    now: datetime,
     timeout_seconds: int,
-) -> None:
+) -> tuple[str, str]:
     try:
-        verify_allocations(
+        resolved_reservation_id = verify_reservation(
+            runner=runner,
+            reservation_id=reservation_id,
+            owner=owner,
+            nodes={CORE_NODE, RAN_NODE},
+            now=now,
+            timeout_seconds=min(timeout_seconds, 60),
+        )
+        resolved_allocation_id = verify_allocations(
             runner=runner,
             allocation_id=allocation_id,
             owner=owner,
@@ -190,8 +201,9 @@ def _verify_slices_allocation(
         )
     except Exception as exc:
         raise R2LabPhysicalFoundationError(
-            "fresh SLICES allocation authority was not proven"
+            "fresh SLICES authority was not proven"
         ) from exc
+    return resolved_reservation_id, resolved_allocation_id
 
 
 def _foundation_evidence(run_id: str) -> PhysicalRunEvidence:
@@ -212,8 +224,8 @@ def execute_physical_foundation_acceptance(
     previous_run_id: str,
     slice_name: str,
     owner: str,
-    reservation_id: str,
-    allocation_id: str,
+    reservation_id: str | None,
+    allocation_id: str | None,
     known_hosts: Path,
     now: datetime,
     run_root: Path = Path(".synthran/r2lab"),
@@ -241,7 +253,7 @@ def execute_physical_foundation_acceptance(
         )
     except RuntimeError as exc:
         raise R2LabPhysicalFoundationError(
-            "current R2Lab authority was not proven"
+            f"current R2Lab authority was not proven: {exc}"
         ) from exc
 
     def verify_r2lab_authority() -> None:
@@ -255,17 +267,19 @@ def execute_physical_foundation_acceptance(
             )
         except RuntimeError as exc:
             raise R2LabPhysicalFoundationError(
-                "current R2Lab authority was not proven"
+                f"current R2Lab authority was not proven: {exc}"
             ) from exc
         if refreshed != initial_authority:
             raise R2LabPhysicalFoundationError(
                 "R2Lab authority changed during foundation verification"
             )
 
-    _verify_slices_allocation(
+    reservation_id, allocation_id = _resolve_slices_authority(
         runner=foundation_runner,
         owner=owner,
+        reservation_id=reservation_id,
         allocation_id=allocation_id,
+        now=now,
         timeout_seconds=timeout_seconds,
     )
 
@@ -317,7 +331,7 @@ def execute_physical_foundation_acceptance(
             known_hosts=known_hosts,
             now=now,
             runner=foundation_runner,
-            reservation_verifier=verify_r2lab_authority,
+            additional_authority_verifier=verify_r2lab_authority,
             timeout_seconds=timeout_seconds,
         )
     except R2LabPhysicalHandoffError as exc:
@@ -325,10 +339,12 @@ def execute_physical_foundation_acceptance(
             "physical namespace ownership was not proven"
         ) from exc
 
-    _verify_slices_allocation(
+    _resolve_slices_authority(
         runner=foundation_runner,
         owner=owner,
+        reservation_id=reservation_id,
         allocation_id=allocation_id,
+        now=now,
         timeout_seconds=timeout_seconds,
     )
     observed_owner = _checked(

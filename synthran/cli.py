@@ -797,8 +797,6 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
         required = {
             "--slice or SYNTHRAN_R2LAB_SLICE": args.r2lab_slice,
             "--owner or SYNTHRAN_OWNER": args.owner,
-            "--reservation-id or SYNTHRAN_RESERVATION_ID": args.reservation_id,
-            "--allocation-id or SYNTHRAN_ALLOCATION_ID": args.allocation_id,
             "--known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS": args.known_hosts,
         }
         missing = [name for name, value in required.items() if value is None]

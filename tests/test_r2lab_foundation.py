@@ -44,6 +44,7 @@ class FoundationRunner:
         self.deployment_owner = PREVIOUS_RUN_ID
         self.ready_nodes = {"sopnode-f2", "sopnode-f3"}
         self.unready_nf: str | None = None
+        self.reservation_ids = ["reservation-1"]
 
     @staticmethod
     def remote(command: tuple[str, ...]) -> tuple[str, ...] | None:
@@ -89,12 +90,13 @@ class FoundationRunner:
                 json.dumps(
                     [
                         {
-                            "id": "reservation-1",
+                            "id": reservation_id,
                             "owner": "test-owner",
                             "nodes": ["sopnode-f2", "sopnode-f3"],
                             "start_date": "2026-08-24 09:00:00",
                             "end_date": "2026-08-24 12:00:00",
                         }
+                        for reservation_id in self.reservation_ids
                     ]
                 ),
                 "",
@@ -159,7 +161,14 @@ class FoundationRunner:
 class R2LabPhysicalFoundationTests(unittest.TestCase):
     NOW = datetime(2026, 8, 24, 7, 30, tzinfo=timezone.utc)
 
-    def run_foundation(self, runner: FoundationRunner, directory: str):
+    def run_foundation(
+        self,
+        runner: FoundationRunner,
+        directory: str,
+        *,
+        reservation_id: str | None = None,
+        allocation_id: str | None = None,
+    ):
         known_hosts = Path(directory) / "known_hosts"
         known_hosts.write_text(
             "sopnode-f2 ssh-ed25519 AAAATEST\n",
@@ -174,15 +183,15 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
                 previous_run_id=PREVIOUS_RUN_ID,
                 slice_name="test-slice",
                 owner="test-owner",
-                reservation_id="reservation-1",
-                allocation_id="allocation-1",
+                reservation_id=reservation_id,
+                allocation_id=allocation_id,
                 known_hosts=known_hosts,
                 now=self.NOW,
                 run_root=Path(directory) / "runs",
                 foundation_runner=runner,
             )
         self.assertGreaterEqual(authorize.call_count, 3)
-        self.assertFalse(
+        self.assertTrue(
             any(
                 command[:3] == ("pos", "calendar", "list")
                 for command in runner.commands
@@ -195,6 +204,30 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
             )
         )
         return result
+
+    def test_explicit_slices_identifiers_remain_supported(self) -> None:
+        runner = FoundationRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_foundation(
+                runner,
+                directory,
+                reservation_id="reservation-1",
+                allocation_id="allocation-1",
+            )
+
+        self.assertTrue(result.handoff.changed)
+
+    def test_ambiguous_active_reservation_blocks_namespace_mutation(self) -> None:
+        runner = FoundationRunner()
+        runner.reservation_ids.append("reservation-2")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                R2LabPhysicalFoundationError,
+                "fresh SLICES authority was not proven",
+            ):
+                self.run_foundation(runner, directory)
+
+        self.assertEqual(PREVIOUS_RUN_ID, runner.namespace_owner)
 
     def test_foundation_binds_four_ordered_stages_after_live_proof(self) -> None:
         runner = FoundationRunner()
