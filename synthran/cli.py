@@ -48,6 +48,7 @@ from synthran.r2lab.foundation import (
 )
 from synthran.r2lab.deployment import PhysicalChartBindings
 from synthran.r2lab.gnb import (
+    DEFAULT_N2_CONVERGENCE_ATTEMPTS,
     R2LabPhysicalGnbError,
     execute_physical_gnb_n2_acceptance,
     execute_physical_gnb_staging,
@@ -459,7 +460,18 @@ def _parser() -> argparse.ArgumentParser:
     _add_physical_authority_arguments(r2lab_gnb_start)
     r2lab_gnb_start.add_argument("--run-id", required=True)
     r2lab_gnb_start.add_argument("--timeout", type=int, default=120)
-    r2lab_gnb_start.add_argument("--n2-attempts", type=int, default=12)
+    r2lab_gnb_start.add_argument(
+        "--n2-attempts",
+        type=int,
+        default=12,
+        help="consecutive current gNB/N2 proofs required for acceptance",
+    )
+    r2lab_gnb_start.add_argument(
+        "--n2-convergence-attempts",
+        type=int,
+        default=DEFAULT_N2_CONVERGENCE_ATTEMPTS,
+        help="polls allowed for initial gNB/N2 convergence",
+    )
     r2lab_gnb_start.add_argument("--n2-interval", type=float, default=5.0)
     r2lab_gnb_start.add_argument("--json", action="store_true")
     r2lab_gnb_start.add_argument(
@@ -857,6 +869,7 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
             run_root=args.run_root,
             timeout_seconds=args.timeout,
             attempts=args.n2_attempts,
+            convergence_attempts=args.n2_convergence_attempts,
             poll_interval_seconds=args.n2_interval,
         )
         print(

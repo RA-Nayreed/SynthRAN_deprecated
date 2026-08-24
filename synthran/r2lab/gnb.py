@@ -57,6 +57,10 @@ from synthran.r2lab.runtime import (
 )
 
 
+DEFAULT_N2_CONVERGENCE_ATTEMPTS = 12
+MAX_N2_VERIFICATION_ATTEMPTS = 120
+
+
 class R2LabPhysicalGnbError(RuntimeError):
     """Raised when public physical gNB composition cannot proceed safely."""
 
@@ -464,9 +468,25 @@ def execute_physical_gnb_n2_acceptance(
     cluster_runner=subprocess_runner,
     timeout_seconds: int = 120,
     attempts: int = 12,
+    convergence_attempts: int = DEFAULT_N2_CONVERGENCE_ATTEMPTS,
     poll_interval_seconds: float = 5.0,
 ) -> PhysicalGnbN2Summary:
-    """Start one artifact-bound gNB and persist a bounded N2 proof."""
+    """Start one artifact-bound gNB and persist a bounded stable N2 proof."""
+
+    if attempts < 1:
+        raise R2LabPhysicalGnbError(
+            "required consecutive gNB/N2 proofs must be at least one"
+        )
+    if convergence_attempts < 1:
+        raise R2LabPhysicalGnbError(
+            "gNB/N2 convergence attempts must be at least one"
+        )
+    verification_attempts = attempts + convergence_attempts - 1
+    if verification_attempts > MAX_N2_VERIFICATION_ATTEMPTS:
+        raise R2LabPhysicalGnbError(
+            "combined gNB/N2 convergence and stability attempts must not exceed "
+            f"{MAX_N2_VERIFICATION_ATTEMPTS}"
+        )
 
     evidence_path, physical_directory, _run_directory = _physical_paths(
         run_root, run_id
@@ -549,7 +569,7 @@ def execute_physical_gnb_n2_acceptance(
             expected_gnb_n2_peer=load_expected_gnb_n2_peer(physical_directory),
             evidence_path=evidence_path,
             timeout_seconds=min(timeout_seconds, 60),
-            attempts=attempts,
+            attempts=verification_attempts,
             required_consecutive_proofs=attempts,
             poll_interval_seconds=poll_interval_seconds,
         )
