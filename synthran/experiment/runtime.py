@@ -51,7 +51,7 @@ from synthran.experiment_resources import (
     render_experiment_objects,
 )
 from synthran.fiveg_ansible import NetworkInventory
-from synthran.ingress import CountedTcpIngress, IngressSnapshot
+from synthran.ingress import IngressSnapshot
 from synthran.iot import write_run_inputs
 from synthran.live_preflight import CommandResult, LivePreflightError, ssh_command
 from synthran.mqtt_collector import collect_mqtt

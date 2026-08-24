@@ -12,10 +12,6 @@ from typing import Callable, Sequence
 from synthran.live_preflight import CommandResult
 
 
-class QfitRuntimeStateError(ValueError):
-    """Raised when qfit runtime evidence is malformed or contradictory."""
-
-
 class CellAcquisitionState(str, Enum):
     ACQUIRED_NR_SA = "acquired-nr-sa"
     NO_SERVICE = "no-service"

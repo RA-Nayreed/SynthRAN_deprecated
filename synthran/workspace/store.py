@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime
 import base64
 import fcntl
@@ -19,9 +19,6 @@ from typing import Mapping
 from synthran.workspace.model import (
     ACCESS_SCHEMA,
     ACTIVE_SCHEMA,
-    EXPERIMENT_SCHEMA,
-    PROFILE_SCHEMA,
-    WORKSPACE_SCHEMA,
     AccessRecord,
     ExperimentRecord,
     Profile,

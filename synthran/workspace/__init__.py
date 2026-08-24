@@ -79,7 +79,7 @@ from synthran.workspace.records import (
     save_operation_record,
     save_run_record,
 )
-from synthran.workspace.registry import ExperimentEntry, WorkspaceRegistry
+from synthran.workspace.registry import WorkspaceRegistry
 from synthran.workspace.session import (
     AccessState,
     ProviderExperimentObservation,
@@ -112,7 +112,6 @@ __all__ = [
     "DEFAULT_PROFILE_NAME",
     "DnnDesiredState",
     "ExperimentDesiredState",
-    "ExperimentEntry",
     "ExperimentRecord",
     "ExperimentStatus",
     "InitializationPlan",

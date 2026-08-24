@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from synthran.dependencies import load_lock
 from synthran.r2lab.acceptance import (
@@ -34,7 +33,6 @@ from synthran.r2lab.runtime import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = "r2lab-gnb-test"
-NOW = datetime(2026, 8, 24, 0, 30, tzinfo=timezone.utc)
 
 
 def foundation_evidence() -> PhysicalRunEvidence:
@@ -125,12 +123,15 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                 "    spec:\n"
                 "      containers:\n"
                 "        - name: gnb\n"
-                "          image: \"{{ .Values.image.repository }}:{{ .Values.image.tag }}\"\n",
+                '          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"\n',
                 encoding="utf-8",
             )
 
             def staged(**kwargs) -> PhysicalStagingResult:
                 artifact = kwargs["artifact"]
+                authority_verifier = kwargs["authority_verifier"]
+                self.assertTrue(callable(authority_verifier))
+                authority_verifier()
                 return PhysicalStagingResult(
                     run_id=RUN_ID,
                     package_sha256=artifact.package_sha256,
@@ -142,7 +143,10 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                 )
 
             with (
-                patch("synthran.r2lab.gnb.authorize_physical_start"),
+                patch(
+                    "synthran.r2lab.gnb.PhysicalAuthorityGuard.open",
+                    return_value=Mock(verify=Mock()),
+                ),
                 patch("synthran.r2lab.gnb._verify_checkout"),
                 patch(
                     "synthran.r2lab.gnb.render_physical_chart_offline",
@@ -157,10 +161,8 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                     run_id=RUN_ID,
                     slice_name="test_slice",
                     owner="test-owner",
-                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
-                    now=NOW,
                     bindings=self.bindings,
                     lock_path=REPOSITORY_ROOT / "dependencies.lock.yml",
                     deps_root=root / "deps",
@@ -170,10 +172,8 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                     run_id=RUN_ID,
                     slice_name="test_slice",
                     owner="test-owner",
-                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
-                    now=NOW,
                     bindings=self.bindings,
                     lock_path=REPOSITORY_ROOT / "dependencies.lock.yml",
                     deps_root=root / "deps",
@@ -253,10 +253,8 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                     run_id=RUN_ID,
                     slice_name="test_slice",
                     owner="test-owner",
-                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
-                    now=NOW,
                     run_root=run_root,
                     attempts=2,
                     poll_interval_seconds=0,
@@ -343,10 +341,8 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                     run_id=RUN_ID,
                     slice_name="test_slice",
                     owner="test-owner",
-                    reservation_id="reservation-1",
                     allocation_id="allocation-1",
                     known_hosts=known_hosts,
-                    now=NOW,
                     run_root=run_root,
                     attempts=2,
                     poll_interval_seconds=0,

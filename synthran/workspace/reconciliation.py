@@ -56,11 +56,6 @@ class ReconciliationReport:
         if any(not item or len(item) > 512 for item in self.blocks):
             raise WorkspaceError("reconciliation block reason is malformed")
 
-    @property
-    def can_mutate(self) -> bool:
-        return not self.blocks
-
-
 def _observation(state: ObservedState, dimension: str) -> Observation | None:
     return state.get(dimension)
 

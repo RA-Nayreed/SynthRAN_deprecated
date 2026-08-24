@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import json
 from pathlib import Path
 import shutil
@@ -18,6 +17,10 @@ from synthran.r2lab.acceptance import (
     PhysicalRunEvidence,
     R2LabAcceptanceError,
 )
+from synthran.r2lab.authority import (
+    PhysicalAuthorityGuard,
+    R2LabPhysicalAuthorityError,
+)
 from synthran.r2lab.controller import (
     authorize_physical_start,
     execute_physical_gnb_start,
@@ -27,6 +30,7 @@ from synthran.r2lab.deployment import (
     PHYSICAL_CHART_PATH,
     PhysicalChartBindings,
     PhysicalGnbStartResult,
+    PhysicalStartAuthority,
     PhysicalStagingResult,
     R2LabPhysicalArtifactError,
     R2LabPhysicalChartError,
@@ -133,7 +137,9 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> Path:
     except OSError as exc:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
-        raise R2LabPhysicalGnbError("physical gNB evidence could not be persisted") from exc
+        raise R2LabPhysicalGnbError(
+            "physical gNB evidence could not be persisted"
+        ) from exc
     return path
 
 
@@ -152,7 +158,9 @@ def _require_staging_boundary(evidence: PhysicalRunEvidence) -> None:
             "physical gNB staging requires accepted resource, SLICES, Kubernetes, and Open5GS evidence"
         )
     if evidence.gnb_start is not None:
-        raise R2LabPhysicalGnbError("physical gNB has already been started for this run")
+        raise R2LabPhysicalGnbError(
+            "physical gNB has already been started for this run"
+        )
 
 
 def _chart_checkout(lock: DependencyLock, deps_root: Path) -> tuple[Path, str]:
@@ -174,7 +182,9 @@ def _verify_checkout(checkout: Path, commit: str, runner) -> None:
         head = runner(("git", "-C", str(checkout), "rev-parse", "HEAD"), 30)
         status = runner(("git", "-C", str(checkout), "status", "--short"), 30)
     except Exception as exc:
-        raise R2LabPhysicalGnbError("locked chart checkout could not be inspected") from exc
+        raise R2LabPhysicalGnbError(
+            "locked chart checkout could not be inspected"
+        ) from exc
     if head.returncode != 0 or head.stdout.strip() != commit:
         raise R2LabPhysicalGnbError("srsran_helm checkout is not at the locked commit")
     if status.returncode != 0 or status.stdout.strip():
@@ -188,7 +198,9 @@ def _recover_staging(
     physical_directory: Path,
 ) -> PhysicalGnbStagingSummary:
     staging = PhysicalStagingResult.from_dict(
-        _read_json(physical_directory / "physical-staging.json", "physical staging result")
+        _read_json(
+            physical_directory / "physical-staging.json", "physical staging result"
+        )
     )
     if staging.run_id != evidence.run_id:
         raise R2LabPhysicalGnbError("stored physical staging belongs to another run")
@@ -216,10 +228,8 @@ def execute_physical_gnb_staging(
     run_id: str,
     slice_name: str,
     owner: str,
-    reservation_id: str | None,
     allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     bindings: PhysicalChartBindings | None = None,
     lock_path: Path = Path("dependencies.lock.yml"),
     deps_root: Path = Path(".deps"),
@@ -230,19 +240,28 @@ def execute_physical_gnb_staging(
 ) -> PhysicalGnbStagingSummary:
     """Render, package, and stage one immutable physical chart at zero pods."""
 
-    evidence_path, physical_directory, run_directory = _physical_paths(
-        run_root, run_id
-    )
+    evidence_path, physical_directory, run_directory = _physical_paths(run_root, run_id)
     try:
         evidence = PhysicalRunEvidence.read_json(evidence_path)
         _require_staging_boundary(evidence)
-        initial_authority = authorize_physical_start(
-            run_id=run_id,
-            slice_name=slice_name,
-            run_root=run_root,
-            runner=r2lab_runner,
+
+        def verify_r2lab_authority() -> PhysicalStartAuthority:
+            return authorize_physical_start(
+                run_id=run_id,
+                slice_name=slice_name,
+                run_root=run_root,
+                runner=r2lab_runner,
+                timeout_seconds=timeout_seconds,
+            )
+
+        authority = PhysicalAuthorityGuard.open(
+            lease_verifier=verify_r2lab_authority,
+            allocation_runner=runner,
+            owner=owner,
+            allocation_id=allocation_id,
             timeout_seconds=timeout_seconds,
         )
+
         if physical_directory.exists():
             return _recover_staging(
                 evidence=evidence,
@@ -313,25 +332,12 @@ def execute_physical_gnb_staging(
                 artifact=artifact,
                 render_evidence=render_evidence,
                 run_id=run_id,
-                owner=owner,
-                reservation_id=reservation_id,
-                allocation_id=allocation_id,
                 known_hosts=known_hosts,
-                now=now,
                 runner=runner,
+                authority_verifier=authority.verify,
                 timeout_seconds=timeout_seconds,
             )
-            refreshed_authority = authorize_physical_start(
-                run_id=run_id,
-                slice_name=slice_name,
-                run_root=run_root,
-                runner=r2lab_runner,
-                timeout_seconds=timeout_seconds,
-            )
-            if refreshed_authority != initial_authority:
-                raise R2LabPhysicalGnbError(
-                    "R2Lab authority changed during stopped physical staging"
-                )
+            authority.verify()
             _write_json(
                 temporary_directory / "physical-staging.json",
                 staging.to_dict(),
@@ -355,10 +361,9 @@ def execute_physical_gnb_staging(
         R2LabPhysicalChartError,
         R2LabPhysicalHelmError,
         R2LabPhysicalStagingError,
+        R2LabPhysicalAuthorityError,
         OSError,
     ) as exc:
-        if isinstance(exc, R2LabPhysicalGnbError):
-            raise
         raise R2LabPhysicalGnbError(str(exc)) from exc
 
 
@@ -394,10 +399,8 @@ def _stop_gnb_after_unsuccessful_proof(
     *,
     staging: PhysicalStagingResult,
     owner: str,
-    reservation_id: str | None,
     allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     cluster_runner,
     timeout_seconds: int,
     stop_path: Path,
@@ -405,10 +408,8 @@ def _stop_gnb_after_unsuccessful_proof(
     stopped = execute_authorized_physical_gnb_stop(
         staging=staging,
         owner=owner,
-        reservation_id=reservation_id,
         allocation_id=allocation_id,
         known_hosts=known_hosts,
-        now=now,
         runner=cluster_runner,
         sleeper=time.sleep,
         timeout_seconds=timeout_seconds,
@@ -421,10 +422,8 @@ def execute_physical_gnb_n2_acceptance(
     run_id: str,
     slice_name: str,
     owner: str,
-    reservation_id: str | None,
     allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     run_root: Path = Path(".synthran/r2lab"),
     r2lab_runner=r2lab_subprocess_runner,
     cluster_runner=subprocess_runner,
@@ -492,10 +491,8 @@ def execute_physical_gnb_n2_acceptance(
                 slice_name=slice_name,
                 staging=staging,
                 owner=owner,
-                reservation_id=reservation_id,
                 allocation_id=allocation_id,
                 known_hosts=known_hosts,
-                now=now,
                 run_root=run_root,
                 r2lab_runner=r2lab_runner,
                 cluster_runner=cluster_runner,
@@ -525,10 +522,8 @@ def execute_physical_gnb_n2_acceptance(
             _stop_gnb_after_unsuccessful_proof(
                 staging=staging,
                 owner=owner,
-                reservation_id=reservation_id,
                 allocation_id=allocation_id,
                 known_hosts=known_hosts,
-                now=now,
                 cluster_runner=cluster_runner,
                 timeout_seconds=timeout_seconds,
                 stop_path=stop_path,
@@ -552,10 +547,8 @@ def execute_physical_gnb_n2_acceptance(
                 _stop_gnb_after_unsuccessful_proof(
                     staging=staging,
                     owner=owner,
-                    reservation_id=reservation_id,
                     allocation_id=allocation_id,
                     known_hosts=known_hosts,
-                    now=now,
                     cluster_runner=cluster_runner,
                     timeout_seconds=timeout_seconds,
                     stop_path=stop_path,

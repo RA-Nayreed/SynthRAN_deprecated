@@ -24,7 +24,7 @@ from synthran.workspace.store import workspace_file
 class SynthRANCompleter(Completer):
     """Complete only the explicit command registry and its fixed subcommands."""
 
-    def get_completions(self, document: Document, complete_event):  # type: ignore[override]
+    def get_completions(self, document: Document, _complete_event):  # type: ignore[override]
         text = document.text_before_cursor.lstrip()
         if not text.startswith("/"):
             return

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shlex
@@ -21,8 +20,6 @@ class HandoffRunner:
         self.deployment_owner = "r2lab-previous-run"
         self.replicas = 0
         self.pods: list[dict[str, object]] = []
-        self.calendar_calls = 0
-        self.fail_second_authority = False
 
     @staticmethod
     def remote(command: tuple[str, ...]) -> tuple[str, ...] | None:
@@ -33,41 +30,6 @@ class HandoffRunner:
     def __call__(self, command, timeout_seconds: int) -> CommandResult:
         value = tuple(command)
         self.commands.append(value)
-
-        if value[:3] == ("pos", "calendar", "list"):
-            self.calendar_calls += 1
-            owner = (
-                "someone-else"
-                if self.fail_second_authority and self.calendar_calls >= 2
-                else "test-owner"
-            )
-            return CommandResult(
-                0,
-                json.dumps(
-                    [
-                        {
-                            "id": "reservation-1",
-                            "owner": owner,
-                            "nodes": ["sopnode-f2", "sopnode-f3"],
-                            "start_date": "2026-08-22 22:30:00",
-                            "end_date": "2026-08-23 00:30:00",
-                        }
-                    ]
-                ),
-                "",
-            )
-
-        if value[:3] == ("pos", "allocations", "show"):
-            return CommandResult(
-                0,
-                json.dumps(
-                    {
-                        "id": "allocation-1",
-                        "owner": "test-owner",
-                    }
-                ),
-                "",
-            )
 
         remote = self.remote(value)
         if remote is None:
@@ -122,15 +84,13 @@ class HandoffRunner:
 
 
 class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
-    NOW = datetime(2026, 8, 22, 20, 40, tzinfo=timezone.utc)
-
     def run_handoff(
         self,
         runner: HandoffRunner,
         *,
         from_run_id: str = "r2lab-previous-run",
         to_run_id: str = "r2lab-current-run",
-        reservation_verifier=None,
+        authority_verifier=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             known_hosts = Path(directory) / "known_hosts"
@@ -141,13 +101,9 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
             return execute_physical_namespace_handoff(
                 from_run_id=from_run_id,
                 to_run_id=to_run_id,
-                owner="test-owner",
-                reservation_id="reservation-1",
-                allocation_id="allocation-1",
                 known_hosts=known_hosts,
-                now=self.NOW,
                 runner=runner,
-                reservation_verifier=reservation_verifier,
+                authority_verifier=authority_verifier or (lambda: None),
             )
 
     def test_handoff_rebinds_only_clean_namespace_and_reobserves_owner(self) -> None:
@@ -197,20 +153,20 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
             for command in runner.commands
             if command[:3] == ("pos", "allocations", "show")
         ]
-        self.assertEqual(2, len(reservation_queries))
-        self.assertEqual(4, len(allocation_queries))
+        self.assertEqual(0, len(reservation_queries))
+        self.assertEqual(0, len(allocation_queries))
 
-    def test_external_reservation_verifier_replaces_calendar_query(self) -> None:
+    def test_external_authority_verifier_guards_both_boundaries(self) -> None:
         runner = HandoffRunner()
         verification_count = 0
 
-        def verify_reservation() -> None:
+        def verify_authority() -> None:
             nonlocal verification_count
             verification_count += 1
 
         self.run_handoff(
             runner,
-            reservation_verifier=verify_reservation,
+            authority_verifier=verify_authority,
         )
 
         self.assertEqual(2, verification_count)
@@ -225,7 +181,7 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
             for command in runner.commands
             if command[:3] == ("pos", "allocations", "show")
         ]
-        self.assertEqual(4, len(allocation_queries))
+        self.assertEqual(0, len(allocation_queries))
 
     def test_retry_after_complete_handoff_performs_no_write(self) -> None:
         runner = HandoffRunner()
@@ -337,13 +293,19 @@ class R2LabPhysicalNamespaceHandoffTests(unittest.TestCase):
 
     def test_handoff_rechecks_authority_immediately_before_write(self) -> None:
         runner = HandoffRunner()
-        runner.fail_second_authority = True
+        calls = 0
+
+        def changing_authority() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("authority changed")
 
         with self.assertRaisesRegex(
             R2LabPhysicalHandoffError,
             "authority changed before namespace ownership handoff",
         ):
-            self.run_handoff(runner)
+            self.run_handoff(runner, authority_verifier=changing_authority)
 
         self.assertFalse(
             any(
