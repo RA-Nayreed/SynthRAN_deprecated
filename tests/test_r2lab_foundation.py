@@ -240,6 +240,7 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
         self.assertEqual(2, result.ready_node_count)
         self.assertEqual(3, result.ready_open5gs_pod_count)
         self.assertFalse(result.open5gs_reconciled)
+        self.assertFalse(result.to_dict()["legacy_gnb_stopped"])
         self.assertEqual(
             PhysicalAcceptanceStage.GNB_N2,
             evidence.acceptance.next_stage,
