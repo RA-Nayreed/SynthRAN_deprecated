@@ -152,6 +152,40 @@ def _parse_pod_count(text: str) -> int:
     return len(items)
 
 
+def _verify_slices_authority(
+    *,
+    runner: Runner,
+    owner: str,
+    reservation_id: str,
+    allocation_id: str,
+    now: datetime,
+    timeout_seconds: int,
+    reservation_verifier: Callable[[], None] | None,
+    failure_message: str,
+) -> None:
+    try:
+        if reservation_verifier is None:
+            verify_reservation(
+                runner=runner,
+                reservation_id=reservation_id,
+                owner=owner,
+                nodes={CORE_NODE, RAN_NODE},
+                now=now,
+                timeout_seconds=min(timeout_seconds, 60),
+            )
+        else:
+            reservation_verifier()
+        verify_allocations(
+            runner=runner,
+            allocation_id=allocation_id,
+            owner=owner,
+            nodes={CORE_NODE, RAN_NODE},
+            timeout_seconds=min(timeout_seconds, 60),
+        )
+    except Exception as exc:
+        raise R2LabPhysicalHandoffError(failure_message) from exc
+
+
 def execute_physical_namespace_handoff(
     *,
     from_run_id: str,
@@ -162,6 +196,7 @@ def execute_physical_namespace_handoff(
     known_hosts: Path,
     now: datetime,
     runner: Runner,
+    reservation_verifier: Callable[[], None] | None = None,
     timeout_seconds: int = 120,
 ) -> PhysicalNamespaceHandoffResult:
     """Transfer only the Open5GS namespace owner after proving a stopped gNB.
@@ -186,24 +221,16 @@ def execute_physical_namespace_handoff(
     if not known_hosts.is_file():
         raise R2LabPhysicalHandoffError("strict SLICES known-hosts file is missing")
 
-    try:
-        verify_reservation(
-            runner=runner,
-            reservation_id=reservation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            now=now,
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-        verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-    except Exception as exc:
-        raise R2LabPhysicalHandoffError("fresh SLICES authority was not proven") from exc
+    _verify_slices_authority(
+        runner=runner,
+        owner=owner,
+        reservation_id=reservation_id,
+        allocation_id=allocation_id,
+        now=now,
+        timeout_seconds=timeout_seconds,
+        reservation_verifier=reservation_verifier,
+        failure_message="fresh SLICES authority was not proven",
+    )
 
     namespace_owner = _checked(
         runner=runner,
@@ -281,27 +308,18 @@ def execute_physical_namespace_handoff(
             gnb_pod_count=pod_count,
         )
 
-    # Re-prove both reservation and allocation immediately before ownership writes.
-    try:
-        verify_reservation(
-            runner=runner,
-            reservation_id=reservation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            now=now,
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-        verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-    except Exception as exc:
-        raise R2LabPhysicalHandoffError(
+    _verify_slices_authority(
+        runner=runner,
+        owner=owner,
+        reservation_id=reservation_id,
+        allocation_id=allocation_id,
+        now=now,
+        timeout_seconds=timeout_seconds,
+        reservation_verifier=reservation_verifier,
+        failure_message=(
             "SLICES authority changed before namespace ownership handoff"
-        ) from exc
+        ),
+    )
 
     if deployment_changed:
         _checked(
