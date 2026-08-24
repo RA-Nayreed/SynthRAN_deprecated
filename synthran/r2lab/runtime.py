@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -60,6 +61,9 @@ Sleeper = Callable[[float], None]
 _SAFE_QFIT_RE = re.compile(r"^qfit(?:07|09|18|29|32|34)$")
 _SAFE_POD_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_UTC_TIMESTAMP_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$"
+)
 _QFIT_AT_DEVICE = "/dev/ttyUSB2"
 _QFIT_MBIM_DEVICE = "/dev/cdc-wdm0"
 _QFIT_INTERFACE = "wwan0"
@@ -88,6 +92,44 @@ class N2State(str, Enum):
     ESTABLISHED = "established"
     NOT_OBSERVED = "not-observed"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class GnbFailureEvidence:
+    """Sanitized container failure evidence captured before exact rollback."""
+
+    pod_count: int | None
+    pod_state: str
+    container_ready: bool
+    restart_count: int | None
+    waiting_reason: str
+    last_termination_reason: str
+    last_exit_code: int | None
+    last_signal: int | None
+    current_log_sha256: str | None
+    previous_log_sha256: str | None
+    classifications: tuple[str, ...]
+    failure_class: str
+    transport_error: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": "synthran/r2lab-gnb-failure/v1alpha1",
+            "status": "captured",
+            "pod_count": self.pod_count,
+            "pod_state": self.pod_state,
+            "container_ready": self.container_ready,
+            "restart_count": self.restart_count,
+            "waiting_reason": self.waiting_reason,
+            "last_termination_reason": self.last_termination_reason,
+            "last_exit_code": self.last_exit_code,
+            "last_signal": self.last_signal,
+            "current_log_sha256": self.current_log_sha256,
+            "previous_log_sha256": self.previous_log_sha256,
+            "classifications": list(self.classifications),
+            "failure_class": self.failure_class,
+            "transport_error": self.transport_error,
+        }
 
 
 @dataclass(frozen=True)
@@ -405,12 +447,43 @@ def _one_ready_pod_name(text: str) -> str | None:
     item = items[0]
     if not isinstance(item, dict):
         return None
+    status = item.get("status")
+    if not isinstance(status, dict) or status.get(POD_RUNTIME_STATE_KEY) != "Running":
+        return None
+    statuses = status.get("containerStatuses")
+    if not isinstance(statuses, list) or not statuses:
+        return None
+    if any(
+        not isinstance(container, dict) or container.get("ready") is not True
+        for container in statuses
+    ):
+        return None
+    return _one_pod_name(text)
+
+
+def _one_ready_pod_identity(text: str) -> tuple[str, str] | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or len(items) != 1:
+        return None
+    item = items[0]
+    if not isinstance(item, dict):
+        return None
     metadata = item.get("metadata")
     status = item.get("status")
     if not isinstance(metadata, dict) or not isinstance(status, dict):
         return None
     name = metadata.get("name")
     if not isinstance(name, str) or not _SAFE_POD_RE.fullmatch(name):
+        return None
+    creation_timestamp = metadata.get("creationTimestamp")
+    if (
+        not isinstance(creation_timestamp, str)
+        or not _UTC_TIMESTAMP_RE.fullmatch(creation_timestamp)
+    ):
         return None
     if status.get(POD_RUNTIME_STATE_KEY) != "Running":
         return None
@@ -419,7 +492,276 @@ def _one_ready_pod_name(text: str) -> str | None:
         return None
     if any(not isinstance(item, dict) or item.get("ready") is not True for item in statuses):
         return None
-    return name
+    return name, creation_timestamp
+
+
+def _sanitized_pod_state(value: object) -> str:
+    return value if value in {"Pending", "Running", "Succeeded", "Failed"} else "Unknown"
+
+
+def _sanitized_waiting_reason(value: object) -> str:
+    mapping = {
+        "CrashLoopBackOff": "crash-loop-backoff",
+        "CreateContainerConfigError": "container-configuration",
+        "CreateContainerError": "container-start",
+        "ErrImagePull": "image-pull",
+        "ImagePullBackOff": "image-pull-backoff",
+        "ContainerCreating": "container-creating",
+        "PodInitializing": "pod-initializing",
+    }
+    return mapping.get(value, "none" if value is None else "unknown")
+
+
+def _sanitized_termination_reason(value: object) -> str:
+    mapping = {
+        "OOMKilled": "oom-killed",
+        "Error": "process-error",
+        "Completed": "completed",
+        "ContainerCannotRun": "container-cannot-run",
+        "DeadlineExceeded": "deadline-exceeded",
+    }
+    return mapping.get(value, "none" if value is None else "unknown")
+
+
+def _bounded_nonnegative_integer(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**31 - 1:
+        return value
+    return None
+
+
+def _log_sha256(text: str) -> str | None:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text.strip() else None
+
+
+def _classify_gnb_failure_log(text: str) -> tuple[str, ...]:
+    lowered = text.lower()
+    classifications: list[str] = []
+    failure_words = ("error", "failed", "failure", "fatal", "exception", "cannot")
+    if any(token in lowered for token in ("out of memory", "std::bad_alloc", "oomkill")):
+        classifications.append("memory-exhaustion")
+    if (
+        any(token in lowered for token in ("uhd", "usrp", "radio unit"))
+        and any(token in lowered for token in failure_words)
+    ):
+        classifications.append("uhd-device")
+    if any(
+        token in lowered
+        for token in (
+            "configuration error",
+            "failed to parse",
+            "invalid configuration",
+            "validation failed",
+        )
+    ):
+        classifications.append("configuration")
+    if (
+        any(token in lowered for token in ("sctp", "ngap", "amf"))
+        and any(token in lowered for token in failure_words)
+    ):
+        classifications.append("n2-transport")
+    if any(
+        token in lowered
+        for token in ("segmentation fault", "core dumped", "assertion failed", "terminate called")
+    ):
+        classifications.append("process-crash")
+    return tuple(classifications)
+
+
+def _failure_class(
+    *,
+    waiting_reason: str,
+    termination_reason: str,
+    classifications: tuple[str, ...],
+    exit_code: int | None,
+) -> str:
+    if termination_reason == "oom-killed" or "memory-exhaustion" in classifications:
+        return "memory-exhaustion"
+    for category in ("uhd-device", "configuration", "n2-transport", "process-crash"):
+        if category in classifications:
+            return category
+    if waiting_reason in {"image-pull", "image-pull-backoff"}:
+        return "image-pull"
+    if waiting_reason == "crash-loop-backoff":
+        return "crash-loop"
+    if termination_reason not in {"none", "completed"} or (
+        exit_code is not None and exit_code != 0
+    ):
+        return "process-exit"
+    return "unknown"
+
+
+def capture_gnb_failure_evidence(
+    *,
+    known_hosts: Path,
+    runner: Runner,
+    timeout_seconds: int = 30,
+) -> GnbFailureEvidence:
+    """Capture pod status and hash/classify logs before scale-to-zero recovery."""
+
+    known_hosts = known_hosts.expanduser().resolve()
+    if not known_hosts.is_file():
+        raise R2LabRuntimeVerificationError("strict SLICES known-hosts file is missing")
+    if timeout_seconds < 5 or timeout_seconds > 60:
+        raise R2LabRuntimeVerificationError(
+            "gNB failure capture timeout must be between 5 and 60 seconds"
+        )
+
+    def read(*remote: str) -> CommandResult | None:
+        try:
+            result = runner(_cluster_ssh(known_hosts, *remote), timeout_seconds)
+        except (RuntimeError, OSError):
+            return None
+        return result if result.returncode == 0 else None
+
+    pods_result = read(
+        "kubectl",
+        "get",
+        "pods",
+        "-n",
+        GNB_NAMESPACE,
+        "-l",
+        GNB_SELECTOR,
+        "-o",
+        "json",
+    )
+    if pods_result is None:
+        return GnbFailureEvidence(
+            pod_count=None,
+            pod_state="Unknown",
+            container_ready=False,
+            restart_count=None,
+            waiting_reason="unknown",
+            last_termination_reason="unknown",
+            last_exit_code=None,
+            last_signal=None,
+            current_log_sha256=None,
+            previous_log_sha256=None,
+            classifications=(),
+            failure_class="unobservable",
+            transport_error=True,
+        )
+
+    try:
+        payload = json.loads(pods_result.stdout)
+    except json.JSONDecodeError:
+        payload = None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        items = []
+        transport_error = True
+    else:
+        transport_error = False
+    if len(items) != 1 or not isinstance(items[0], dict):
+        return GnbFailureEvidence(
+            pod_count=len(items),
+            pod_state="Unknown",
+            container_ready=False,
+            restart_count=None,
+            waiting_reason="none",
+            last_termination_reason="none",
+            last_exit_code=None,
+            last_signal=None,
+            current_log_sha256=None,
+            previous_log_sha256=None,
+            classifications=(),
+            failure_class="unexpected-pod-count",
+            transport_error=transport_error,
+        )
+
+    pod = items[0]
+    metadata = pod.get("metadata")
+    status = pod.get("status")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    status = status if isinstance(status, dict) else {}
+    pod_name = metadata.get("name")
+    safe_pod_name = (
+        pod_name
+        if isinstance(pod_name, str) and _SAFE_POD_RE.fullmatch(pod_name)
+        else None
+    )
+    raw_statuses = status.get("containerStatuses")
+    statuses = raw_statuses if isinstance(raw_statuses, list) else []
+    container = next(
+        (
+            item
+            for item in statuses
+            if isinstance(item, dict) and item.get("name") == "gnb"
+        ),
+        None,
+    )
+    container = container if isinstance(container, dict) else {}
+    state = container.get("state")
+    last_state = container.get("lastState")
+    state = state if isinstance(state, dict) else {}
+    last_state = last_state if isinstance(last_state, dict) else {}
+    waiting = state.get("waiting")
+    current_terminated = state.get("terminated")
+    previous_terminated = last_state.get("terminated")
+    waiting = waiting if isinstance(waiting, dict) else {}
+    termination = (
+        previous_terminated
+        if isinstance(previous_terminated, dict)
+        else current_terminated if isinstance(current_terminated, dict) else {}
+    )
+    restart_count = _bounded_nonnegative_integer(container.get("restartCount"))
+    waiting_reason = _sanitized_waiting_reason(waiting.get("reason"))
+    termination_reason = _sanitized_termination_reason(termination.get("reason"))
+    exit_code = _bounded_nonnegative_integer(termination.get("exitCode"))
+    signal = _bounded_nonnegative_integer(termination.get("signal"))
+
+    current_log = None
+    previous_log = None
+    if safe_pod_name is not None:
+        current_log = read(
+            "kubectl",
+            "logs",
+            f"pod/{safe_pod_name}",
+            "-n",
+            GNB_NAMESPACE,
+            "-c",
+            "gnb",
+            "--tail=400",
+        )
+        if restart_count is not None and restart_count > 0:
+            previous_log = read(
+                "kubectl",
+                "logs",
+                f"pod/{safe_pod_name}",
+                "-n",
+                GNB_NAMESPACE,
+                "-c",
+                "gnb",
+                "--previous",
+                "--tail=400",
+            )
+    current_text = current_log.stdout if current_log is not None else ""
+    previous_text = previous_log.stdout if previous_log is not None else ""
+    classifications = tuple(
+        dict.fromkeys(
+            _classify_gnb_failure_log(current_text)
+            + _classify_gnb_failure_log(previous_text)
+        )
+    )
+    return GnbFailureEvidence(
+        pod_count=1,
+        pod_state=_sanitized_pod_state(status.get(POD_RUNTIME_STATE_KEY)),
+        container_ready=container.get("ready") is True,
+        restart_count=restart_count,
+        waiting_reason=waiting_reason,
+        last_termination_reason=termination_reason,
+        last_exit_code=exit_code,
+        last_signal=signal,
+        current_log_sha256=_log_sha256(current_text),
+        previous_log_sha256=_log_sha256(previous_text),
+        classifications=classifications,
+        failure_class=_failure_class(
+            waiting_reason=waiting_reason,
+            termination_reason=termination_reason,
+            classifications=classifications,
+            exit_code=exit_code,
+        ),
+        transport_error=transport_error,
+    )
 
 
 def parse_n2_log_state(text: str) -> N2State:
@@ -478,6 +820,7 @@ def verify_gnb_n2(
     pod_count: int | None = None
     ready_count: int | None = None
     pod_name: str | None = None
+    pod_creation_timestamp: str | None = None
     if pods_result is not None:
         try:
             observation = parse_gnb_pods_json(pods_result.stdout)
@@ -487,7 +830,9 @@ def verify_gnb_n2(
             pod_count = observation.total_count
             ready_count = observation.ready_running_count
             if observation.exactly_one_ready:
-                pod_name = _one_pod_name(pods_result.stdout)
+                identity = _one_ready_pod_identity(pods_result.stdout)
+                if identity is not None:
+                    pod_name, pod_creation_timestamp = identity
     logs = None
     if pod_name is not None:
         logs = read("kubectl", "logs", f"pod/{pod_name}", "-n", GNB_NAMESPACE, "--tail=400")
@@ -497,12 +842,25 @@ def verify_gnb_n2(
     log_observed = logs is not None
     n2_transport_error = pod_name is not None and logs is None
 
-    if n2_state is not N2State.ESTABLISHED and expected_gnb_n2_peer is not None:
+    if (
+        n2_state is not N2State.ESTABLISHED
+        and expected_gnb_n2_peer is not None
+        and pod_name is not None
+        and pod_creation_timestamp is not None
+    ):
         amf_pods = read("kubectl", "get", "pods", "-n", _AMF_NAMESPACE, "-l", _AMF_SELECTOR, "-o", "json")
         amf_name = _one_ready_pod_name(amf_pods.stdout) if amf_pods is not None else None
         amf_logs = None
         if amf_name is not None:
-            amf_logs = read("kubectl", "logs", f"pod/{amf_name}", "-n", _AMF_NAMESPACE, "--tail=400")
+            amf_logs = read(
+                "kubectl",
+                "logs",
+                f"pod/{amf_name}",
+                "-n",
+                _AMF_NAMESPACE,
+                "--tail=400",
+                f"--since-time={pod_creation_timestamp}",
+            )
         if amf_logs is not None:
             amf = build_amf_n2_evidence(text=amf_logs.stdout, expected_peer=expected_gnb_n2_peer)
             log_observed = log_observed or amf.log_observed

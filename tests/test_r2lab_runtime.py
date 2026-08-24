@@ -25,6 +25,7 @@ from synthran.r2lab.deployment import (
 from synthran.r2lab.runtime import (
     N2State,
     R2LabRuntimeVerificationError,
+    capture_gnb_failure_evidence,
     execute_physical_gnb_n2_verification,
     execute_physical_runtime_verification,
     execute_qfit_runtime_probe,
@@ -178,12 +179,22 @@ class RuntimeClusterRunner:
         gnb_log: str = "NGAP: AMF connection established\n",
         amf_log: str = f"[amf] INFO: gNB-N2 accepted[{TEST_GNB_PEER}]:58612\n",
         gnb_ready: bool = True,
+        gnb_restart_count: int = 0,
+        gnb_waiting_reason: str | None = None,
+        gnb_last_termination_reason: str | None = None,
+        gnb_last_exit_code: int | None = None,
+        previous_gnb_log: str = "",
     ) -> None:
         self.run_id = run_id
         self.render = render
         self.gnb_log = gnb_log
         self.amf_log = amf_log
         self.gnb_ready = gnb_ready
+        self.gnb_restart_count = gnb_restart_count
+        self.gnb_waiting_reason = gnb_waiting_reason
+        self.gnb_last_termination_reason = gnb_last_termination_reason
+        self.gnb_last_exit_code = gnb_last_exit_code
+        self.previous_gnb_log = previous_gnb_log
         self.commands: list[tuple[str, ...]] = []
 
     @staticmethod
@@ -242,13 +253,38 @@ class RuntimeClusterRunner:
                     {
                         "items": [
                             {
-                                "metadata": {"name": "srsran-gnb-current"},
+                                "metadata": {
+                                    "name": "srsran-gnb-current",
+                                    "creationTimestamp": "2026-08-24T13:01:11Z",
+                                },
                                 "status": {
                                     POD_RUNTIME_STATE_KEY: "Running",
                                     "containerStatuses": [
                                         {
                                             "name": "gnb",
                                             "ready": self.gnb_ready,
+                                            "restartCount": self.gnb_restart_count,
+                                            "state": (
+                                                {
+                                                    "waiting": {
+                                                        "reason": self.gnb_waiting_reason
+                                                    }
+                                                }
+                                                if self.gnb_waiting_reason is not None
+                                                else {"running": {}}
+                                            ),
+                                            "lastState": (
+                                                {
+                                                    "terminated": {
+                                                        "reason": self.gnb_last_termination_reason,
+                                                        "exitCode": self.gnb_last_exit_code,
+                                                        "signal": 0,
+                                                    }
+                                                }
+                                                if self.gnb_last_termination_reason
+                                                is not None
+                                                else {}
+                                            ),
                                         }
                                     ],
                                 },
@@ -261,6 +297,8 @@ class RuntimeClusterRunner:
         if remote[:2] == ("kubectl", "logs"):
             if "pod/open5gs-amf-current" in remote:
                 return CommandResult(0, self.amf_log, "")
+            if "--previous" in remote:
+                return CommandResult(0, self.previous_gnb_log, "")
             return CommandResult(0, self.gnb_log, "")
         raise AssertionError(f"unexpected cluster command: {remote}")
 
@@ -341,6 +379,7 @@ class R2LabGnbN2VerificationTests(unittest.TestCase):
         rendered = "\n".join(shlex.join(RuntimeClusterRunner.remote(c)) for c in cluster.commands)
         self.assertIn("-l nf=amf", rendered)
         self.assertIn("pod/open5gs-amf-current", rendered)
+        self.assertIn("--since-time=2026-08-24T13:01:11Z", rendered)
 
     def test_changed_render_binding_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -355,17 +394,63 @@ class R2LabGnbN2VerificationTests(unittest.TestCase):
         self.assertFalse(result.deployment_bound)
 
     def test_not_ready_singleton_reports_the_exact_sanitized_blocker(self) -> None:
+        cluster = RuntimeClusterRunner(gnb_ready=False)
         with tempfile.TemporaryDirectory() as directory:
             known_hosts = Path(directory) / "known_hosts"
             known_hosts.write_text("fixture\n", encoding="utf-8")
             result = verify_gnb_n2(
                 evidence=self.base_evidence(),
                 known_hosts=known_hosts,
-                runner=RuntimeClusterRunner(gnb_ready=False),
+                runner=cluster,
                 expected_gnb_n2_peer=TEST_GNB_PEER,
             )
         self.assertFalse(result.proven)
-        self.assertEqual(("ready-running-count",), result.unproven_reasons)
+        self.assertEqual(N2State.UNKNOWN, result.n2_state)
+        self.assertEqual("not-observed", result.n2_source)
+        self.assertEqual(
+            (
+                "ready-running-count",
+                "log-observation",
+                "n2-state",
+                "n2-source",
+            ),
+            result.unproven_reasons,
+        )
+        rendered = "\n".join(
+            shlex.join(RuntimeClusterRunner.remote(command))
+            for command in cluster.commands
+        )
+        self.assertNotIn("nf=amf", rendered)
+
+    def test_crash_loop_evidence_is_sanitized_before_cleanup(self) -> None:
+        cluster = RuntimeClusterRunner(
+            gnb_log="starting gNB\n",
+            gnb_ready=False,
+            gnb_restart_count=3,
+            gnb_waiting_reason="CrashLoopBackOff",
+            gnb_last_termination_reason="Error",
+            gnb_last_exit_code=1,
+            previous_gnb_log=(
+                "UHD Error: No devices found for addr=192.168.235.103\n"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            known_hosts = Path(directory) / "known_hosts"
+            known_hosts.write_text("fixture\n", encoding="utf-8")
+            result = capture_gnb_failure_evidence(
+                known_hosts=known_hosts,
+                runner=cluster,
+            )
+
+        payload = result.to_dict()
+        self.assertEqual("uhd-device", payload["failure_class"])
+        self.assertEqual("crash-loop-backoff", payload["waiting_reason"])
+        self.assertEqual("process-error", payload["last_termination_reason"])
+        self.assertEqual(3, payload["restart_count"])
+        self.assertEqual(["uhd-device"], payload["classifications"])
+        self.assertEqual(64, len(str(payload["previous_log_sha256"])))
+        self.assertNotIn("192.168.235.103", str(payload))
+        self.assertNotIn("srsran-gnb-current", str(payload))
 
     def test_n2_parser_requires_affirmative_nonfailure_evidence(self) -> None:
         self.assertEqual(N2State.ESTABLISHED, parse_n2_log_state("NGAP: AMF connection established\n"))

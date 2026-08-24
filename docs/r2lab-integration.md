@@ -218,10 +218,17 @@ The gNB commands discover the one active owner reservation and the one common
 allocation for `sopnode-f2` and `sopnode-f3`. The identifier options can still
 pin exact records when desired; ambiguous or split ownership fails closed.
 
-An unsuccessful N2 proof requests an exact scale-to-zero recovery. `r2lab
-release` also detects a bound gNB start and proves that exact Deployment is at
-zero replicas and zero pods before it powers off the qfit and N300 or releases
-the local resource claim.
+AMF-side fallback evidence is accepted only while the current run-owned gNB pod
+is ready, and the AMF log window begins at that pod's creation timestamp. This
+prevents a prior connection from the same static N2 address from being reused as
+current proof. Before an unsuccessful proof requests exact scale-to-zero
+recovery, the command captures sanitized container state, restart and exit
+details, and classifications plus SHA-256 digests of current and previous logs
+in `physical/physical-gnb-failure.json`. Raw gNB logs and pod names are not
+persisted, and diagnostic capture failure never delays rollback. `r2lab release`
+also detects a bound gNB start and proves that exact Deployment is at zero
+replicas and zero pods before it powers off the qfit and N300 or releases the
+local resource claim.
 
 ## Completion criteria
 
