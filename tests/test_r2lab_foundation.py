@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shlex
@@ -157,8 +156,6 @@ class FoundationRunner:
 
 
 class R2LabPhysicalFoundationTests(unittest.TestCase):
-    NOW = datetime(2026, 8, 24, 7, 30, tzinfo=timezone.utc)
-
     def run_foundation(self, runner: FoundationRunner, directory: str):
         known_hosts = Path(directory) / "known_hosts"
         known_hosts.write_text(
@@ -174,10 +171,8 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
                 previous_run_id=PREVIOUS_RUN_ID,
                 slice_name="test-slice",
                 owner="test-owner",
-                reservation_id="reservation-1",
                 allocation_id="allocation-1",
                 known_hosts=known_hosts,
-                now=self.NOW,
                 run_root=Path(directory) / "runs",
                 foundation_runner=runner,
             )
@@ -215,9 +210,13 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
             PhysicalAcceptanceStage.KUBERNETES,
             PhysicalAcceptanceStage.OPEN5GS,
         ):
-            self.assertEqual(AcceptanceOutcome.PASSED, evidence.acceptance.outcome_for(stage))
+            self.assertEqual(
+                AcceptanceOutcome.PASSED, evidence.acceptance.outcome_for(stage)
+            )
 
-    def test_unready_kubernetes_node_blocks_namespace_mutation_and_evidence(self) -> None:
+    def test_unready_kubernetes_node_blocks_namespace_mutation_and_evidence(
+        self,
+    ) -> None:
         runner = FoundationRunner()
         runner.ready_nodes.remove("sopnode-f3")
         with tempfile.TemporaryDirectory() as directory:

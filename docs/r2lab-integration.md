@@ -138,7 +138,6 @@ python -m synthran r2lab foundation \
   --run-id "$R2LAB_RUN" \
   --previous-run-id "$PREVIOUS_R2LAB_RUN" \
   --owner "$SYNTHRAN_OWNER" \
-  --reservation-id "$SYNTHRAN_RESERVATION_ID" \
   --allocation-id "$SYNTHRAN_ALLOCATION_ID" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 ```

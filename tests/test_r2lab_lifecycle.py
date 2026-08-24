@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +11,7 @@ from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import load_inventory
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.acceptance import PhysicalRunEvidence, STAGE_ORDER
+from synthran.r2lab.authority import verify_physical_allocation
 from synthran.r2lab.controller import (
     QFIT_IMAGE,
     R2LabSelection,
@@ -117,10 +117,7 @@ class LifecycleRunner:
             if state in {"on", "off"}:
                 return CommandResult(0, f"reboot{node:02d}:{state}\n", "")
             return CommandResult(0, "", "")
-        if (
-            remote[:4] == ("rhubarbe", "load", "-i", QFIT_IMAGE)
-            and len(remote) == 5
-        ):
+        if remote[:4] == ("rhubarbe", "load", "-i", QFIT_IMAGE) and len(remote) == 5:
             node = int(remote[4])
             self.power[f"qfit{node:02d}"] = "on"
             return CommandResult(0, "", "")
@@ -133,7 +130,8 @@ class LifecycleRunner:
             self.qfit_usb_power = "off"
             return CommandResult(0, "ok\n", "")
         if remote[:1] == ("ssh",) and (
-            remote[-3:] in {
+            remote[-3:]
+            in {
                 ("test", "-c", "/dev/ttyUSB2"),
                 ("test", "-c", "/dev/cdc-wdm0"),
             }
@@ -381,7 +379,9 @@ class StoppedStagingRunner:
             if "--ignore-not-found" in remote:
                 if not self.deployment_exists and self.existing_replicas is None:
                     return CommandResult(0, "", "")
-                replicas = 0 if self.existing_replicas is None else self.existing_replicas
+                replicas = (
+                    0 if self.existing_replicas is None else self.existing_replicas
+                )
                 return CommandResult(0, self.deployment_json(replicas=replicas), "")
             replicas = 0 if self.existing_replicas is None else self.existing_replicas
             return CommandResult(0, self.deployment_json(replicas=replicas), "")
@@ -423,7 +423,6 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         self.owner = "test-owner"
         self.reservation_id = "reservation-1"
         self.allocation_id = "allocation-1"
-        self.now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
         self.source_values = "pinned R2Lab values\n"
         self.source_values_sha256 = hashlib.sha256(
             self.source_values.encode()
@@ -460,9 +459,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             source_values_path=source_values,
             values_path=values,
             package_sha256=hashlib.sha256(package.read_bytes()).hexdigest(),
-            source_values_sha256=hashlib.sha256(
-                source_values.read_bytes()
-            ).hexdigest(),
+            source_values_sha256=hashlib.sha256(source_values.read_bytes()).hexdigest(),
             values_sha256=hashlib.sha256(values.read_bytes()).hexdigest(),
         )
 
@@ -484,7 +481,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         root: Path,
         artifact: PhysicalChartArtifact,
         runner: StoppedStagingRunner,
-        reservation_verifier=None,
+        authority_verifier=None,
     ):
         known_hosts = root / "known_hosts"
         known_hosts.write_text("sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8")
@@ -493,17 +490,31 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             artifact=artifact,
             render_evidence=self.render,
             run_id=self.run_id,
-            owner=self.owner,
-            reservation_id=self.reservation_id,
-            allocation_id=self.allocation_id,
             known_hosts=known_hosts,
-            now=self.now,
             runner=runner,
-            reservation_verifier=reservation_verifier,
+            authority_verifier=authority_verifier
+            or (
+                lambda: verify_physical_allocation(
+                    runner=runner,
+                    owner=self.owner,
+                    allocation_id=self.allocation_id,
+                    timeout_seconds=60,
+                )
+            ),
         )
         return result, known_hosts
 
-    def test_staging_requires_authority_transfers_exact_artifact_and_stays_stopped(self) -> None:
+    def allocation_verifier(self, runner: StoppedStagingRunner):
+        return lambda: verify_physical_allocation(
+            runner=runner,
+            owner=self.owner,
+            allocation_id=self.allocation_id,
+            timeout_seconds=60,
+        )
+
+    def test_staging_requires_authority_transfers_exact_artifact_and_stays_stopped(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             artifact = self.make_artifact(root)
@@ -556,7 +567,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             root = Path(directory)
             artifact = self.make_artifact(root)
             known_hosts = root / "known_hosts"
-            known_hosts.write_text("sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8")
+            known_hosts.write_text(
+                "sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8"
+            )
             runner = self.make_runner(artifact)
             stale = PhysicalHelmRenderEvidence(
                 sha256="c" * 64,
@@ -583,12 +596,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     artifact=artifact,
                     render_evidence=stale,
                     run_id=self.run_id,
-                    owner=self.owner,
-                    reservation_id=self.reservation_id,
-                    allocation_id=self.allocation_id,
                     known_hosts=known_hosts,
-                    now=self.now,
                     runner=runner,
+                    authority_verifier=lambda: None,
                 )
 
         self.assertEqual([], runner.commands)
@@ -596,9 +606,10 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
     def test_staging_accepts_live_lease_verifier_without_calendar_query(self) -> None:
         verification_count = 0
 
-        def verify_reservation() -> None:
+        def verify_authority() -> None:
             nonlocal verification_count
             verification_count += 1
+            self.allocation_verifier(runner)()
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -608,7 +619,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                 root=root,
                 artifact=artifact,
                 runner=runner,
-                reservation_verifier=verify_reservation,
+                authority_verifier=verify_authority,
             )
 
         self.assertEqual(2, verification_count)
@@ -630,7 +641,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             root = Path(directory)
             artifact = self.make_artifact(root)
             known_hosts = root / "known_hosts"
-            known_hosts.write_text("sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8")
+            known_hosts.write_text(
+                "sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8"
+            )
             runner = self.make_runner(artifact)
             runner.allocation_id = "different-allocation"
 
@@ -640,12 +653,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     artifact=artifact,
                     render_evidence=self.render,
                     run_id=self.run_id,
-                    owner=self.owner,
-                    reservation_id=self.reservation_id,
-                    allocation_id=self.allocation_id,
                     known_hosts=known_hosts,
-                    now=self.now,
                     runner=runner,
+                    authority_verifier=self.allocation_verifier(runner),
                 )
 
         self.assertFalse(
@@ -657,7 +667,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             root = Path(directory)
             artifact = self.make_artifact(root)
             known_hosts = root / "known_hosts"
-            known_hosts.write_text("sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8")
+            known_hosts.write_text(
+                "sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8"
+            )
             runner = self.make_runner(artifact)
             runner.existing_replicas = 1
 
@@ -667,19 +679,15 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     artifact=artifact,
                     render_evidence=self.render,
                     run_id=self.run_id,
-                    owner=self.owner,
-                    reservation_id=self.reservation_id,
-                    allocation_id=self.allocation_id,
                     known_hosts=known_hosts,
-                    now=self.now,
                     runner=runner,
+                    authority_verifier=self.allocation_verifier(runner),
                 )
 
         remote_commands = [runner.remote(command) for command in runner.commands]
         self.assertFalse(
             any(
-                remote is not None
-                and remote[:3] == ("helm", "upgrade", "--install")
+                remote is not None and remote[:3] == ("helm", "upgrade", "--install")
                 for remote in remote_commands
             )
         )
@@ -689,7 +697,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             root = Path(directory)
             artifact = self.make_artifact(root)
             known_hosts = root / "known_hosts"
-            known_hosts.write_text("sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8")
+            known_hosts.write_text(
+                "sopnode-f2 ssh-ed25519 AAAATEST\n", encoding="utf-8"
+            )
             runner = self.make_runner(artifact)
             runner.remote_digest_match = False
 
@@ -699,24 +709,22 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     artifact=artifact,
                     render_evidence=self.render,
                     run_id=self.run_id,
-                    owner=self.owner,
-                    reservation_id=self.reservation_id,
-                    allocation_id=self.allocation_id,
                     known_hosts=known_hosts,
-                    now=self.now,
                     runner=runner,
+                    authority_verifier=self.allocation_verifier(runner),
                 )
 
         remote_commands = [runner.remote(command) for command in runner.commands]
         self.assertFalse(
             any(
-                remote is not None
-                and remote[:3] == ("helm", "upgrade", "--install")
+                remote is not None and remote[:3] == ("helm", "upgrade", "--install")
                 for remote in remote_commands
             )
         )
 
-    def test_authorized_start_rechecks_claim_and_staged_binding_before_scale_one(self) -> None:
+    def test_authorized_start_rechecks_claim_and_staged_binding_before_scale_one(
+        self,
+    ) -> None:
         run_id = self.run_id
         selection = R2LabSelection.build(
             slice_name="oulu_user",
@@ -751,10 +759,8 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                 slice_name="oulu_user",
                 staging=staging,
                 owner=self.owner,
-                reservation_id=self.reservation_id,
                 allocation_id=self.allocation_id,
                 known_hosts=known_hosts,
-                now=self.now,
                 run_root=run_root,
                 r2lab_runner=provider,
                 cluster_runner=cluster,
@@ -811,10 +817,8 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             stopped = execute_authorized_physical_gnb_stop(
                 staging=staging,
                 owner=self.owner,
-                reservation_id=self.reservation_id,
                 allocation_id=self.allocation_id,
                 known_hosts=known_hosts,
-                now=self.now,
                 runner=cluster,
                 sleeper=lambda _: None,
                 timeout_seconds=30,
@@ -826,10 +830,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         remotes = [cluster.remote(command) for command in cluster.commands]
         self.assertEqual(
             1,
-            sum(
-                remote is not None and "--replicas=0" in remote
-                for remote in remotes
-            ),
+            sum(remote is not None and "--replicas=0" in remote for remote in remotes),
         )
 
     def test_release_stops_bound_gnb_before_hardware_power_off(self) -> None:
@@ -898,10 +899,8 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                 runner=provider,
                 timeout_seconds=30,
                 owner=self.owner,
-                reservation_id=None,
                 allocation_id=None,
                 known_hosts=known_hosts,
-                now=self.now,
                 cluster_runner=cluster,
                 sleeper=lambda _: None,
             )
@@ -965,10 +964,8 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     slice_name="oulu_user",
                     staging=staging,
                     owner=self.owner,
-                    reservation_id=self.reservation_id,
                     allocation_id=self.allocation_id,
                     known_hosts=known_hosts,
-                    now=self.now,
                     run_root=run_root,
                     r2lab_runner=changing_provider,
                     cluster_runner=cluster,
@@ -978,7 +975,10 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
 
         cluster_remote = [cluster.remote(command) for command in cluster.commands]
         self.assertFalse(
-            any(remote is not None and "--replicas=1" in remote for remote in cluster_remote)
+            any(
+                remote is not None and "--replicas=1" in remote
+                for remote in cluster_remote
+            )
         )
 
 

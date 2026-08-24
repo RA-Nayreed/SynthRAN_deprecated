@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -329,11 +328,6 @@ def _add_physical_authority_arguments(parser: argparse.ArgumentParser) -> None:
         "--owner",
         default=os.environ.get("SYNTHRAN_OWNER"),
         help="expected SLICES/POS owner (or SYNTHRAN_OWNER)",
-    )
-    parser.add_argument(
-        "--reservation-id",
-        default=os.environ.get("SYNTHRAN_RESERVATION_ID"),
-        help="expected active reservation identifier",
     )
     parser.add_argument(
         "--allocation-id",
@@ -695,7 +689,7 @@ def _r2lab_selection(args: argparse.Namespace) -> R2LabSelection:
 
 def _require_physical_authority(
     args: argparse.Namespace, operation: str
-) -> tuple[str, str, str | None, str | None, Path]:
+) -> tuple[str, str, str | None, Path]:
     required = {
         "--slice or SYNTHRAN_R2LAB_SLICE": args.r2lab_slice,
         "--owner or SYNTHRAN_OWNER": args.owner,
@@ -709,7 +703,6 @@ def _require_physical_authority(
     return (
         args.r2lab_slice,
         args.owner,
-        args.reservation_id,
         args.allocation_id,
         Path(args.known_hosts),
     )
@@ -786,7 +779,6 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
             timeout_seconds=args.timeout,
             progress=sys.stdout,
             owner=args.owner,
-            reservation_id=args.reservation_id,
             allocation_id=args.allocation_id,
             known_hosts=(Path(args.known_hosts) if args.known_hosts else None),
         )
@@ -794,27 +786,16 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
         print(f"Sanitized manifest: {result.manifest_path}")
         return 0
     if args.r2lab_command == "foundation":
-        required = {
-            "--slice or SYNTHRAN_R2LAB_SLICE": args.r2lab_slice,
-            "--owner or SYNTHRAN_OWNER": args.owner,
-            "--reservation-id or SYNTHRAN_RESERVATION_ID": args.reservation_id,
-            "--allocation-id or SYNTHRAN_ALLOCATION_ID": args.allocation_id,
-            "--known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS": args.known_hosts,
-        }
-        missing = [name for name, value in required.items() if value is None]
-        if missing:
-            raise R2LabPhysicalFoundationError(
-                "R2Lab foundation requires " + ", ".join(missing)
-            )
+        slice_name, owner, allocation_id, known_hosts = _require_physical_authority(
+            args, "R2Lab foundation"
+        )
         result = execute_physical_foundation_acceptance(
             run_id=args.run_id,
             previous_run_id=args.previous_run_id,
-            slice_name=args.r2lab_slice,
-            owner=args.owner,
-            reservation_id=args.reservation_id,
-            allocation_id=args.allocation_id,
-            known_hosts=Path(args.known_hosts),
-            now=datetime.now(timezone.utc),
+            slice_name=slice_name,
+            owner=owner,
+            allocation_id=allocation_id,
+            known_hosts=known_hosts,
             run_root=args.run_root,
             timeout_seconds=args.timeout,
         )
@@ -828,17 +809,15 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
         )
         return 0
     if args.r2lab_command == "gnb-stage":
-        slice_name, owner, reservation_id, allocation_id, known_hosts = (
+        slice_name, owner, allocation_id, known_hosts = (
             _require_physical_authority(args, "physical gNB staging")
         )
         result = execute_physical_gnb_staging(
             run_id=args.run_id,
             slice_name=slice_name,
             owner=owner,
-            reservation_id=reservation_id,
             allocation_id=allocation_id,
             known_hosts=known_hosts,
-            now=datetime.now(timezone.utc),
             bindings=_physical_chart_bindings(args),
             lock_path=args.lock,
             deps_root=args.deps_root,
@@ -855,17 +834,15 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
         )
         return 0
     if args.r2lab_command == "gnb-start":
-        slice_name, owner, reservation_id, allocation_id, known_hosts = (
+        slice_name, owner, allocation_id, known_hosts = (
             _require_physical_authority(args, "physical gNB start")
         )
         result = execute_physical_gnb_n2_acceptance(
             run_id=args.run_id,
             slice_name=slice_name,
             owner=owner,
-            reservation_id=reservation_id,
             allocation_id=allocation_id,
             known_hosts=known_hosts,
-            now=datetime.now(timezone.utc),
             run_root=args.run_root,
             timeout_seconds=args.timeout,
             attempts=args.n2_attempts,

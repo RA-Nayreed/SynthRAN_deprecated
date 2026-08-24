@@ -9,30 +9,22 @@ R2Lab power state, and never starts or scales the physical gNB.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import json
 from pathlib import Path
-import re
 import shlex
 from typing import Callable, Sequence
 
-from synthran.live_preflight import (
-    CommandResult,
-    verify_allocations,
-    verify_reservation,
-)
+from synthran.live_preflight import CommandResult
 from synthran.network.runtime import validate_run_id
 from synthran.r2lab.deployment import (
     CORE_NODE,
     DEPLOYMENT_RUN_LABEL,
     GNB_SELECTOR,
     NAMESPACE,
-    RAN_NODE,
     RELEASE,
 )
 
 
-_SAFE_AUTHORITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 Runner = Callable[[Sequence[str], int], CommandResult]
 
 
@@ -57,7 +49,9 @@ class PhysicalNamespaceHandoffResult:
             "deployment_present": self.deployment_present,
             "desired_replicas": self.desired_replicas,
             "gnb_pod_count": self.gnb_pod_count,
-            "status": "namespace-handed-off" if self.changed else "namespace-already-owned",
+            "status": "namespace-handed-off"
+            if self.changed
+            else "namespace-already-owned",
             "hardware_mutation": False,
         }
 
@@ -69,12 +63,6 @@ def _validate_run(value: str, label: str) -> str:
         raise R2LabPhysicalHandoffError(f"{label}: {exc}") from exc
     if validated != value:
         raise R2LabPhysicalHandoffError(f"{label} is not canonical")
-    return value
-
-
-def _validate_authority(value: str, label: str) -> str:
-    if not _SAFE_AUTHORITY_RE.fullmatch(value):
-        raise R2LabPhysicalHandoffError(f"{label} contains unsafe characters")
     return value
 
 
@@ -116,24 +104,32 @@ def _parse_existing_deployment(
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise R2LabPhysicalHandoffError("existing physical gNB Deployment is not JSON") from exc
+        raise R2LabPhysicalHandoffError(
+            "existing physical gNB Deployment is not JSON"
+        ) from exc
     if not isinstance(payload, dict):
         raise R2LabPhysicalHandoffError("existing physical gNB Deployment is malformed")
     metadata = payload.get("metadata")
     spec = payload.get("spec")
     if not isinstance(metadata, dict) or not isinstance(spec, dict):
-        raise R2LabPhysicalHandoffError("existing physical gNB Deployment is incomplete")
+        raise R2LabPhysicalHandoffError(
+            "existing physical gNB Deployment is incomplete"
+        )
     labels = metadata.get("labels")
     desired = spec.get("replicas")
     if not isinstance(labels, dict):
-        raise R2LabPhysicalHandoffError("existing physical gNB Deployment ownership is missing")
+        raise R2LabPhysicalHandoffError(
+            "existing physical gNB Deployment ownership is missing"
+        )
     deployment_owner = labels.get(DEPLOYMENT_RUN_LABEL)
     if deployment_owner not in allowed_owners:
         raise R2LabPhysicalHandoffError(
             "existing physical gNB Deployment has an unexpected run owner"
         )
     if not isinstance(desired, int) or isinstance(desired, bool):
-        raise R2LabPhysicalHandoffError("existing physical gNB replica state is malformed")
+        raise R2LabPhysicalHandoffError(
+            "existing physical gNB replica state is malformed"
+        )
     if desired != 0:
         raise R2LabPhysicalHandoffError(
             "existing physical gNB is not stopped; ownership handoff requires replicas=0"
@@ -145,58 +141,24 @@ def _parse_pod_count(text: str) -> int:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise R2LabPhysicalHandoffError("physical gNB pod query did not return JSON") from exc
+        raise R2LabPhysicalHandoffError(
+            "physical gNB pod query did not return JSON"
+        ) from exc
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list):
-        raise R2LabPhysicalHandoffError("physical gNB pod query returned malformed JSON")
-    return len(items)
-
-
-def _verify_slices_authority(
-    *,
-    runner: Runner,
-    owner: str,
-    reservation_id: str,
-    allocation_id: str,
-    now: datetime,
-    timeout_seconds: int,
-    reservation_verifier: Callable[[], None] | None,
-    failure_message: str,
-) -> None:
-    try:
-        if reservation_verifier is None:
-            verify_reservation(
-                runner=runner,
-                reservation_id=reservation_id,
-                owner=owner,
-                nodes={CORE_NODE, RAN_NODE},
-                now=now,
-                timeout_seconds=min(timeout_seconds, 60),
-            )
-        else:
-            reservation_verifier()
-        verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
+        raise R2LabPhysicalHandoffError(
+            "physical gNB pod query returned malformed JSON"
         )
-    except Exception as exc:
-        raise R2LabPhysicalHandoffError(failure_message) from exc
+    return len(items)
 
 
 def execute_physical_namespace_handoff(
     *,
     from_run_id: str,
     to_run_id: str,
-    owner: str,
-    reservation_id: str,
-    allocation_id: str,
     known_hosts: Path,
-    now: datetime,
     runner: Runner,
-    reservation_verifier: Callable[[], None] | None = None,
+    authority_verifier: Callable[[], object],
     timeout_seconds: int = 120,
 ) -> PhysicalNamespaceHandoffResult:
     """Transfer only the Open5GS namespace owner after proving a stopped gNB.
@@ -209,28 +171,21 @@ def execute_physical_namespace_handoff(
     to_run_id = _validate_run(to_run_id, "new run ID")
     if from_run_id == to_run_id:
         raise R2LabPhysicalHandoffError("previous and new run IDs must differ")
-    owner = _validate_authority(owner, "owner")
-    reservation_id = _validate_authority(reservation_id, "reservation ID")
-    allocation_id = _validate_authority(allocation_id, "allocation ID")
-    if now.tzinfo is None:
-        raise R2LabPhysicalHandoffError("handoff time must be timezone-aware")
     if timeout_seconds < 30 or timeout_seconds > 600:
-        raise R2LabPhysicalHandoffError("handoff timeout must be between 30 and 600 seconds")
+        raise R2LabPhysicalHandoffError(
+            "handoff timeout must be between 30 and 600 seconds"
+        )
 
     known_hosts = known_hosts.expanduser().resolve()
     if not known_hosts.is_file():
         raise R2LabPhysicalHandoffError("strict SLICES known-hosts file is missing")
 
-    _verify_slices_authority(
-        runner=runner,
-        owner=owner,
-        reservation_id=reservation_id,
-        allocation_id=allocation_id,
-        now=now,
-        timeout_seconds=timeout_seconds,
-        reservation_verifier=reservation_verifier,
-        failure_message="fresh SLICES authority was not proven",
-    )
+    try:
+        authority_verifier()
+    except Exception as exc:
+        raise R2LabPhysicalHandoffError(
+            "fresh physical authority was not proven"
+        ) from exc
 
     namespace_owner = _checked(
         runner=runner,
@@ -308,18 +263,12 @@ def execute_physical_namespace_handoff(
             gnb_pod_count=pod_count,
         )
 
-    _verify_slices_authority(
-        runner=runner,
-        owner=owner,
-        reservation_id=reservation_id,
-        allocation_id=allocation_id,
-        now=now,
-        timeout_seconds=timeout_seconds,
-        reservation_verifier=reservation_verifier,
-        failure_message=(
-            "SLICES authority changed before namespace ownership handoff"
-        ),
-    )
+    try:
+        authority_verifier()
+    except Exception as exc:
+        raise R2LabPhysicalHandoffError(
+            "physical authority changed before namespace ownership handoff"
+        ) from exc
 
     if deployment_changed:
         _checked(

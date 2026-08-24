@@ -67,7 +67,7 @@ def _qfit_node(qfit: str) -> tuple[str, int]:
     value = qfit.strip().lower()
     try:
         node = reviewed_qfit_node_number(value)
-    except R2LabQfitStateError as exc:
+    except R2LabQfitStateError:
         raise R2LabQfitReadinessError("readiness requires one reviewed qfit resource")
     return value, node
 

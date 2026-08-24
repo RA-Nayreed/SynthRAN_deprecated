@@ -23,6 +23,7 @@ from typing import Callable, Mapping, Sequence, TextIO
 from synthran.live_preflight import CommandResult
 from synthran.network.runtime import validate_run_id
 from synthran.r2lab.acceptance import PhysicalRunEvidence, R2LabAcceptanceError
+from synthran.r2lab.authority import PhysicalAuthorityGuard
 from synthran.r2lab.deployment import (
     PhysicalGnbStartResult,
     PhysicalStagingResult,
@@ -1188,10 +1189,8 @@ def execute_physical_gnb_start(
     slice_name: str,
     staging: PhysicalStagingResult,
     owner: str,
-    reservation_id: str | None,
     allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     run_root: Path = Path(".synthran/r2lab"),
     r2lab_runner: Runner = subprocess_runner,
     cluster_runner: Runner = subprocess_runner,
@@ -1203,15 +1202,7 @@ def execute_physical_gnb_start(
     timeout_seconds = _validate_timeout(timeout_seconds)
     if timeout_seconds < 30:
         raise R2LabResourceError("physical gNB start timeout must be at least 30 seconds")
-    authority = authorize_physical_start(
-        run_id=run_id,
-        slice_name=slice_name,
-        run_root=run_root,
-        runner=r2lab_runner,
-        timeout_seconds=timeout_seconds,
-    )
-
-    def refresh() -> PhysicalStartAuthority:
+    def verify_r2lab_authority() -> PhysicalStartAuthority:
         return authorize_physical_start(
             run_id=run_id,
             slice_name=slice_name,
@@ -1221,16 +1212,19 @@ def execute_physical_gnb_start(
         )
 
     try:
-        return execute_authorized_physical_gnb_start(
-            authority=authority,
-            staging=staging,
+        guard = PhysicalAuthorityGuard.open(
+            lease_verifier=verify_r2lab_authority,
+            allocation_runner=cluster_runner,
             owner=owner,
-            reservation_id=reservation_id,
             allocation_id=allocation_id,
+            timeout_seconds=timeout_seconds,
+        )
+        return execute_authorized_physical_gnb_start(
+            authority=guard.expected,
+            staging=staging,
             known_hosts=known_hosts,
-            now=now,
             runner=cluster_runner,
-            refresh_r2lab_authority=refresh,
+            authority_verifier=guard.verify,
             sleeper=sleeper,
             timeout_seconds=timeout_seconds,
         )
@@ -1247,10 +1241,8 @@ def execute_release(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     progress: TextIO | None = None,
     owner: str | None = None,
-    reservation_id: str | None = None,
     allocation_id: str | None = None,
     known_hosts: Path | None = None,
-    now: datetime | None = None,
     cluster_runner: Runner = subprocess_runner,
     sleeper: Sleeper = time.sleep,
 ) -> R2LabResult:
@@ -1360,10 +1352,8 @@ def execute_release(
                 stopped = execute_authorized_physical_gnb_stop(
                     staging=staging,
                     owner=owner,
-                    reservation_id=reservation_id,
                     allocation_id=allocation_id,
                     known_hosts=known_hosts,
-                    now=now or _utc_now(),
                     runner=cluster_runner,
                     sleeper=sleeper,
                     timeout_seconds=max(timeout_seconds, 30),

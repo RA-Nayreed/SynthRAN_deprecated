@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
 import gzip
 import hashlib
 import ipaddress
@@ -22,13 +21,18 @@ import tarfile
 from typing import Callable, Mapping, Sequence
 
 from synthran.dependencies import DependencyLock
-from synthran.live_preflight import CommandResult, verify_allocations, verify_reservation
+from synthran.live_preflight import CommandResult
 from synthran.network.runtime import validate_run_id
+from synthran.r2lab.authority import (
+    CORE_NODE,
+    RADIO as CURRENT_RADIO,
+    RAN_NODE,
+    verify_physical_allocation,
+)
 # Reviewed topology / deployment contract.
 PHYSICAL_DEPLOYMENT_SCHEMA = "synthran/r2lab-physical-deployment/v1alpha1"
-CURRENT_CORE_NODE = "sopnode-f2"
-CURRENT_RAN_NODE = "sopnode-f3"
-CURRENT_RADIO = "n300"
+CURRENT_CORE_NODE = CORE_NODE
+CURRENT_RAN_NODE = RAN_NODE
 
 # Pinned chart contract.
 PINNED_FIVEG_ANSIBLE_COMMIT = "a0149fc0dde39e2872945a0f3c91e804ece52d4f"
@@ -44,8 +48,6 @@ PHYSICAL_GNB_CPU_COUNT = 8
 PHYSICAL_GNB_MEMORY = "4Gi"
 
 # Runtime Kubernetes contract.
-CORE_NODE = CURRENT_CORE_NODE
-RAN_NODE = CURRENT_RAN_NODE
 NAMESPACE = "open5gs"
 RELEASE = "srsran-gnb"
 GNB_NAMESPACE = NAMESPACE
@@ -274,10 +276,6 @@ class PhysicalChartBundle:
             "values": deepcopy(dict(self.values)),
             "review": deepcopy(dict(self.review)),
         }
-
-    def render_json(self) -> str:
-        return json.dumps(self.to_dict(), indent=2, sort_keys=True)
-
 
 def _locked_git_commit(lock: DependencyLock, name: str) -> str:
     git = lock.raw.get("git")
@@ -1566,24 +1564,15 @@ def execute_stopped_physical_staging(
     artifact: PhysicalChartArtifact,
     render_evidence: PhysicalHelmRenderEvidence,
     run_id: str,
-    owner: str,
-    reservation_id: str | None,
-    allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     runner: Runner,
-    reservation_verifier: Callable[[], None] | None = None,
+    authority_verifier: Callable[[], object],
     timeout_seconds: int = DEFAULT_STAGING_TIMEOUT_SECONDS,
 ) -> PhysicalStagingResult:
     try:
         run_id = validate_run_id(run_id)
     except Exception as exc:
         raise R2LabPhysicalStagingError(str(exc)) from exc
-    owner = _validate_authority(owner, "owner")
-    if reservation_id is not None:
-        reservation_id = _validate_authority(reservation_id, "reservation ID")
-    if allocation_id is not None:
-        allocation_id = _validate_authority(allocation_id, "allocation ID")
     if artifact.run_id != run_id:
         raise R2LabPhysicalStagingError("physical artifact run ID does not match staging run")
     if render_evidence.replicas != 0 or render_evidence.strategy != "Recreate":
@@ -1620,26 +1609,9 @@ def execute_stopped_physical_staging(
         raise R2LabPhysicalStagingError("physical chart values digest changed after review")
 
     try:
-        if reservation_verifier is None:
-            reservation_id = verify_reservation(
-                runner=runner,
-                reservation_id=reservation_id,
-                owner=owner,
-                nodes={CORE_NODE, RAN_NODE},
-                now=now,
-                timeout_seconds=min(timeout_seconds, 60),
-            )
-        else:
-            reservation_verifier()
-        allocation_id = verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
-        )
+        authority_verifier()
     except Exception as exc:
-        raise R2LabPhysicalStagingError("fresh SLICES authority was not proven") from exc
+        raise R2LabPhysicalStagingError("fresh physical authority was not proven") from exc
 
     remote_root = f"/root/.synthran/{run_id}/physical-chart"
     remote_package = f"{remote_root}/{artifact.package_path.name}"
@@ -1770,18 +1742,10 @@ def execute_stopped_physical_staging(
         )
 
     try:
-        if reservation_verifier is not None:
-            reservation_verifier()
-        verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
-        )
+        authority_verifier()
     except Exception as exc:
         raise R2LabPhysicalStagingError(
-            "SLICES authority changed before Helm staging"
+            "physical authority changed before Helm staging"
         ) from exc
 
     _checked(
@@ -2163,13 +2127,9 @@ def execute_authorized_physical_gnb_start(
     *,
     authority: PhysicalStartAuthority,
     staging: PhysicalStagingResult,
-    owner: str,
-    reservation_id: str | None,
-    allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     runner: Runner,
-    refresh_r2lab_authority: Callable[[], PhysicalStartAuthority],
+    authority_verifier: Callable[[], object],
     sleeper: Sleeper,
     timeout_seconds: int = DEFAULT_STAGING_TIMEOUT_SECONDS,
     shutdown_attempts: int = DEFAULT_POLL_ATTEMPTS,
@@ -2195,40 +2155,12 @@ def execute_authorized_physical_gnb_start(
     if timeout_seconds < 30 or timeout_seconds > 600:
         raise R2LabPhysicalStartError("physical start timeout must be between 30 and 600 seconds")
 
-    try:
-        owner = _validate_authority(owner, "owner")
-        if reservation_id is not None:
-            reservation_id = _validate_authority(reservation_id, "reservation ID")
-        if allocation_id is not None:
-            allocation_id = _validate_authority(allocation_id, "allocation ID")
-    except R2LabPhysicalStagingError as exc:
-        raise R2LabPhysicalStartError(str(exc)) from exc
     known_hosts = known_hosts.expanduser().resolve()
     if not known_hosts.is_file():
         raise R2LabPhysicalStartError("strict SLICES known-hosts file is missing")
 
-    def require_r2lab_authority() -> None:
-        refreshed = refresh_r2lab_authority().validate()
-        if (
-            refreshed.run_id != authority.run_id
-            or refreshed.radio != authority.radio
-            or refreshed.ue != authority.ue
-            or refreshed.ue_kind != authority.ue_kind
-            or refreshed.claim_sha256 != authority.claim_sha256
-        ):
-            raise R2LabPhysicalStartError(
-                "R2Lab claim or selected-resource authority changed"
-            )
-
     try:
-        require_r2lab_authority()
-        allocation_id = verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
-        )
+        authority_verifier()
     except Exception as exc:
         raise R2LabPhysicalStartError(
             "fresh physical authority was not proven for gNB start"
@@ -2298,18 +2230,11 @@ def execute_authorized_physical_gnb_start(
         return runner(_ssh(known_hosts, *tuple(command)), command_timeout)
 
     def before_start() -> None:
-        require_r2lab_authority()
         try:
-            verify_allocations(
-                runner=runner,
-                allocation_id=allocation_id,
-                owner=owner,
-                nodes={CORE_NODE, RAN_NODE},
-                timeout_seconds=min(timeout_seconds, 60),
-            )
+            authority_verifier()
         except Exception as exc:
             raise R2LabPhysicalStartError(
-                "SLICES allocation authority changed before gNB ownership start"
+                "physical authority changed before gNB ownership start"
             ) from exc
         require_bound_stopped_deployment()
 
@@ -2343,10 +2268,8 @@ def execute_authorized_physical_gnb_stop(
     *,
     staging: PhysicalStagingResult,
     owner: str,
-    reservation_id: str | None,
     allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     runner: Runner,
     sleeper: Sleeper,
     timeout_seconds: int = DEFAULT_STAGING_TIMEOUT_SECONDS,
@@ -2356,8 +2279,6 @@ def execute_authorized_physical_gnb_stop(
     """Stop only the artifact-bound gNB Deployment owned by one physical run."""
 
     staging = PhysicalStagingResult.from_dict(staging.to_dict())
-    if now.tzinfo is None:
-        raise R2LabPhysicalStartError("physical gNB stop time must be timezone-aware")
     if timeout_seconds < 30 or timeout_seconds > 600:
         raise R2LabPhysicalStartError(
             "physical gNB stop timeout must be between 30 and 600 seconds"
@@ -2366,8 +2287,6 @@ def execute_authorized_physical_gnb_stop(
         raise R2LabPhysicalStartError("physical gNB stop wait settings are invalid")
     try:
         owner = _validate_authority(owner, "owner")
-        if reservation_id is not None:
-            reservation_id = _validate_authority(reservation_id, "reservation ID")
         if allocation_id is not None:
             allocation_id = _validate_authority(allocation_id, "allocation ID")
     except R2LabPhysicalStagingError as exc:
@@ -2377,12 +2296,11 @@ def execute_authorized_physical_gnb_stop(
         raise R2LabPhysicalStartError("strict SLICES known-hosts file is missing")
 
     try:
-        allocation_id = verify_allocations(
+        allocation_id = verify_physical_allocation(
             runner=runner,
             allocation_id=allocation_id,
             owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
+            timeout_seconds=timeout_seconds,
         )
     except Exception as exc:
         raise R2LabPhysicalStartError(

@@ -82,7 +82,7 @@ from synthran.experiment.runtime import (
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.ingress import IngressSnapshot
 from synthran.iot import write_run_inputs
-from synthran.live_preflight import CommandResult, LivePreflightError, ssh_command
+from synthran.live_preflight import CommandResult, ssh_command
 from synthran.mqtt_collector import collect_mqtt
 from synthran.r2lab.controller import qfit_gateway_command
 from synthran.r2lab.ue import PhysicalWorkloadContext, PhysicalWorkloadResult

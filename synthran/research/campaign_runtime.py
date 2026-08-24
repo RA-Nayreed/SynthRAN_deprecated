@@ -152,7 +152,7 @@ class CampaignRuntimeSession:
         research_runtime._prove_pre_window_target = self._prove_pre_window_target
         return self
 
-    def __exit__(self, exc_type: Any, exc: BaseException | None, tb: Any) -> bool:
+    def __exit__(self, _exc_type: Any, exc: BaseException | None, _tb: Any) -> bool:
         if exc is not None:
             self.errors.append(f"campaign command exception: {exc}")
         try:

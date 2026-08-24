@@ -156,13 +156,6 @@ class ExperimentScenario:
     def sensor_topic(self) -> str:
         return f"{self.topic_root}/sensor/+"
 
-    @property
-    def exact_sensor_topics(self) -> tuple[str, ...]:
-        return tuple(
-            f"{self.topic_root}/sensor/sensor-{index:02d}"
-            for index in range(1, self.sensor_count + 1)
-        )
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": EXPERIMENT_SCHEMA,

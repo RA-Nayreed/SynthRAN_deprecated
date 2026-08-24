@@ -3,26 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 import json
 from pathlib import Path
 import shlex
 from typing import Mapping, Sequence
 
-from synthran.live_preflight import (
-    Runner,
-    subprocess_runner,
-    verify_allocations,
-)
+from synthran.live_preflight import Runner, subprocess_runner
 from synthran.r2lab.acceptance import (
     PhysicalAcceptanceStage,
     PhysicalRunEvidence,
     R2LabAcceptanceError,
 )
 from synthran.r2lab.controller import authorize_physical_start
+from synthran.r2lab.authority import PhysicalAuthorityGuard
 from synthran.r2lab.deployment import (
     CORE_NODE,
     NAMESPACE,
+    PhysicalStartAuthority,
     RAN_NODE,
 )
 from synthran.r2lab.handoff import (
@@ -120,7 +117,9 @@ def _ready_node_count(payload: Mapping[str, object]) -> int:
         name = metadata.get("name")
         conditions = status.get("conditions")
         if not isinstance(name, str) or not isinstance(conditions, list):
-            raise R2LabPhysicalFoundationError("Kubernetes node readiness is unavailable")
+            raise R2LabPhysicalFoundationError(
+                "Kubernetes node readiness is unavailable"
+            )
         if any(
             isinstance(condition, dict)
             and condition.get("type") == "Ready"
@@ -173,27 +172,6 @@ def _require_ready_open5gs_pod(
         )
 
 
-def _verify_slices_allocation(
-    *,
-    runner: Runner,
-    owner: str,
-    allocation_id: str,
-    timeout_seconds: int,
-) -> None:
-    try:
-        verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-    except Exception as exc:
-        raise R2LabPhysicalFoundationError(
-            "fresh SLICES allocation authority was not proven"
-        ) from exc
-
-
 def _foundation_evidence(run_id: str) -> PhysicalRunEvidence:
     evidence = PhysicalRunEvidence(run_id=run_id)
     for stage, source in (
@@ -212,10 +190,8 @@ def execute_physical_foundation_acceptance(
     previous_run_id: str,
     slice_name: str,
     owner: str,
-    reservation_id: str,
-    allocation_id: str,
+    allocation_id: str | None,
     known_hosts: Path,
-    now: datetime,
     run_root: Path = Path(".synthran/r2lab"),
     r2lab_runner: Runner = subprocess_runner,
     foundation_runner: Runner = subprocess_runner,
@@ -223,51 +199,33 @@ def execute_physical_foundation_acceptance(
 ) -> PhysicalFoundationResult:
     """Accept only a current, healthy, stopped physical foundation."""
 
-    if now.tzinfo is None:
-        raise R2LabPhysicalFoundationError("foundation time must be timezone-aware")
     if timeout_seconds < 30 or timeout_seconds > 600:
         raise R2LabPhysicalFoundationError(
             "foundation timeout must be between 30 and 600 seconds"
         )
     known_hosts = known_hosts.expanduser().resolve()
 
-    try:
-        initial_authority = authorize_physical_start(
+    def verify_r2lab_authority() -> PhysicalStartAuthority:
+        return authorize_physical_start(
             run_id=run_id,
             slice_name=slice_name,
             run_root=run_root,
             runner=r2lab_runner,
             timeout_seconds=timeout_seconds,
         )
+
+    try:
+        authority = PhysicalAuthorityGuard.open(
+            lease_verifier=verify_r2lab_authority,
+            allocation_runner=foundation_runner,
+            owner=owner,
+            allocation_id=allocation_id,
+            timeout_seconds=timeout_seconds,
+        )
     except RuntimeError as exc:
         raise R2LabPhysicalFoundationError(
-            "current R2Lab authority was not proven"
+            "current physical authority was not proven"
         ) from exc
-
-    def verify_r2lab_authority() -> None:
-        try:
-            refreshed = authorize_physical_start(
-                run_id=run_id,
-                slice_name=slice_name,
-                run_root=run_root,
-                runner=r2lab_runner,
-                timeout_seconds=timeout_seconds,
-            )
-        except RuntimeError as exc:
-            raise R2LabPhysicalFoundationError(
-                "current R2Lab authority was not proven"
-            ) from exc
-        if refreshed != initial_authority:
-            raise R2LabPhysicalFoundationError(
-                "R2Lab authority changed during foundation verification"
-            )
-
-    _verify_slices_allocation(
-        runner=foundation_runner,
-        owner=owner,
-        allocation_id=allocation_id,
-        timeout_seconds=timeout_seconds,
-    )
 
     ready_nodes = _ready_node_count(
         _json_object(
@@ -311,13 +269,9 @@ def execute_physical_foundation_acceptance(
         handoff = execute_physical_namespace_handoff(
             from_run_id=previous_run_id,
             to_run_id=run_id,
-            owner=owner,
-            reservation_id=reservation_id,
-            allocation_id=allocation_id,
             known_hosts=known_hosts,
-            now=now,
             runner=foundation_runner,
-            reservation_verifier=verify_r2lab_authority,
+            authority_verifier=authority.verify,
             timeout_seconds=timeout_seconds,
         )
     except R2LabPhysicalHandoffError as exc:
@@ -325,12 +279,12 @@ def execute_physical_foundation_acceptance(
             "physical namespace ownership was not proven"
         ) from exc
 
-    _verify_slices_allocation(
-        runner=foundation_runner,
-        owner=owner,
-        allocation_id=allocation_id,
-        timeout_seconds=timeout_seconds,
-    )
+    try:
+        authority.verify()
+    except RuntimeError as exc:
+        raise R2LabPhysicalFoundationError(
+            "physical authority changed during foundation verification"
+        ) from exc
     observed_owner = _checked(
         foundation_runner,
         _ssh(
@@ -350,7 +304,12 @@ def execute_physical_foundation_acceptance(
             "Open5GS namespace ownership changed during foundation verification"
         )
 
-    verify_r2lab_authority()
+    try:
+        authority.verify()
+    except RuntimeError as exc:
+        raise R2LabPhysicalFoundationError(
+            "physical authority changed during foundation verification"
+        ) from exc
 
     evidence_path = run_root.resolve() / run_id / "physical-run.json"
     try:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
 from pathlib import Path
@@ -41,14 +40,6 @@ from synthran.workspace.store import (
 
 REGISTRY_SCHEMA = 1
 RUN_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
-
-
-@dataclass(frozen=True)
-class ExperimentEntry:
-    experiment_id: str
-    created_at_utc: str
-    status: str
-    path: str
 
 
 class WorkspaceRegistry:
@@ -248,14 +239,6 @@ class WorkspaceRegistry:
             ).rowcount
         if updated != 1:
             raise WorkspaceError(f"experiment {experiment_id} is not indexed")
-
-    def list_experiments(self) -> tuple[ExperimentEntry, ...]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT experiment_id, created_at_utc, status, path "
-                "FROM experiments ORDER BY created_at_utc, experiment_id"
-            ).fetchall()
-        return tuple(ExperimentEntry(*map(str, row)) for row in rows)
 
     def issue_run_id(
         self,
