@@ -3,8 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from synthran.upstream_overlay import UpstreamOverlayError, _replace_once
+from synthran.upstream_overlay import (
+    UpstreamOverlayError,
+    _replace_once,
+    apply_network_overlay,
+)
 
 
 class UpstreamOverlayTests(unittest.TestCase):
@@ -34,6 +39,20 @@ class UpstreamOverlayTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(UpstreamOverlayError, "unable to read"):
                 _replace_once(Path(temporary), "missing.yml", "a", "b")
+
+    def test_physical_overlay_selects_only_the_reviewed_qfit(self) -> None:
+        with patch("synthran.upstream_overlay._replace_once") as replace:
+            apply_network_overlay(Path("worktree"), subscriber_name="qfit07")
+
+        replacements = [call.args[3] for call in replace.call_args_list]
+        self.assertIn(
+            "    {% for ue_name, ue in profile.ues.items() if ue_name == 'qfit07' %}",
+            replacements,
+        )
+
+    def test_overlay_rejects_an_unsafe_subscriber_name(self) -> None:
+        with self.assertRaisesRegex(UpstreamOverlayError, "subscriber name"):
+            apply_network_overlay(Path("worktree"), subscriber_name="qfit07;all")
 
 
 if __name__ == "__main__":

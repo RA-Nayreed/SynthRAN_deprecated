@@ -42,6 +42,7 @@ from synthran.r2lab.controller import (
     run_doctor as run_r2lab_doctor,
 )
 from synthran.r2lab.foundation import (
+    DEFAULT_FOUNDATION_TIMEOUT_SECONDS,
     R2LabPhysicalFoundationError,
     execute_physical_foundation_acceptance,
 )
@@ -407,12 +408,18 @@ def _parser() -> argparse.ArgumentParser:
 
     r2lab_foundation = r2lab_commands.add_parser(
         "foundation",
-        help="verify and bind the stopped SLICES and Open5GS foundation",
+        help="reconcile and bind the stopped SLICES and Open5GS foundation",
     )
     _add_physical_authority_arguments(r2lab_foundation)
     r2lab_foundation.add_argument("--run-id", required=True)
     r2lab_foundation.add_argument("--previous-run-id", required=True)
-    r2lab_foundation.add_argument("--timeout", type=int, default=120)
+    r2lab_foundation.add_argument(
+        "--lock", type=Path, default=Path("dependencies.lock.yml")
+    )
+    r2lab_foundation.add_argument("--deps-root", type=Path, default=Path(".deps"))
+    r2lab_foundation.add_argument(
+        "--timeout", type=int, default=DEFAULT_FOUNDATION_TIMEOUT_SECONDS
+    )
     r2lab_foundation.add_argument("--json", action="store_true")
     r2lab_foundation.add_argument(
         "--run-root",
@@ -797,7 +804,11 @@ def _dispatch_r2lab(args: argparse.Namespace) -> int:
             allocation_id=allocation_id,
             known_hosts=known_hosts,
             run_root=args.run_root,
+            lock_path=args.lock,
+            dependency_root=args.deps_root,
+            repository_root=repository_root(),
             timeout_seconds=args.timeout,
+            progress=sys.stdout,
         )
         print(
             json.dumps(result.to_dict(), indent=2, sort_keys=True)

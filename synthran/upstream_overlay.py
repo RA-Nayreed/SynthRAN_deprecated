@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 
 class UpstreamOverlayError(RuntimeError):
     """Raised when pinned upstream source no longer matches an expected anchor."""
+
+
+_SUBSCRIBER_RE = re.compile(r"^[a-z][a-z0-9]{1,31}$")
 
 
 def _replace_once(root: Path, relative: str, old: str, new: str) -> None:
@@ -30,8 +34,13 @@ def _replace_once(root: Path, relative: str, old: str, new: str) -> None:
         ) from exc
 
 
-def apply_network_overlay(worktree: Path) -> None:
+def apply_network_overlay(
+    worktree: Path, *, subscriber_name: str = "uesim01"
+) -> None:
     """Restrict the pinned upstream deployment to SynthRAN's accepted network path."""
+
+    if not _SUBSCRIBER_RE.fullmatch(subscriber_name):
+        raise UpstreamOverlayError("subscriber name is not safe for the pinned template")
 
     _replace_once(
         worktree,
@@ -49,7 +58,9 @@ def apply_network_overlay(worktree: Path) -> None:
         worktree,
         "roles/5g/open5gs/config/templates/generate-data-fiveg.py.j2",
         "    {% for ue_name, ue in profile.ues.items() %}",
-        "    {% for ue_name, ue in profile.ues.items() if ue_name == 'uesim01' %}",
+        "    {% for ue_name, ue in profile.ues.items() if ue_name == '"
+        + subscriber_name
+        + "' %}",
     )
     _replace_once(
         worktree,

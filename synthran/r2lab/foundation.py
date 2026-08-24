@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import shlex
-from typing import Mapping, Sequence
+import shutil
+import subprocess
+import tempfile
+from time import monotonic
+from typing import Mapping, Sequence, TextIO
 
-from synthran.live_preflight import Runner, subprocess_runner
+from synthran.ansible_streaming import parse_ansible_line, run_streaming_ansible_command
+from synthran.dependencies import load_lock
+from synthran.fiveg_ansible import validate_fiveg_checkout
+from synthran.live_preflight import CommandResult, Runner, subprocess_runner
+from synthran.network.resources import build_preparation_inventory
+from synthran.network.runtime import (
+    RunCommand,
+    atomic_json,
+    golden_path_image_variables,
+    run_command,
+    sanitize_deployment_text,
+    tree_sha256,
+    validate_run_id,
+)
 from synthran.r2lab.acceptance import (
     PhysicalAcceptanceStage,
     PhysicalRunEvidence,
@@ -27,13 +46,26 @@ from synthran.r2lab.handoff import (
     R2LabPhysicalHandoffError,
     execute_physical_namespace_handoff,
 )
+from synthran.upstream_overlay import UpstreamOverlayError, apply_network_overlay
 
 
 REQUIRED_OPEN5GS_NFS = frozenset({"amf", "smf", "upf"})
+DEFAULT_FOUNDATION_TIMEOUT_SECONDS = 1800
+OPEN5GS_FOUNDATION_SCHEMA = "synthran/r2lab-open5gs-foundation/v1alpha1"
+PHYSICAL_SUBSCRIBER = "qfit07"
+
+AuthorityVerifier = Callable[[], object]
 
 
 class R2LabPhysicalFoundationError(RuntimeError):
     """Raised when the reused physical foundation cannot be accepted safely."""
+
+
+@dataclass(frozen=True)
+class Open5gsFoundationResult:
+    run_id: str
+    manifest_path: Path
+    log_path: Path
 
 
 @dataclass(frozen=True)
@@ -43,6 +75,7 @@ class PhysicalFoundationResult:
     handoff: PhysicalNamespaceHandoffResult
     ready_node_count: int
     ready_open5gs_pod_count: int
+    open5gs_reconciled: bool
     evidence_path: Path
 
     def to_dict(self) -> dict[str, object]:
@@ -52,6 +85,7 @@ class PhysicalFoundationResult:
             "namespace_changed": self.handoff.changed,
             "ready_node_count": self.ready_node_count,
             "ready_open5gs_pod_count": self.ready_open5gs_pod_count,
+            "open5gs_reconciled": self.open5gs_reconciled,
             "next_stage": PhysicalAcceptanceStage.GNB_N2.value,
             "status": "foundation-ready",
             "hardware_mutation": False,
@@ -102,6 +136,314 @@ def _json_object(text: str, label: str) -> Mapping[str, object]:
     return payload
 
 
+def _locked_git_commit(lock, name: str) -> str:
+    dependency = next((item for item in lock.git if item.name == name), None)
+    if dependency is None:
+        raise R2LabPhysicalFoundationError(
+            f"dependency lock is missing {name}"
+        )
+    return dependency.commit
+
+
+def _write_exact(path: Path, content: str, label: str) -> None:
+    try:
+        if path.exists():
+            if path.read_text(encoding="utf-8") != content:
+                raise R2LabPhysicalFoundationError(
+                    f"existing {label} does not match the reviewed content"
+                )
+            return
+        path.write_text(content, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        raise R2LabPhysicalFoundationError(f"unable to write {label}") from exc
+
+
+def reconcile_open5gs_foundation(
+    *,
+    run_id: str,
+    known_hosts: Path,
+    authority_verifier: AuthorityVerifier,
+    lock_path: Path = Path("dependencies.lock.yml"),
+    dependency_root: Path = Path(".deps"),
+    run_root: Path = Path(".synthran/r2lab"),
+    repository_root: Path = Path("."),
+    runner: RunCommand = run_command,
+    timeout_seconds: int = DEFAULT_FOUNDATION_TIMEOUT_SECONDS,
+    progress: TextIO | None = None,
+) -> Open5gsFoundationResult:
+    """Reconcile only the pinned qfit07 Open5GS core on the owned cluster."""
+
+    validate_run_id(run_id)
+    if timeout_seconds < 60 or timeout_seconds > 3600:
+        raise R2LabPhysicalFoundationError(
+            "foundation timeout must be between 60 and 3600 seconds"
+        )
+    known_hosts = known_hosts.expanduser().resolve()
+    if not known_hosts.is_file():
+        raise R2LabPhysicalFoundationError("strict SLICES known-hosts file is missing")
+
+    repository_root = repository_root.resolve()
+    run_directory = run_root.resolve() / run_id
+    if not run_directory.is_dir():
+        raise R2LabPhysicalFoundationError("prepared R2Lab run directory is missing")
+    output_directory = run_directory / "open5gs-foundation"
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    try:
+        lock = load_lock(lock_path)
+        checkout = validate_fiveg_checkout(lock, dependency_root)
+    except Exception as exc:
+        raise R2LabPhysicalFoundationError(
+            "locked fiveg_ansible checkout is not ready"
+        ) from exc
+
+    overlay_source = repository_root / "deploy" / "ansible"
+    wrapper_source = overlay_source / "r2lab-open5gs-core.yml"
+    if not wrapper_source.is_file():
+        raise R2LabPhysicalFoundationError(
+            "physical Open5GS wrapper playbook is missing"
+        )
+
+    inventory_path = output_directory / "hosts-physical.ini"
+    inventory_text, _ = build_preparation_inventory(
+        core_node=CORE_NODE,
+        ran_node=RAN_NODE,
+        source=inventory_path,
+    )
+    inventory_text = inventory_text.replace('rru="rfsim"', 'rru="n300"', 1)
+    _write_exact(inventory_path, inventory_text, "physical inventory")
+
+    variables_path = output_directory / "locked-open5gs-images.json"
+    manifest_path = output_directory / "manifest.json"
+    log_path = output_directory / "open5gs-core.log"
+    fiveg_commit = _locked_git_commit(lock, "fiveg_ansible")
+    open5gs_commit = _locked_git_commit(lock, "open5gs_k8s")
+    overlay_sha256 = tree_sha256(overlay_source)
+    atomic_json(
+        variables_path,
+        {"synthran_images": golden_path_image_variables(lock)},
+    )
+
+    log_parts: list[str] = []
+
+    def report(message: str) -> None:
+        if progress is not None:
+            print(f"[synthran] {message}", file=progress, flush=True)
+
+    def persist(status: str, failure_stage: str | None = None) -> None:
+        payload: dict[str, object] = {
+            "schema": OPEN5GS_FOUNDATION_SCHEMA,
+            "run_id": run_id,
+            "status": status,
+            "core_node": CORE_NODE,
+            "ran_node": RAN_NODE,
+            "subscriber": PHYSICAL_SUBSCRIBER,
+            "dependencies": {
+                "fiveg_ansible": fiveg_commit,
+                "open5gs_k8s": open5gs_commit,
+            },
+            "overlay_sha256": overlay_sha256,
+            "hardware_mutation": False,
+        }
+        if failure_stage is not None:
+            payload["failure_stage"] = failure_stage
+        atomic_json(manifest_path, payload)
+        log_path.write_text(
+            sanitize_deployment_text(
+                "\n".join(log_parts),
+                (
+                    known_hosts,
+                    lock_path,
+                    dependency_root,
+                    repository_root,
+                    run_directory,
+                ),
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+    def stage(
+        name: str,
+        command: Sequence[str],
+        cwd: Path,
+        environment: Mapping[str, str] | None = None,
+        *,
+        streaming: bool = False,
+    ) -> CommandResult:
+        report(f"{name}: running...")
+        started = monotonic()
+        log_parts.append(f"=== {name} ===")
+        try:
+            if streaming and runner is run_command:
+                result = run_streaming_ansible_command(
+                    command,
+                    cwd,
+                    environment,
+                    timeout_seconds,
+                    report=report,
+                )
+            else:
+                result = runner(command, cwd, environment, timeout_seconds)
+                if streaming and progress is not None:
+                    for line in result.stdout.splitlines():
+                        message = parse_ansible_line(line)
+                        if message is not None:
+                            report(message)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            persist("failed", name)
+            report(f"{name}: FAILED")
+            raise R2LabPhysicalFoundationError(
+                f"Open5GS reconciliation stage {name} could not complete"
+            ) from exc
+        log_parts.extend((result.stdout, result.stderr))
+        if result.returncode != 0:
+            persist("failed", name)
+            report(f"{name}: FAILED")
+            raise R2LabPhysicalFoundationError(
+                f"Open5GS reconciliation stage {name} failed; see the sanitized log"
+            )
+        report(f"{name}: OK ({monotonic() - started:.1f}s)")
+        return result
+
+    environment = dict(os.environ)
+    collections = output_directory / "collections"
+    environment.update(
+        {
+            "ANSIBLE_COLLECTIONS_PATH": str(collections),
+            "ANSIBLE_HOST_KEY_CHECKING": "True",
+            "ANSIBLE_STDOUT_CALLBACK": "ansible.builtin.default",
+            "ANSIBLE_SSH_ARGS": (
+                "-o ControlMaster=auto -o ControlPersist=60s "
+                "-o StrictHostKeyChecking=yes "
+                f"-o UserKnownHostsFile={shlex.quote(str(known_hosts))} "
+                "-o GlobalKnownHostsFile=/dev/null"
+            ),
+            "ANSIBLE_NOCOLOR": "True",
+            "ANSIBLE_RETRY_FILES_ENABLED": "False",
+        }
+    )
+
+    persist("running")
+    with tempfile.TemporaryDirectory(
+        prefix="worktree-", dir=output_directory
+    ) as temporary:
+        worktree = Path(temporary) / "fiveg_ansible"
+        worktree_added = False
+        try:
+            stage(
+                "open5gs-worktree",
+                (
+                    "git",
+                    "-C",
+                    str(checkout),
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(worktree),
+                    fiveg_commit,
+                ),
+                repository_root,
+            )
+            worktree_added = True
+            proof = stage(
+                "open5gs-worktree-proof",
+                ("git", "rev-parse", "HEAD"),
+                worktree,
+            )
+            if proof.stdout.strip() != fiveg_commit:
+                persist("failed", "open5gs-worktree-proof")
+                raise R2LabPhysicalFoundationError(
+                    "isolated Open5GS worktree does not match the lock"
+                )
+
+            overlay_directory = worktree / ".synthran"
+            shutil.copytree(overlay_source, overlay_directory)
+            apply_network_overlay(
+                worktree,
+                subscriber_name=PHYSICAL_SUBSCRIBER,
+            )
+            environment["ANSIBLE_ROLES_PATH"] = str(worktree / "roles")
+
+            stage(
+                "open5gs-collections",
+                (
+                    "ansible-galaxy",
+                    "collection",
+                    "install",
+                    "-r",
+                    str(overlay_directory / "requirements.yml"),
+                    "-p",
+                    str(collections),
+                ),
+                worktree,
+                environment,
+            )
+            playbook = (
+                "ansible-playbook",
+                "-i",
+                str(inventory_path),
+                "-e",
+                "fiveg_profile=default",
+                "-e",
+                f"repo_branch={open5gs_commit}",
+                "-e",
+                f"synthran_run_id={run_id}",
+                "-e",
+                f"synthran_subscriber={PHYSICAL_SUBSCRIBER}",
+                "-e",
+                "deployment_option=open5gs",
+                "-e",
+                f"@{variables_path}",
+                str(overlay_directory / "r2lab-open5gs-core.yml"),
+            )
+            stage(
+                "open5gs-syntax",
+                (*playbook[:-1], "--syntax-check", playbook[-1]),
+                worktree,
+                environment,
+            )
+            authority_verifier()
+            stage(
+                "open5gs-reconcile",
+                playbook,
+                worktree,
+                environment,
+                streaming=True,
+            )
+            authority_verifier()
+        except UpstreamOverlayError as exc:
+            persist("failed", "open5gs-overlay")
+            raise R2LabPhysicalFoundationError(str(exc)) from exc
+        finally:
+            if worktree_added:
+                cleanup = runner(
+                    (
+                        "git",
+                        "-C",
+                        str(checkout),
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(worktree),
+                    ),
+                    repository_root,
+                    None,
+                    timeout_seconds,
+                )
+                if cleanup.returncode != 0:
+                    log_parts.extend(
+                        ("=== open5gs-worktree-cleanup ===", cleanup.stdout)
+                    )
+
+    persist("reconciled")
+    return Open5gsFoundationResult(
+        run_id=run_id,
+        manifest_path=manifest_path,
+        log_path=log_path,
+    )
+
+
 def _ready_node_count(payload: Mapping[str, object]) -> int:
     items = payload.get("items")
     if not isinstance(items, list):
@@ -135,14 +477,14 @@ def _ready_node_count(payload: Mapping[str, object]) -> int:
     return len(expected)
 
 
-def _require_ready_open5gs_pod(
+def _open5gs_pod_ready(
     payload: Mapping[str, object], network_function: str
-) -> None:
+) -> bool:
     items = payload.get("items")
-    if not isinstance(items, list) or len(items) != 1:
-        raise R2LabPhysicalFoundationError(
-            f"Open5GS {network_function.upper()} does not have exactly one pod"
-        )
+    if not isinstance(items, list):
+        raise R2LabPhysicalFoundationError("Open5GS pod evidence is malformed")
+    if len(items) != 1:
+        return False
     item = items[0]
     if not isinstance(item, dict):
         raise R2LabPhysicalFoundationError("Open5GS pod evidence is malformed")
@@ -158,7 +500,7 @@ def _require_ready_open5gs_pod(
     ):
         raise R2LabPhysicalFoundationError("Open5GS pod identity is inconsistent")
     containers = status.get("containerStatuses")
-    if (
+    return not (
         metadata.get("deletionTimestamp") is not None
         or not isinstance(containers, list)
         or not containers
@@ -166,10 +508,53 @@ def _require_ready_open5gs_pod(
             isinstance(container, dict) and container.get("ready") is True
             for container in containers
         )
-    ):
+    )
+
+
+def _require_ready_open5gs_pod(
+    payload: Mapping[str, object], network_function: str
+) -> None:
+    if _open5gs_pod_ready(payload, network_function):
+        return
+    items = payload.get("items")
+    if isinstance(items, list) and len(items) == 1:
         raise R2LabPhysicalFoundationError(
             f"Open5GS {network_function.upper()} pod is not Running and ready"
         )
+    raise R2LabPhysicalFoundationError(
+        f"Open5GS {network_function.upper()} does not have exactly one pod"
+    )
+
+
+def _open5gs_health(
+    *, runner: Runner, known_hosts: Path, timeout_seconds: int
+) -> tuple[str, ...]:
+    unhealthy: list[str] = []
+    for network_function in sorted(REQUIRED_OPEN5GS_NFS):
+        label = f"Open5GS {network_function.upper()} readiness query"
+        payload = _json_object(
+            _checked(
+                runner,
+                _ssh(
+                    known_hosts,
+                    "kubectl",
+                    "get",
+                    "pods",
+                    "-n",
+                    NAMESPACE,
+                    "-l",
+                    f"app=open5gs,nf={network_function}",
+                    "-o",
+                    "json",
+                ),
+                timeout_seconds=timeout_seconds,
+                label=label,
+            ),
+            label,
+        )
+        if not _open5gs_pod_ready(payload, network_function):
+            unhealthy.append(network_function)
+    return tuple(unhealthy)
 
 
 def _foundation_evidence(run_id: str) -> PhysicalRunEvidence:
@@ -193,17 +578,26 @@ def execute_physical_foundation_acceptance(
     allocation_id: str | None,
     known_hosts: Path,
     run_root: Path = Path(".synthran/r2lab"),
+    lock_path: Path = Path("dependencies.lock.yml"),
+    dependency_root: Path = Path(".deps"),
+    repository_root: Path = Path("."),
     r2lab_runner: Runner = subprocess_runner,
     foundation_runner: Runner = subprocess_runner,
-    timeout_seconds: int = 120,
+    reconciliation_runner: RunCommand = run_command,
+    core_reconciler: Callable[..., Open5gsFoundationResult] = (
+        reconcile_open5gs_foundation
+    ),
+    timeout_seconds: int = DEFAULT_FOUNDATION_TIMEOUT_SECONDS,
+    progress: TextIO | None = None,
 ) -> PhysicalFoundationResult:
-    """Accept only a current, healthy, stopped physical foundation."""
+    """Reconcile and accept one current, healthy, stopped physical foundation."""
 
-    if timeout_seconds < 30 or timeout_seconds > 600:
+    if timeout_seconds < 60 or timeout_seconds > 3600:
         raise R2LabPhysicalFoundationError(
-            "foundation timeout must be between 30 and 600 seconds"
+            "foundation timeout must be between 60 and 3600 seconds"
         )
     known_hosts = known_hosts.expanduser().resolve()
+    probe_timeout_seconds = min(timeout_seconds, 300)
 
     def verify_r2lab_authority() -> PhysicalStartAuthority:
         return authorize_physical_start(
@@ -211,7 +605,7 @@ def execute_physical_foundation_acceptance(
             slice_name=slice_name,
             run_root=run_root,
             runner=r2lab_runner,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=probe_timeout_seconds,
         )
 
     try:
@@ -220,7 +614,7 @@ def execute_physical_foundation_acceptance(
             allocation_runner=foundation_runner,
             owner=owner,
             allocation_id=allocation_id,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=probe_timeout_seconds,
             reclaim_conflicts=True,
         )
     except RuntimeError as exc:
@@ -233,38 +627,12 @@ def execute_physical_foundation_acceptance(
             _checked(
                 foundation_runner,
                 _ssh(known_hosts, "kubectl", "get", "nodes", "-o", "json"),
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=probe_timeout_seconds,
                 label="Kubernetes node readiness query",
             ),
             "Kubernetes node readiness query",
         )
     )
-    for network_function in sorted(REQUIRED_OPEN5GS_NFS):
-        label = f"Open5GS {network_function.upper()} readiness query"
-        _require_ready_open5gs_pod(
-            _json_object(
-                _checked(
-                    foundation_runner,
-                    _ssh(
-                        known_hosts,
-                        "kubectl",
-                        "get",
-                        "pods",
-                        "-n",
-                        NAMESPACE,
-                        "-l",
-                        f"app=open5gs,nf={network_function}",
-                        "-o",
-                        "json",
-                    ),
-                    timeout_seconds=timeout_seconds,
-                    label=label,
-                ),
-                label,
-            ),
-            network_function,
-        )
-    ready_open5gs_pods = len(REQUIRED_OPEN5GS_NFS)
 
     try:
         handoff = execute_physical_namespace_handoff(
@@ -273,12 +641,51 @@ def execute_physical_foundation_acceptance(
             known_hosts=known_hosts,
             runner=foundation_runner,
             authority_verifier=authority.verify,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=probe_timeout_seconds,
         )
     except R2LabPhysicalHandoffError as exc:
         raise R2LabPhysicalFoundationError(
             "physical namespace ownership was not proven"
         ) from exc
+
+    unhealthy_network_functions = _open5gs_health(
+        runner=foundation_runner,
+        known_hosts=known_hosts,
+        timeout_seconds=probe_timeout_seconds,
+    )
+    open5gs_reconciled = bool(unhealthy_network_functions)
+    if open5gs_reconciled:
+        try:
+            authority.verify()
+            core_reconciler(
+                run_id=run_id,
+                known_hosts=known_hosts,
+                authority_verifier=authority.verify,
+                lock_path=lock_path,
+                dependency_root=dependency_root,
+                run_root=run_root,
+                repository_root=repository_root,
+                runner=reconciliation_runner,
+                timeout_seconds=timeout_seconds,
+                progress=progress,
+            )
+            authority.verify()
+        except RuntimeError as exc:
+            raise R2LabPhysicalFoundationError(
+                "Open5GS foundation reconciliation failed"
+            ) from exc
+
+        remaining_unhealthy = _open5gs_health(
+            runner=foundation_runner,
+            known_hosts=known_hosts,
+            timeout_seconds=probe_timeout_seconds,
+        )
+        if remaining_unhealthy:
+            names = ", ".join(name.upper() for name in remaining_unhealthy)
+            raise R2LabPhysicalFoundationError(
+                f"Open5GS reconciliation left unhealthy network functions: {names}"
+            )
+    ready_open5gs_pods = len(REQUIRED_OPEN5GS_NFS)
 
     try:
         authority.verify()
@@ -297,7 +704,7 @@ def execute_physical_foundation_acceptance(
             "-o",
             "jsonpath={.metadata.labels.synthran\\.run/id}",
         ),
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=probe_timeout_seconds,
         label="Open5GS namespace ownership verification",
     ).strip()
     if observed_owner != run_id:
@@ -334,5 +741,6 @@ def execute_physical_foundation_acceptance(
         handoff=handoff,
         ready_node_count=ready_nodes,
         ready_open5gs_pod_count=ready_open5gs_pods,
+        open5gs_reconciled=open5gs_reconciled,
         evidence_path=evidence_path,
     )

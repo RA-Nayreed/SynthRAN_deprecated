@@ -26,7 +26,7 @@ from synthran.live_preflight import (
     LivePreflightError,
     verify_reservation,
 )
-from synthran.network_runtime import (
+from synthran.network.runtime import (
     RunCommand,
     atomic_json,
     run_command,

@@ -121,6 +121,9 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual("foundation", args.r2lab_command)
         self.assertEqual(Path("known_hosts"), args.known_hosts)
+        self.assertEqual(Path("dependencies.lock.yml"), args.lock)
+        self.assertEqual(Path(".deps"), args.deps_root)
+        self.assertEqual(1800, args.timeout)
 
     def test_parser_contains_stopped_gnb_and_n2_commands(self) -> None:
         stage = _parser().parse_args(
