@@ -126,10 +126,15 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                 '          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"\n',
                 encoding="utf-8",
             )
+            locked_helm = root / "tools" / "helm"
+            locked_helm.parent.mkdir()
+            locked_helm.write_bytes(b"locked Helm fixture")
+            locked_helm.chmod(0o755)
 
             def staged(**kwargs) -> PhysicalStagingResult:
                 artifact = kwargs["artifact"]
                 authority_verifier = kwargs["authority_verifier"]
+                self.assertEqual(locked_helm, kwargs["helm_executable"])
                 self.assertTrue(callable(authority_verifier))
                 authority_verifier()
                 return PhysicalStagingResult(
@@ -148,6 +153,10 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
                     return_value=Mock(verify=Mock()),
                 ),
                 patch("synthran.r2lab.gnb._verify_checkout"),
+                patch(
+                    "synthran.r2lab.gnb.materialize_locked_helm",
+                    return_value=locked_helm,
+                ),
                 patch(
                     "synthran.r2lab.gnb.render_physical_chart_offline",
                     return_value=("rendered\n", render),

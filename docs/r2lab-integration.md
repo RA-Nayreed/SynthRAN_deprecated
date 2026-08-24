@@ -186,9 +186,11 @@ python -m synthran deps sync \
 
 The gNB command boundary reuses the network bindings from the currently stopped
 physical Helm release, renders the pinned chart in an isolated workspace, checks
-the locked Helm version, packages deterministic artifacts, and stages the exact
-Deployment at zero replicas. Explicit network bindings remain available as an
-all-or-none override when no stopped release exists.
+the checksum-locked Helm archive, materializes its executable below the current
+run directory, transfers that exact executable with the reviewed artifacts, and
+stages the exact Deployment at zero replicas. System Helm installations are not
+used for rendering or mutation. Explicit network bindings remain available as
+an all-or-none override when no stopped release exists.
 
 ```text
 python -m synthran r2lab gnb-stage \

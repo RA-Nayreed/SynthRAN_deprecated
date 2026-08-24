@@ -14,11 +14,15 @@ import gzip
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
+import platform
 import re
 import shlex
 import tarfile
+import tempfile
 from typing import Callable, Mapping, Sequence
+import urllib.request
 
 from synthran.dependencies import DependencyLock
 from synthran.live_preflight import CommandResult
@@ -64,6 +68,8 @@ DEFAULT_POLL_ATTEMPTS = 40
 DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 DEFAULT_UHD_RELEASE_SECONDS = 20.0
 DEFAULT_STAGING_TIMEOUT_SECONDS = 120
+MAX_LOCKED_HELM_ARCHIVE_BYTES = 64 * 1024 * 1024
+LOCKED_HELM_ARCHIVE_MEMBER = "linux-amd64/helm"
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _SAFE_AUTHORITY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -701,13 +707,167 @@ class _PinnedRadioValues:
         )
 
 
-def _locked_helm_version(lock: DependencyLock, error_type: type[RuntimeError]) -> str:
+def _locked_helm_metadata(
+    lock: DependencyLock, error_type: type[RuntimeError]
+) -> tuple[str, str, str]:
     tools = lock.raw.get("tools")
     entry = tools.get("helm_linux_amd64") if isinstance(tools, dict) else None
     version = entry.get("version") if isinstance(entry, dict) else None
-    if not isinstance(version, str) or not version:
-        raise error_type("dependency lock does not define the Helm version")
-    return version
+    url = entry.get("url") if isinstance(entry, dict) else None
+    digest = entry.get("sha256") if isinstance(entry, dict) else None
+    if (
+        not isinstance(version, str)
+        or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", version)
+        or not isinstance(url, str)
+        or not url.startswith("https://")
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+    ):
+        raise error_type("dependency lock does not define a complete Helm tool")
+    return version, url, digest.removeprefix("sha256:")
+
+
+def _locked_helm_version(lock: DependencyLock, error_type: type[RuntimeError]) -> str:
+    return _locked_helm_metadata(lock, error_type)[0]
+
+
+def _locked_tool_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def materialize_locked_helm(
+    *,
+    lock: DependencyLock,
+    destination: Path,
+    timeout_seconds: int = 60,
+) -> Path:
+    """Materialize the checksum-locked Linux AMD64 Helm without system install."""
+
+    if timeout_seconds < 5 or timeout_seconds > 300:
+        raise R2LabPhysicalHelmError(
+            "locked Helm download timeout must be between 5 and 300 seconds"
+        )
+    if platform.system() != "Linux" or platform.machine().lower() not in {
+        "amd64",
+        "x86_64",
+    }:
+        raise R2LabPhysicalHelmError(
+            "locked Helm executable supports only Linux AMD64 controllers"
+        )
+    version, url, expected_archive_sha256 = _locked_helm_metadata(
+        lock, R2LabPhysicalHelmError
+    )
+    try:
+        destination = destination.expanduser().resolve()
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise R2LabPhysicalHelmError(
+            "locked Helm directory could not be prepared"
+        ) from exc
+
+    archive = destination / f"helm-v{version}-linux-amd64.tar.gz"
+    if archive.exists():
+        if not archive.is_file() or archive.is_symlink():
+            raise R2LabPhysicalHelmError("locked Helm archive path is unsafe")
+        try:
+            observed_archive_sha256 = _locked_tool_sha256(archive)
+        except OSError as exc:
+            raise R2LabPhysicalHelmError(
+                "locked Helm archive could not be inspected"
+            ) from exc
+        if observed_archive_sha256 != expected_archive_sha256:
+            raise R2LabPhysicalHelmError(
+                "existing locked Helm archive does not match the dependency lock"
+            )
+    else:
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=".helm-download-",
+                dir=destination,
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+                    total = 0
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_LOCKED_HELM_ARCHIVE_BYTES:
+                            raise R2LabPhysicalHelmError(
+                                "locked Helm archive exceeds the reviewed size limit"
+                            )
+                        temporary.write(chunk)
+            if _locked_tool_sha256(temporary_path) != expected_archive_sha256:
+                raise R2LabPhysicalHelmError(
+                    "downloaded Helm archive does not match the dependency lock"
+                )
+            temporary_path.replace(archive)
+            temporary_path = None
+        except R2LabPhysicalHelmError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise R2LabPhysicalHelmError(
+                "locked Helm archive could not be downloaded"
+            ) from exc
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    executable = destination / "helm"
+    temporary_executable: Path | None = None
+    try:
+        with tarfile.open(archive, mode="r:gz") as bundle:
+            member = bundle.getmember(LOCKED_HELM_ARCHIVE_MEMBER)
+            if (
+                not member.isfile()
+                or member.size <= 0
+                or member.size > MAX_LOCKED_HELM_ARCHIVE_BYTES
+            ):
+                raise R2LabPhysicalHelmError(
+                    "locked Helm archive member is malformed"
+                )
+            source = bundle.extractfile(member)
+            if source is None:
+                raise R2LabPhysicalHelmError(
+                    "locked Helm executable is unavailable in the archive"
+                )
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=".helm-extract-",
+                dir=destination,
+                delete=False,
+            ) as temporary:
+                temporary_executable = Path(temporary.name)
+                remaining = member.size
+                while remaining:
+                    chunk = source.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise R2LabPhysicalHelmError(
+                            "locked Helm executable is truncated"
+                        )
+                    temporary.write(chunk)
+                    remaining -= len(chunk)
+        os.chmod(temporary_executable, 0o755)
+        temporary_executable.replace(executable)
+        temporary_executable = None
+    except R2LabPhysicalHelmError:
+        raise
+    except (KeyError, OSError, tarfile.TarError) as exc:
+        raise R2LabPhysicalHelmError(
+            "locked Helm executable could not be materialized"
+        ) from exc
+    finally:
+        if temporary_executable is not None:
+            temporary_executable.unlink(missing_ok=True)
+    return executable
 
 
 def _expected_image(bundle: PhysicalChartBundle) -> str:
@@ -900,13 +1060,15 @@ def render_physical_chart_offline(
     bundle: PhysicalChartBundle,
     workspace: PhysicalChartWorkspace,
     runner: Runner,
+    helm_executable: str | Path = "helm",
     timeout_seconds: int = 60,
 ) -> tuple[str, PhysicalHelmRenderEvidence]:
     if timeout_seconds < 1 or timeout_seconds > 300:
         raise R2LabPhysicalHelmError("offline Helm timeout must be between 1 and 300 seconds")
     expected_version = _locked_helm_version(lock, R2LabPhysicalHelmError)
+    helm_command = str(helm_executable)
     try:
-        version_result = runner(("helm", "version", "--short"), timeout_seconds)
+        version_result = runner((helm_command, "version", "--short"), timeout_seconds)
     except Exception as exc:
         raise R2LabPhysicalHelmError("locked Helm executable could not be inspected") from exc
     if version_result.returncode != 0:
@@ -917,7 +1079,7 @@ def render_physical_chart_offline(
             f"Helm must exactly match locked version {expected_version}"
         )
     command = (
-        "helm",
+        helm_command,
         "template",
         RELEASE,
         str(workspace.chart_root),
@@ -1562,6 +1724,7 @@ def execute_stopped_physical_staging(
     lock: DependencyLock,
     artifact: PhysicalChartArtifact,
     render_evidence: PhysicalHelmRenderEvidence,
+    helm_executable: Path,
     run_id: str,
     known_hosts: Path,
     runner: Runner,
@@ -1595,6 +1758,15 @@ def execute_stopped_physical_staging(
         or not artifact.values_path.is_file()
     ):
         raise R2LabPhysicalStagingError("physical artifact files are missing")
+    helm_executable = helm_executable.expanduser().resolve()
+    if (
+        not helm_executable.is_file()
+        or helm_executable.is_symlink()
+        or not os.access(helm_executable, os.X_OK)
+    ):
+        raise R2LabPhysicalStagingError(
+            "locked Helm executable is missing or unsafe"
+        )
     if _staging_sha256_file(artifact.package_path) != artifact.package_sha256:
         raise R2LabPhysicalStagingError("physical chart package digest changed after review")
     if (
@@ -1616,6 +1788,8 @@ def execute_stopped_physical_staging(
     remote_package = f"{remote_root}/{artifact.package_path.name}"
     remote_source_values = f"{remote_root}/{artifact.source_values_path.name}"
     remote_values = f"{remote_root}/{artifact.values_path.name}"
+    remote_helm = f"{remote_root}/helm"
+    helm_sha256 = _staging_sha256_file(helm_executable)
     _checked(
         runner,
         _ssh(known_hosts, "mkdir", "-p", remote_root),
@@ -1629,6 +1803,7 @@ def execute_stopped_physical_staging(
             str(artifact.package_path),
             str(artifact.source_values_path),
             str(artifact.values_path),
+            str(helm_executable),
             f"root@{CORE_NODE}:{remote_root}/",
         ),
         timeout_seconds,
@@ -1642,6 +1817,7 @@ def execute_stopped_physical_staging(
             remote_package,
             remote_source_values,
             remote_values,
+            remote_helm,
         ),
         min(timeout_seconds, 60),
         "remote physical artifact digest verification",
@@ -1650,14 +1826,21 @@ def execute_stopped_physical_staging(
         artifact.package_sha256 not in hashes
         or artifact.source_values_sha256 not in hashes
         or artifact.values_sha256 not in hashes
+        or helm_sha256 not in hashes
     ):
         raise R2LabPhysicalStagingError(
             "remote physical artifact digests do not match review"
         )
 
+    _checked(
+        runner,
+        _ssh(known_hosts, "chmod", "0755", remote_helm),
+        min(timeout_seconds, 60),
+        "remote locked Helm permission preparation",
+    )
     helm_version = _checked(
         runner,
-        _ssh(known_hosts, "helm", "version", "--short"),
+        _ssh(known_hosts, remote_helm, "version", "--short"),
         min(timeout_seconds, 60),
         "remote Helm version probe",
     ).stdout
@@ -1751,7 +1934,7 @@ def execute_stopped_physical_staging(
         runner,
         _ssh(
             known_hosts,
-            "helm",
+            remote_helm,
             "upgrade",
             "--install",
             RELEASE,
