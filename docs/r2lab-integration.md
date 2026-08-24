@@ -51,7 +51,7 @@ n2.py           N2 evidence parsing
 runtime.py      read-only gNB, qfit, and user-plane observation
 ue.py           MBIM activation, rollback, and workload handoff
 handoff.py      external authority handoff
-foundation.py   SLICES, Kubernetes, and Open5GS acceptance proof
+foundation.py   SLICES, Kubernetes, and pinned Open5GS reconciliation/proof
 ```
 
 The CLI and tests import this package directly. There is no duplicate R2Lab
@@ -128,15 +128,25 @@ refresh current authority and reprove the physical path.
 
 After `r2lab prepare` has made the selected N300 and qfit ready, the physical
 foundation command verifies both authority domains, both selected Kubernetes
-nodes, exactly one ready AMF, SMF, and UPF pod, a stopped physical gNB, and the
-Open5GS namespace owner. If the allocation identifier is omitted and another
+nodes, a stopped physical gNB, and the Open5GS namespace owner. If the
+allocation identifier is omitted and another
 operator still holds either selected node, one active owner reservation covering
 both nodes authorizes exact forced releases and one shared replacement allocation.
 The command binds every allocation mutation to the same live reservation and
 unchanged R2Lab claim, then proves the new allocation before continuing. An
-explicit allocation identifier never permits reclamation. Health checks happen
-before the exact, retry-safe namespace ownership handoff from the previous run to
-the current run.
+explicit allocation identifier never permits reclamation.
+
+After the exact, retry-safe namespace handoff, the command requires exactly one
+ready AMF, SMF, and UPF pod. A missing or unready network function triggers one
+guarded reconciliation of the pinned `fiveg_ansible` Open5GS roles. That wrapper
+uses the default R2Lab profile for `qfit07`, the locked Open5GS source commit,
+digest-addressed images, the existing f2/f3 Kubernetes cluster, and the current
+run-owned namespace. It does not execute OAI, srsRAN, N300, qfit power, POS, or
+reservation roles. It removes only the pinned deferred `smf2` and `upf2`
+objects before reconciling the selected `smf1` and `upf1`. Current R2Lab and
+SLICES authority is refreshed immediately before and after the core mutation,
+and all three selected core functions are observed again before acceptance
+evidence is written.
 
 ```text
 python -m synthran r2lab foundation \
@@ -144,14 +154,14 @@ python -m synthran r2lab foundation \
   --run-id "$R2LAB_RUN" \
   --previous-run-id "$PREVIOUS_R2LAB_RUN" \
   --owner "$SYNTHRAN_OWNER" \
-  --allocation-id "$SYNTHRAN_ALLOCATION_ID" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 ```
 
 Success writes `physical-run.json` beside the R2Lab run manifest and advances
-the immutable acceptance record through Open5GS. The next stage is then gNB/N2.
-Unknown, unready, multiply owned, or inconsistent state fails without creating
-acceptance evidence.
+the immutable acceptance record through Open5GS. When reconciliation was needed,
+its sanitized manifest and log are written below `open5gs-foundation/`. The next
+stage is then gNB/N2. Unknown, malformed, foreign-owned, or still-unhealthy state
+fails without creating acceptance evidence.
 
 ## Stopped gNB staging and N2 proof
 

@@ -1,0 +1,139 @@
+---
+- name: Validate the physical Open5GS boundary
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Require the reviewed R2Lab core inputs
+      ansible.builtin.assert:
+        that:
+          - core == "open5gs"
+          - ran == "srsRAN"
+          - core_node_name == "sopnode-f2"
+          - ran_node_name == "sopnode-f3"
+          - rru == "n300"
+          - synthran_subscriber == "qfit07"
+          - not monitoring_enabled | bool
+          - synthran_run_id is match("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+        fail_msg: "unsupported physical Open5GS inputs"
+
+- name: Reconcile the locked Open5GS core
+  hosts: core_node
+  gather_facts: true
+  vars:
+    ansible_python_interpreter: /opt/synthran-venv/bin/python
+    synthran_golden_path_guard: true
+    repo_dest: "{{ ansible_env.HOME }}/.synthran/{{ synthran_run_id }}/open5gs-k8s"
+    open5gs_root: "{{ repo_dest }}/open5gs"
+  pre_tasks:
+    - name: Load the reviewed 5G profile
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../group_vars/all/5g_profile_default.yaml"
+      no_log: true
+
+    - name: Pin the upstream DNS helper inside the isolated worktree
+      ansible.builtin.replace:
+        path: "{{ playbook_dir }}/../roles/5g/open5gs/deploy/tasks/main.yml"
+        regexp: "busybox:1\\.36"
+        replace: "{{ synthran_images.busybox_1_36 }}"
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+
+    - name: Verify current Open5GS namespace ownership
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: open5gs
+      register: synthran_open5gs_namespace
+
+    - name: Require the current run to own Open5GS
+      ansible.builtin.assert:
+        that:
+          - synthran_open5gs_namespace.resources | length == 1
+          - synthran_open5gs_namespace.resources[0].metadata.labels['synthran.run/id'] == synthran_run_id
+        fail_msg: "Open5GS namespace is not owned by the current run"
+
+  tasks:
+    - name: Remove the deferred second slice
+      kubernetes.core.k8s:
+        api_version: "{{ item.api_version }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+        namespace: open5gs
+        state: absent
+      loop:
+        - api_version: apps/v1
+          kind: Deployment
+          name: open5gs-smf2
+        - api_version: apps/v1
+          kind: Deployment
+          name: open5gs-upf2
+        - api_version: v1
+          kind: Service
+          name: smf2-nsmf
+        - api_version: v1
+          kind: ConfigMap
+          name: smf2-configmap
+        - api_version: v1
+          kind: ConfigMap
+          name: upf2-configmap
+
+    - name: Prepare the locked Open5GS checkout and profile
+      ansible.builtin.include_role:
+        name: 5g/open5gs/config
+        apply:
+          no_log: true
+
+    - name: Apply SynthRAN Open5GS image pins
+      ansible.builtin.include_tasks: tasks/pin-open5gs-images.yml
+
+    - name: Deploy Open5GS from the locked checkout
+      ansible.builtin.include_role:
+        name: 5g/open5gs/deploy
+        apply:
+          no_log: true
+
+    - name: Wait for the selected Open5GS network functions
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: open5gs
+        label_selectors: "{{ item.selectors }}"
+      register: synthran_open5gs_pods
+      until: >-
+        synthran_open5gs_pods.resources | length == 1 and
+        synthran_open5gs_pods.resources[0].status.containerStatuses is defined and
+        synthran_open5gs_pods.resources[0].status.containerStatuses | length > 0 and
+        synthran_open5gs_pods.resources[0].status.containerStatuses
+        | map(attribute='ready') | min
+      retries: 60
+      delay: 5
+      loop:
+        - selectors:
+            - app=open5gs
+            - nf=amf
+        - selectors:
+            - app=open5gs
+            - nf=smf
+            - name=smf1
+        - selectors:
+            - app=open5gs
+            - nf=upf
+            - name=upf1
+
+    - name: Preserve current ownership on Open5GS resources
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - label
+          - --namespace
+          - open5gs
+          - --overwrite
+          - deployment,statefulset,daemonset,pod,service,configmap,secret,job,cronjob,persistentvolumeclaim
+          - --all
+          - "synthran.run/id={{ synthran_run_id }}"
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      changed_when: true
