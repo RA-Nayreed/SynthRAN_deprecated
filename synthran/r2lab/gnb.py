@@ -54,9 +54,6 @@ class R2LabPhysicalGnbError(RuntimeError):
     """Raised when public physical gNB composition cannot proceed safely."""
 
 
-DEFAULT_N2_STABILITY_OBSERVATIONS = 6
-
-
 @dataclass(frozen=True)
 class PhysicalGnbStagingSummary:
     run_id: str
@@ -520,10 +517,7 @@ def execute_physical_gnb_n2_acceptance(
             evidence_path=evidence_path,
             timeout_seconds=min(timeout_seconds, 60),
             attempts=attempts,
-            required_consecutive_proofs=min(
-                DEFAULT_N2_STABILITY_OBSERVATIONS,
-                attempts,
-            ),
+            required_consecutive_proofs=attempts,
             poll_interval_seconds=poll_interval_seconds,
         )
         _write_json(observation_path, verification.gnb_n2.to_dict())
