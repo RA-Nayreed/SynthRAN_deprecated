@@ -181,7 +181,19 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
                 run_root=Path(directory) / "runs",
                 foundation_runner=runner,
             )
-        self.assertEqual(2, authorize.call_count)
+        self.assertGreaterEqual(authorize.call_count, 3)
+        self.assertFalse(
+            any(
+                command[:3] == ("pos", "calendar", "list")
+                for command in runner.commands
+            )
+        )
+        self.assertTrue(
+            any(
+                command[:3] == ("pos", "allocations", "show")
+                for command in runner.commands
+            )
+        )
         return result
 
     def test_foundation_binds_four_ordered_stages_after_live_proof(self) -> None:
