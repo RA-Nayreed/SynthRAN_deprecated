@@ -231,12 +231,13 @@ class R2LabPhysicalChartTests(unittest.TestCase):
                 ru_subnet="192.0.2.0/24",
             ).validate()
 
-    def test_stopped_release_network_bindings_are_discovered_read_only(self) -> None:
+    def test_stopped_release_network_bindings_ignore_legacy_placement(self) -> None:
         values = build_physical_chart_bundle(
             lock=self.lock,
             plan=self.plan,
             bindings=self.bindings,
         ).to_dict()["values"]
+        values["nodeName"] = "sopnode-f2"
         values["gnbConfig"]["ru_sdr"] = {
             "device_args": "addr=192.0.2.103,product=n300",
         }
@@ -256,6 +257,7 @@ class R2LabPhysicalChartTests(unittest.TestCase):
             )
 
         self.assertEqual(self.bindings, discovered)
+        self.assertEqual("sopnode-f3", discovered.node_name)
 
     def test_template_overlay_installs_singleton_digest_contract(self) -> None:
         overlaid = overlay_pinned_deployment_template(
