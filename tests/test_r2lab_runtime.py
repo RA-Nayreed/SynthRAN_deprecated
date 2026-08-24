@@ -145,7 +145,7 @@ class RuntimeR2LabRunner:
         if qfit[:2] == ("python3", "-c") and qfit[-1] == "AT+QNWINFO":
             return CommandResult(
                 0,
-                '+QNWINFO: "NR5G-SA","00101","NR5G BAND 78",621312\n',
+                '+QNWINFO: "NR5G-SA","00101","NR5G BAND 78",640000\n',
                 "",
             )
         if qfit[:2] == ("python3", "-c") and qfit[-1] == "AT+C5GREG?":
@@ -177,11 +177,13 @@ class RuntimeClusterRunner:
         render: str = RENDER,
         gnb_log: str = "NGAP: AMF connection established\n",
         amf_log: str = f"[amf] INFO: gNB-N2 accepted[{TEST_GNB_PEER}]:58612\n",
+        gnb_ready: bool = True,
     ) -> None:
         self.run_id = run_id
         self.render = render
         self.gnb_log = gnb_log
         self.amf_log = amf_log
+        self.gnb_ready = gnb_ready
         self.commands: list[tuple[str, ...]] = []
 
     @staticmethod
@@ -244,7 +246,10 @@ class RuntimeClusterRunner:
                                 "status": {
                                     POD_RUNTIME_STATE_KEY: "Running",
                                     "containerStatuses": [
-                                        {"name": "gnb", "ready": True}
+                                        {
+                                            "name": "gnb",
+                                            "ready": self.gnb_ready,
+                                        }
                                     ],
                                 },
                             }
@@ -348,6 +353,19 @@ class R2LabGnbN2VerificationTests(unittest.TestCase):
             )
         self.assertFalse(result.proven)
         self.assertFalse(result.deployment_bound)
+
+    def test_not_ready_singleton_reports_the_exact_sanitized_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            known_hosts = Path(directory) / "known_hosts"
+            known_hosts.write_text("fixture\n", encoding="utf-8")
+            result = verify_gnb_n2(
+                evidence=self.base_evidence(),
+                known_hosts=known_hosts,
+                runner=RuntimeClusterRunner(gnb_ready=False),
+                expected_gnb_n2_peer=TEST_GNB_PEER,
+            )
+        self.assertFalse(result.proven)
+        self.assertEqual(("ready-running-count",), result.unproven_reasons)
 
     def test_n2_parser_requires_affirmative_nonfailure_evidence(self) -> None:
         self.assertEqual(N2State.ESTABLISHED, parse_n2_log_state("NGAP: AMF connection established\n"))
@@ -465,6 +483,37 @@ class R2LabPhysicalRuntimeOrchestrationTests(unittest.TestCase):
         rendered = "\n".join(shlex.join(command) for command in r2lab.commands)
         self.assertNotIn("AT+QNWINFO", rendered)
         self.assertNotIn("/dev/cdc-wdm0", rendered)
+
+    def test_gnb_n2_boundary_requires_consecutive_stable_proofs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root, known_hosts, evidence, evidence_path = self.prepared_evidence(
+                directory
+            )
+            r2lab = RuntimeR2LabRunner()
+            cluster = RuntimeClusterRunner()
+            readiness = iter((False, True, True))
+
+            def advance_readiness(_seconds: float) -> None:
+                cluster.gnb_ready = next(readiness)
+
+            result = execute_physical_gnb_n2_verification(
+                evidence=evidence,
+                slice_name=SLICE,
+                run_root=root,
+                known_hosts=known_hosts,
+                r2lab_runner=r2lab,
+                cluster_runner=cluster,
+                evidence_path=evidence_path,
+                attempts=4,
+                required_consecutive_proofs=2,
+                poll_interval_seconds=0,
+                sleeper=advance_readiness,
+            )
+
+        self.assertTrue(result.proven)
+        self.assertEqual(4, result.attempts)
+        self.assertEqual(2, result.consecutive_proofs)
+        self.assertEqual(2, result.required_consecutive_proofs)
 
     def test_not_ready_qfit_stops_before_modem_runtime_probes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
