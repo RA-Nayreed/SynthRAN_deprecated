@@ -22,8 +22,11 @@
   vars:
     ansible_python_interpreter: /opt/synthran-venv/bin/python
     synthran_golden_path_guard: true
+    synthran_kubeconfig: /root/.kube/config
     repo_dest: "{{ ansible_env.HOME }}/.synthran/{{ synthran_run_id }}/open5gs-k8s"
     open5gs_root: "{{ repo_dest }}/open5gs"
+  environment:
+    KUBECONFIG: "{{ synthran_kubeconfig }}"
   pre_tasks:
     - name: Load the reviewed 5G profile
       ansible.builtin.include_vars:
@@ -35,6 +38,17 @@
         path: "{{ playbook_dir }}/../roles/5g/open5gs/deploy/tasks/main.yml"
         regexp: "busybox:1\\.36"
         replace: "{{ synthran_images.busybox_1_36 }}"
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+
+    - name: Pin the upstream Kubernetes client configuration inside the isolated worktree
+      ansible.builtin.replace:
+        path: "{{ playbook_dir }}/../roles/5g/open5gs/deploy/tasks/main.yml"
+        regexp: "/etc/kubernetes/admin\\.conf"
+        replace: "{{ synthran_kubeconfig }}"
       delegate_to: localhost
       run_once: true
       become: false
@@ -135,5 +149,5 @@
           - --all
           - "synthran.run/id={{ synthran_run_id }}"
       environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
+        KUBECONFIG: "{{ synthran_kubeconfig }}"
       changed_when: true
