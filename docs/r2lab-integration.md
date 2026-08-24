@@ -204,6 +204,10 @@ python -m synthran r2lab gnb-stage \
 Success binds the package, values, and render digests into `physical-run.json`.
 The start command then refreshes both authority domains, proves zero existing
 gNB pods, starts exactly one ready pod, and polls for a current N2 association.
+Initial gNB/N2 convergence and the consecutive stability window have separate
+bounded poll budgets. The default permits up to twelve convergence observations
+before requiring twelve consecutive current, ready N2 proofs, so normal pod
+startup does not consume the stability window.
 
 ```text
 python -m synthran r2lab gnb-start \

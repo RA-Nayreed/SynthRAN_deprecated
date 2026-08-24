@@ -173,6 +173,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual("198.51.100.234", stage.gnb_n2_address)
         self.assertEqual("gnb-start", start.r2lab_command)
         self.assertEqual(12, start.n2_attempts)
+        self.assertEqual(12, start.n2_convergence_attempts)
 
 
 if __name__ == "__main__":
