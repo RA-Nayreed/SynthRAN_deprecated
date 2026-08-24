@@ -131,6 +131,9 @@ class R2LabPhysicalGnbCompositionTests(unittest.TestCase):
 
             def staged(**kwargs) -> PhysicalStagingResult:
                 artifact = kwargs["artifact"]
+                reservation_verifier = kwargs["reservation_verifier"]
+                self.assertTrue(callable(reservation_verifier))
+                reservation_verifier()
                 return PhysicalStagingResult(
                     run_id=RUN_ID,
                     package_sha256=artifact.package_sha256,
