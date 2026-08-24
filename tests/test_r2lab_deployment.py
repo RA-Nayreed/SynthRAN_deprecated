@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from synthran.dependencies import load_lock
+from synthran.dependencies import DependencyLock, load_lock
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.deployment import (
     FIVEG_R2LAB_PROFILE_TASK,
@@ -29,6 +32,7 @@ from synthran.r2lab.deployment import (
     build_physical_deployment_plan,
     discover_physical_chart_bindings,
     execute_non_overlapping_gnb_update,
+    materialize_locked_helm,
     materialize_physical_chart_workspace,
     overlay_pinned_deployment_template,
     package_physical_chart,
@@ -363,6 +367,43 @@ class R2LabPhysicalWorkspaceTests(unittest.TestCase):
                 materialize_physical_chart_workspace(
                     checkout_root=Path(directory), lock=self.lock, bundle=self.bundle
                 )
+
+
+class R2LabLockedHelmTests(unittest.TestCase):
+    def test_materializer_uses_the_checksum_locked_archive(self) -> None:
+        payload = b"#!/bin/sh\necho v3.18.4\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "fixture.tar.gz"
+            with tarfile.open(archive, mode="w:gz") as bundle:
+                member = tarfile.TarInfo("linux-amd64/helm")
+                member.size = len(payload)
+                member.mode = 0o755
+                bundle.addfile(member, io.BytesIO(payload))
+
+            original = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
+            raw = json.loads(json.dumps(original.raw))
+            tool = raw["tools"]["helm_linux_amd64"]
+            tool["url"] = "https://example.invalid/helm.tar.gz"
+            tool["sha256"] = "sha256:" + hashlib.sha256(
+                archive.read_bytes()
+            ).hexdigest()
+            lock = DependencyLock(
+                path=original.path,
+                git=original.git,
+                raw=raw,
+            )
+            with patch(
+                "synthran.r2lab.deployment.urllib.request.urlopen",
+                side_effect=lambda *_args, **_kwargs: archive.open("rb"),
+            ):
+                executable = materialize_locked_helm(
+                    lock=lock,
+                    destination=root / "tools",
+                )
+
+            self.assertEqual(payload, executable.read_bytes())
+            self.assertTrue(executable.stat().st_mode & 0o111)
 
 
 class R2LabPhysicalHelmTests(unittest.TestCase):

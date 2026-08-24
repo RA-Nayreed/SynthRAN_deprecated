@@ -42,6 +42,7 @@ from synthran.r2lab.deployment import (
     discover_physical_chart_bindings,
     execute_authorized_physical_gnb_stop,
     execute_stopped_physical_staging,
+    materialize_locked_helm,
     materialize_physical_chart_workspace,
     package_physical_chart,
     render_physical_chart_offline,
@@ -272,6 +273,11 @@ def execute_physical_gnb_staging(
         lock = load_lock(lock_path.expanduser().resolve())
         checkout, commit = _chart_checkout(lock, deps_root)
         _verify_checkout(checkout, commit, runner)
+        helm_executable = materialize_locked_helm(
+            lock=lock,
+            destination=run_directory / "tools",
+            timeout_seconds=min(timeout_seconds, 300),
+        )
         bindings = (
             bindings.validate()
             if bindings is not None
@@ -306,6 +312,7 @@ def execute_physical_gnb_staging(
                 bundle=bundle,
                 workspace=workspace,
                 runner=runner,
+                helm_executable=helm_executable,
                 timeout_seconds=min(timeout_seconds, 300),
             )
             artifact = package_physical_chart(
@@ -331,6 +338,7 @@ def execute_physical_gnb_staging(
                 lock=lock,
                 artifact=artifact,
                 render_evidence=render_evidence,
+                helm_executable=helm_executable,
                 run_id=run_id,
                 known_hosts=known_hosts,
                 runner=runner,

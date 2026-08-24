@@ -288,6 +288,7 @@ class StoppedStagingRunner:
         self.source_values_sha256 = source_values_sha256
         self.values_sha256 = values_sha256
         self.render_sha256 = render_sha256
+        self.helm_sha256 = hashlib.sha256(b"locked Helm fixture").hexdigest()
         self.commands: list[tuple[str, ...]] = []
         self.existing_replicas: int | None = None
         self.remote_digest_match = True
@@ -363,7 +364,8 @@ class StoppedStagingRunner:
                     0,
                     f"{self.package_sha256}  {remote[1]}\n"
                     f"{self.source_values_sha256}  {remote[2]}\n"
-                    f"{self.values_sha256}  {remote[3]}\n",
+                    f"{self.values_sha256}  {remote[3]}\n"
+                    f"{self.helm_sha256}  {remote[4]}\n",
                     "",
                 )
             return CommandResult(
@@ -371,7 +373,9 @@ class StoppedStagingRunner:
                 f"{'0' * 64}  {remote[1]}\n{'1' * 64}  {remote[2]}\n",
                 "",
             )
-        if remote == ("helm", "version", "--short"):
+        if remote[:2] == ("chmod", "0755") and remote[2].endswith("/helm"):
+            return CommandResult(0, "", "")
+        if remote[0].endswith("/helm") and remote[1:] == ("version", "--short"):
             return CommandResult(0, "v3.18.4+g123\n", "")
         if remote[:4] == ("kubectl", "get", "namespace", "open5gs"):
             return CommandResult(0, self.run_id, "")
@@ -387,7 +391,10 @@ class StoppedStagingRunner:
             return CommandResult(0, self.deployment_json(replicas=replicas), "")
         if remote[:3] == ("kubectl", "get", "pods"):
             return CommandResult(0, json.dumps({"items": self.pods}), "")
-        if remote[:3] == ("helm", "upgrade", "--install"):
+        if remote[0].endswith("/helm") and remote[1:3] == (
+            "upgrade",
+            "--install",
+        ):
             self.deployment_exists = True
             self.existing_replicas = 0
             return CommandResult(0, "Release staged\n", "")
@@ -475,6 +482,13 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             render_sha256=self.render.sha256,
         )
 
+    @staticmethod
+    def make_helm(root: Path) -> Path:
+        executable = root / "helm"
+        executable.write_bytes(b"locked Helm fixture")
+        executable.chmod(0o755)
+        return executable
+
     def stage(
         self,
         *,
@@ -489,6 +503,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
             lock=self.lock,
             artifact=artifact,
             render_evidence=self.render,
+            helm_executable=self.make_helm(root),
             run_id=self.run_id,
             known_hosts=known_hosts,
             runner=runner,
@@ -548,7 +563,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
 
         command_text = "\n".join(" ".join(command) for command in runner.commands)
         self.assertIn("StrictHostKeyChecking=yes", command_text)
-        self.assertIn("helm upgrade --install", command_text)
+        self.assertIn("/helm upgrade --install", command_text)
         self.assertIn("kubectl label deployment/srsran-gnb", command_text)
         self.assertIn("kubectl annotate deployment/srsran-gnb", command_text)
         self.assertNotIn("--replicas=1", command_text)
@@ -595,6 +610,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     lock=self.lock,
                     artifact=artifact,
                     render_evidence=stale,
+                    helm_executable=self.make_helm(root),
                     run_id=self.run_id,
                     known_hosts=known_hosts,
                     runner=runner,
@@ -652,6 +668,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     lock=self.lock,
                     artifact=artifact,
                     render_evidence=self.render,
+                    helm_executable=self.make_helm(root),
                     run_id=self.run_id,
                     known_hosts=known_hosts,
                     runner=runner,
@@ -678,6 +695,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     lock=self.lock,
                     artifact=artifact,
                     render_evidence=self.render,
+                    helm_executable=self.make_helm(root),
                     run_id=self.run_id,
                     known_hosts=known_hosts,
                     runner=runner,
@@ -687,7 +705,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         remote_commands = [runner.remote(command) for command in runner.commands]
         self.assertFalse(
             any(
-                remote is not None and remote[:3] == ("helm", "upgrade", "--install")
+                remote is not None
+                and remote[0].endswith("/helm")
+                and remote[1:3] == ("upgrade", "--install")
                 for remote in remote_commands
             )
         )
@@ -708,6 +728,7 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
                     lock=self.lock,
                     artifact=artifact,
                     render_evidence=self.render,
+                    helm_executable=self.make_helm(root),
                     run_id=self.run_id,
                     known_hosts=known_hosts,
                     runner=runner,
@@ -717,7 +738,9 @@ class R2LabStoppedPhysicalStagingTests(unittest.TestCase):
         remote_commands = [runner.remote(command) for command in runner.commands]
         self.assertFalse(
             any(
-                remote is not None and remote[:3] == ("helm", "upgrade", "--install")
+                remote is not None
+                and remote[0].endswith("/helm")
+                and remote[1:3] == ("upgrade", "--install")
                 for remote in remote_commands
             )
         )
