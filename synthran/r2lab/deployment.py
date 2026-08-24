@@ -1572,6 +1572,7 @@ def execute_stopped_physical_staging(
     known_hosts: Path,
     now: datetime,
     runner: Runner,
+    reservation_verifier: Callable[[], None] | None = None,
     timeout_seconds: int = DEFAULT_STAGING_TIMEOUT_SECONDS,
 ) -> PhysicalStagingResult:
     try:
@@ -1619,14 +1620,17 @@ def execute_stopped_physical_staging(
         raise R2LabPhysicalStagingError("physical chart values digest changed after review")
 
     try:
-        reservation_id = verify_reservation(
-            runner=runner,
-            reservation_id=reservation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            now=now,
-            timeout_seconds=min(timeout_seconds, 60),
-        )
+        if reservation_verifier is None:
+            reservation_id = verify_reservation(
+                runner=runner,
+                reservation_id=reservation_id,
+                owner=owner,
+                nodes={CORE_NODE, RAN_NODE},
+                now=now,
+                timeout_seconds=min(timeout_seconds, 60),
+            )
+        else:
+            reservation_verifier()
         allocation_id = verify_allocations(
             runner=runner,
             allocation_id=allocation_id,
@@ -1766,6 +1770,8 @@ def execute_stopped_physical_staging(
         )
 
     try:
+        if reservation_verifier is not None:
+            reservation_verifier()
         verify_allocations(
             runner=runner,
             allocation_id=allocation_id,
@@ -1775,7 +1781,7 @@ def execute_stopped_physical_staging(
         )
     except Exception as exc:
         raise R2LabPhysicalStagingError(
-            "SLICES allocation authority changed before Helm staging"
+            "SLICES authority changed before Helm staging"
         ) from exc
 
     _checked(
@@ -2201,15 +2207,21 @@ def execute_authorized_physical_gnb_start(
     if not known_hosts.is_file():
         raise R2LabPhysicalStartError("strict SLICES known-hosts file is missing")
 
+    def require_r2lab_authority() -> None:
+        refreshed = refresh_r2lab_authority().validate()
+        if (
+            refreshed.run_id != authority.run_id
+            or refreshed.radio != authority.radio
+            or refreshed.ue != authority.ue
+            or refreshed.ue_kind != authority.ue_kind
+            or refreshed.claim_sha256 != authority.claim_sha256
+        ):
+            raise R2LabPhysicalStartError(
+                "R2Lab claim or selected-resource authority changed"
+            )
+
     try:
-        reservation_id = verify_reservation(
-            runner=runner,
-            reservation_id=reservation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            now=now,
-            timeout_seconds=min(timeout_seconds, 60),
-        )
+        require_r2lab_authority()
         allocation_id = verify_allocations(
             runner=runner,
             allocation_id=allocation_id,
@@ -2218,7 +2230,9 @@ def execute_authorized_physical_gnb_start(
             timeout_seconds=min(timeout_seconds, 60),
         )
     except Exception as exc:
-        raise R2LabPhysicalStartError("fresh SLICES authority was not proven for gNB start") from exc
+        raise R2LabPhysicalStartError(
+            "fresh physical authority was not proven for gNB start"
+        ) from exc
 
     def checked_start(*remote: str, label: str) -> CommandResult:
         try:
@@ -2284,15 +2298,7 @@ def execute_authorized_physical_gnb_start(
         return runner(_ssh(known_hosts, *tuple(command)), command_timeout)
 
     def before_start() -> None:
-        refreshed = refresh_r2lab_authority().validate()
-        if (
-            refreshed.run_id != authority.run_id
-            or refreshed.radio != authority.radio
-            or refreshed.ue != authority.ue
-            or refreshed.ue_kind != authority.ue_kind
-            or refreshed.claim_sha256 != authority.claim_sha256
-        ):
-            raise R2LabPhysicalStartError("R2Lab claim or selected-resource authority changed")
+        require_r2lab_authority()
         try:
             verify_allocations(
                 runner=runner,
@@ -2371,14 +2377,6 @@ def execute_authorized_physical_gnb_stop(
         raise R2LabPhysicalStartError("strict SLICES known-hosts file is missing")
 
     try:
-        reservation_id = verify_reservation(
-            runner=runner,
-            reservation_id=reservation_id,
-            owner=owner,
-            nodes={CORE_NODE, RAN_NODE},
-            now=now,
-            timeout_seconds=min(timeout_seconds, 60),
-        )
         allocation_id = verify_allocations(
             runner=runner,
             allocation_id=allocation_id,
@@ -2388,7 +2386,7 @@ def execute_authorized_physical_gnb_stop(
         )
     except Exception as exc:
         raise R2LabPhysicalStartError(
-            "fresh SLICES authority was not proven for gNB stop"
+            "fresh SLICES allocation authority was not proven for gNB stop"
         ) from exc
 
     namespace_owner = _checked(
