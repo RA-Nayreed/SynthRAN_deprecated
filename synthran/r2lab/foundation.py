@@ -7,7 +7,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import shlex
-from typing import Callable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 from synthran.live_preflight import (
     Runner,
