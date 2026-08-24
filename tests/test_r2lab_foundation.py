@@ -421,6 +421,11 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
         self.assertIn("name=upf1", wrapper)
         self.assertIn("name: 5g/open5gs/config", wrapper)
         self.assertIn("name: 5g/open5gs/deploy", wrapper)
+        self.assertIn("synthran_kubeconfig: /root/.kube/config", wrapper)
+        self.assertIn('KUBECONFIG: "{{ synthran_kubeconfig }}"', wrapper)
+        self.assertIn('regexp: "/etc/kubernetes/admin\\\\.conf"', wrapper)
+        self.assertIn('replace: "{{ synthran_kubeconfig }}"', wrapper)
+        self.assertNotIn("KUBECONFIG: /etc/kubernetes/admin.conf", wrapper)
         self.assertNotIn("name: 5g/oai", wrapper)
         self.assertNotIn("name: 5g/srsRAN", wrapper)
 
