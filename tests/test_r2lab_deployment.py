@@ -9,12 +9,11 @@ import unittest
 from synthran.dependencies import load_lock
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.deployment import (
-    AMF_ADDRESS_PLACEHOLDER,
-    GNB_BIND_ADDRESS_PLACEHOLDER,
+    FIVEG_R2LAB_PROFILE_TASK,
     GNB_DEPLOYMENT,
     GNB_NAMESPACE,
     GNB_SELECTOR,
-    N300_DEVICE_ARGS_PLACEHOLDER,
+    PHYSICAL_VALUES_SOURCE,
     PHYSICAL_GNB_CPU_COUNT,
     PHYSICAL_GNB_MEMORY,
     PINNED_SRSRAN_HELM_COMMIT,
@@ -35,7 +34,6 @@ from synthran.r2lab.deployment import (
     package_physical_chart,
     parse_gnb_pods_json,
     render_physical_chart_offline,
-    render_physical_srsran,
     validate_physical_helm_render,
 )
 
@@ -55,6 +53,26 @@ spec:
       containers:
         - name: gnb
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+"""
+
+SOURCE_VALUES_FIXTURE = """gnbConfig:
+  ru_sdr:
+    device_driver: uhd
+    device_args: addr=192.0.2.103,name=ni-n3xx-31D98C7,product=n300,num_recv_frames=32,num_send_frames=32,recv_frame_size=8000,send_frame_size=8000
+    srate: 61.44
+    tx_gain: 35
+    rx_gain: 60
+  cell_cfg:
+    dl_arfcn: 640000
+    band: 78
+    channel_bandwidth_MHz: 20
+    common_scs: 30
+    pdcch:
+      common:
+        ss0_index: 0
+        coreset0_index: 12
+    prach:
+      prach_config_index: 1
 """
 
 
@@ -78,9 +96,10 @@ class R2LabPhysicalLockTests(unittest.TestCase):
 
 
 class R2LabPhysicalDeploymentPlanTests(unittest.TestCase):
-    def test_plan_is_separate_nonexecuting_r2lab_boundary(self) -> None:
-        plan = build_physical_deployment_plan(run_id="r2lab-physical-plan")
-        payload = plan.to_dict()
+    def test_plan_uses_the_pinned_r2lab_configuration(self) -> None:
+        payload = build_physical_deployment_plan(
+            run_id="r2lab-physical-plan"
+        ).to_dict()
 
         self.assertFalse(payload["execution_enabled"])
         self.assertEqual("offline-plan-only", payload["acceptance"])
@@ -90,36 +109,29 @@ class R2LabPhysicalDeploymentPlanTests(unittest.TestCase):
         self.assertEqual("n300", payload["radio"])
         self.assertEqual("Recreate", payload["deployment"]["strategy"])
         self.assertEqual(1, payload["deployment"]["max_concurrent_gnb_pods"])
-        self.assertFalse(payload["deployment"]["srsue_specific_overrides"])
-        self.assertIsNone(payload["deployment"]["coreset0_index_override"])
-        self.assertIsNone(payload["deployment"]["prach_config_index_override"])
+        self.assertEqual(
+            PINNED_SRSRAN_HELM_COMMIT,
+            payload["configuration"]["chart_commit"],
+        )
+        self.assertEqual(
+            PHYSICAL_VALUES_SOURCE,
+            payload["configuration"]["values_file"],
+        )
+        self.assertEqual(
+            FIVEG_R2LAB_PROFILE_TASK,
+            payload["configuration"]["adapter_task"],
+        )
+        self.assertFalse(payload["configuration"]["radio_overrides"])
         self.assertFalse(payload["safety"]["rolling_overlap_allowed"])
-        self.assertFalse(payload["safety"]["virtual_adapter_modified"])
         self.assertFalse(payload["safety"]["live_acceptance_claimed"])
 
-    def test_reference_aligned_plan_preserves_carrier_and_ssb_semantics(self) -> None:
-        payload = build_physical_deployment_plan(
-            run_id="r2lab-physical-frequency"
-        ).to_dict()
-        intent = payload["radio_intent"]
-        carrier = intent["profile"]["carrier"]
-        ssb = intent["expected_ssb"]
-        self.assertEqual(621_312, carrier["arfcn"])
-        self.assertEqual("carrier-center", carrier["semantic"])
-        self.assertEqual(621_312, ssb["arfcn"])
-        self.assertEqual("ssb", ssb["semantic"])
-        self.assertEqual(carrier["arfcn"], ssb["arfcn"])
-        self.assertEqual(40, intent["profile"]["channel_bandwidth_mhz"])
-        self.assertEqual(2, intent["profile"]["nof_antennas_dl"])
-        self.assertEqual(2, intent["profile"]["nof_antennas_ul"])
-
-    def test_render_never_claims_live_acceptance(self) -> None:
+    def test_render_names_the_exact_source_without_claiming_acceptance(self) -> None:
         rendered = build_physical_deployment_plan(
             run_id="r2lab-physical-render"
         ).render()
         self.assertIn("NON-EXECUTING", rendered)
-        self.assertIn("not live accepted", rendered)
-        self.assertIn("Recreate", rendered)
+        self.assertIn(PHYSICAL_VALUES_SOURCE, rendered)
+        self.assertIn("Radio overrides: none", rendered)
         self.assertNotIn("RFSIM", rendered.upper())
 
     def test_virtual_or_unreviewed_topology_is_rejected(self) -> None:
@@ -133,88 +145,6 @@ class R2LabPhysicalDeploymentPlanTests(unittest.TestCase):
             build_physical_deployment_plan(
                 run_id="r2lab-bad-ran", ran_node="sopnode-w3"
             )
-
-    def test_gain_boundary_is_fail_closed(self) -> None:
-        with self.assertRaises(R2LabPhysicalDeploymentError):
-            build_physical_deployment_plan(run_id="r2lab-high-tx", tx_gain_db=31)
-        with self.assertRaises(R2LabPhysicalDeploymentError):
-            build_physical_deployment_plan(run_id="r2lab-high-rx", rx_gain_db=41)
-
-
-class R2LabPhysicalRenderTests(unittest.TestCase):
-    def test_render_preserves_reference_aligned_radio_semantics(self) -> None:
-        rendered = render_physical_srsran(
-            build_physical_deployment_plan(run_id="r2lab-render")
-        )
-        payload = rendered.to_dict()
-        config = payload["gnb_config"]
-        cell = config["cell_cfg"]
-        self.assertEqual(621_312, cell["dl_arfcn"])
-        self.assertEqual(78, cell["band"])
-        self.assertEqual(40, cell["channel_bandwidth_MHz"])
-        self.assertEqual(30, cell["common_scs"])
-        self.assertEqual(2, cell["nof_antennas_dl"])
-        self.assertEqual(2, cell["nof_antennas_ul"])
-        self.assertEqual([{"sst": 1}], cell["slicing"])
-        review = config["synthran_review"]
-        self.assertEqual(621_312, review["expected_ssb_arfcn"])
-        self.assertEqual(620_040, review["reference_point_a_arfcn"])
-        self.assertEqual(106, review["reference_carrier_prbs"])
-        self.assertEqual(30, review["reference_scs_khz"])
-        self.assertEqual(40, review["reference_nominal_bandwidth_mhz"])
-        self.assertFalse(review["live_accepted"])
-
-    def test_render_matches_pinned_cu_cp_and_remote_control_shape(self) -> None:
-        config = render_physical_srsran(
-            build_physical_deployment_plan(run_id="r2lab-chart-shape")
-        ).to_dict()["gnb_config"]
-        amf = config["cu_cp"]["amf"]
-        self.assertEqual(AMF_ADDRESS_PLACEHOLDER, amf["addr"])
-        self.assertEqual(GNB_BIND_ADDRESS_PLACEHOLDER, amf["bind_addr"])
-        self.assertEqual(38412, amf["port"])
-        self.assertEqual(8001, config["remote_control"]["port"])
-        self.assertTrue(config["remote_control"]["enabled"])
-        self.assertEqual(
-            [{"sst": 1}],
-            amf["supported_tracking_areas"][0]["plmn_list"][0][
-                "tai_slice_support_list"
-            ],
-        )
-
-    def test_render_keeps_runtime_network_values_as_placeholders(self) -> None:
-        config = render_physical_srsran(
-            build_physical_deployment_plan(run_id="r2lab-placeholders")
-        ).to_dict()["gnb_config"]
-        amf = config["cu_cp"]["amf"]
-        self.assertEqual(AMF_ADDRESS_PLACEHOLDER, amf["addr"])
-        self.assertEqual(GNB_BIND_ADDRESS_PLACEHOLDER, amf["bind_addr"])
-        self.assertEqual(N300_DEVICE_ARGS_PLACEHOLDER, config["ru_sdr"]["device_args"])
-
-    def test_render_is_uhd_recreate_and_stopped_before_lifecycle_start(self) -> None:
-        payload = render_physical_srsran(
-            build_physical_deployment_plan(run_id="r2lab-recreate")
-        ).to_dict()
-        self.assertEqual("uhd", payload["gnb_config"]["ru_sdr"]["device_driver"])
-        self.assertEqual(0, payload["deployment"]["replicas"])
-        self.assertEqual("Recreate", payload["deployment"]["strategy"]["type"])
-        self.assertEqual(1, payload["deployment"]["desired_replicas_after_lifecycle_start"])
-        self.assertFalse(payload["execution_ready"])
-        self.assertEqual("offline-render-only", payload["acceptance"])
-
-    def test_render_does_not_inherit_srsue_specific_overrides(self) -> None:
-        cell = render_physical_srsran(
-            build_physical_deployment_plan(run_id="r2lab-cots")
-        ).to_dict()["gnb_config"]["cell_cfg"]
-        self.assertNotIn("pdcch", cell)
-        self.assertNotIn("prach", cell)
-        self.assertNotIn("coreset0_index", str(cell))
-        self.assertNotIn("prach_config_index", str(cell))
-
-    def test_render_contains_no_rfsim_settings(self) -> None:
-        text = render_physical_srsran(
-            build_physical_deployment_plan(run_id="r2lab-physical-clean-render")
-        ).render_json()
-        self.assertNotIn("rfsim", text.lower())
 
 
 class R2LabPhysicalChartTests(unittest.TestCase):
@@ -247,7 +177,7 @@ class R2LabPhysicalChartTests(unittest.TestCase):
         self.assertFalse(values["start"]["logs"])
         self.assertFalse(bundle["execution_enabled"])
 
-    def test_bundle_binds_runtime_network_without_leaking_review_metadata(self) -> None:
+    def test_bundle_binds_network_without_reconstructing_radio_values(self) -> None:
         bundle = build_physical_chart_bundle(
             lock=self.lock, plan=self.plan, bindings=self.bindings
         ).to_dict()
@@ -256,38 +186,39 @@ class R2LabPhysicalChartTests(unittest.TestCase):
         self.assertEqual(self.bindings.amf_n2_address, amf["addr"])
         self.assertEqual(self.bindings.gnb_n2_address, amf["bind_addr"])
         self.assertEqual(
-            f"addr={self.bindings.n300_address},type=n3xx",
-            config["ru_sdr"]["device_args"],
+            self.bindings.gnb_n2_address,
+            config["cu_up"]["ngu"]["socket"][0]["bind_addr"],
         )
-        self.assertNotIn("synthran_review", config)
-        self.assertTrue(bundle["review"]["reference_aligned"])
-        self.assertEqual(106, bundle["review"]["reference_carrier_prbs"])
-        self.assertEqual(40, bundle["review"]["reference_nominal_bandwidth_mhz"])
+        self.assertNotIn("ru_sdr", config)
+        self.assertNotIn("cell_cfg", config)
+        self.assertEqual(PHYSICAL_VALUES_SOURCE, bundle["chart"]["values_source"])
+        self.assertEqual(
+            PHYSICAL_VALUES_SOURCE,
+            bundle["review"]["configuration_source"],
+        )
+        self.assertFalse(bundle["review"]["radio_values_overridden"])
         self.assertTrue(bundle["review"]["image_digest_locked"])
         self.assertFalse(bundle["review"]["live_accepted"])
 
-    def test_bundle_preserves_40mhz_2x2_and_removes_srsue_overrides(self) -> None:
-        cell = build_physical_chart_bundle(
+    def test_bundle_keeps_radio_configuration_out_of_the_override(self) -> None:
+        values = build_physical_chart_bundle(
             lock=self.lock, plan=self.plan, bindings=self.bindings
-        ).to_dict()["values"]["gnbConfig"]["cell_cfg"]
-        self.assertEqual(621_312, cell["dl_arfcn"])
-        self.assertEqual(40, cell["channel_bandwidth_MHz"])
-        self.assertEqual(2, cell["nof_antennas_dl"])
-        self.assertEqual(2, cell["nof_antennas_ul"])
-        self.assertNotIn("pdcch", cell)
-        self.assertNotIn("prach", cell)
+        ).to_dict()["values"]
+        serialized = json.dumps(values)
+        self.assertNotIn("dl_arfcn", serialized)
+        self.assertNotIn("channel_bandwidth_MHz", serialized)
+        self.assertNotIn("tx_gain", serialized)
+        self.assertNotIn("rx_gain", serialized)
+        self.assertNotIn("device_args", serialized)
 
     def test_ru_network_is_exact_macvlan_binding(self) -> None:
         values = build_physical_chart_bundle(
             lock=self.lock, plan=self.plan, bindings=self.bindings
         ).to_dict()["values"]
-        usrp = values["usrp"]
-        self.assertEqual("r2lab_usrp", values["ru"])
-        self.assertEqual("r2lab_usrp", usrp["master"])
-        self.assertEqual("macvlan", usrp["type"])
-        self.assertEqual("bridge", usrp["mode"])
-        self.assertEqual(9216, usrp["mtu"])
-        self.assertEqual("192.0.2.0/24", usrp["ipam"]["subnet"])
+        self.assertTrue(values["ru"])
+        self.assertEqual("192.0.2.0/24", values["ruSubnet"])
+        self.assertEqual("192.0.2.240", values["ruPodIp"])
+        self.assertNotIn("usrp", values)
         self.assertEqual("sopnode-f3", values["nodeName"])
 
     def test_invalid_ru_binding_fails_closed(self) -> None:
@@ -306,6 +237,9 @@ class R2LabPhysicalChartTests(unittest.TestCase):
             plan=self.plan,
             bindings=self.bindings,
         ).to_dict()["values"]
+        values["gnbConfig"]["ru_sdr"] = {
+            "device_args": "addr=192.0.2.103,product=n300",
+        }
 
         def runner(command, _timeout_seconds: int) -> CommandResult:
             rendered = " ".join(command)
@@ -361,6 +295,9 @@ class R2LabPhysicalWorkspaceTests(unittest.TestCase):
         templates.mkdir(parents=True)
         (chart / "Chart.yaml").write_text("apiVersion: v2\nname: srsran-gnb\n")
         (templates / "deployment.yaml").write_text(DEPLOYMENT_FIXTURE)
+        (chart / Path(PHYSICAL_VALUES_SOURCE).name).write_text(
+            SOURCE_VALUES_FIXTURE
+        )
         return chart
 
     def test_workspace_applies_overlay_and_writes_json_values(self) -> None:
@@ -379,7 +316,34 @@ class R2LabPhysicalWorkspaceTests(unittest.TestCase):
             self.assertEqual(0, values["replicas"])
             self.assertEqual("Recreate", values["deploymentStrategy"])
             self.assertEqual(self.bundle.values["image"]["digest"], values["image"]["digest"])
+            self.assertEqual(
+                hashlib.sha256(SOURCE_VALUES_FIXTURE.encode()).hexdigest(),
+                result.source_values_sha256,
+            )
             self.assertEqual(64, len(result.values_sha256))
+
+    def test_workspace_hashes_the_exact_source_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            chart = self._create_chart(root)
+            source_path = chart / Path(PHYSICAL_VALUES_SOURCE).name
+            source_bytes = SOURCE_VALUES_FIXTURE.replace("\n", "\r\n").encode()
+            source_path.write_bytes(source_bytes)
+
+            workspace = materialize_physical_chart_workspace(
+                checkout_root=root,
+                lock=self.lock,
+                bundle=self.bundle,
+            )
+            artifact = package_physical_chart(
+                workspace=workspace,
+                run_id="r2lab-exact-source",
+                destination=root / "artifacts",
+            )
+
+        expected = hashlib.sha256(source_bytes).hexdigest()
+        self.assertEqual(expected, workspace.source_values_sha256)
+        self.assertEqual(expected, artifact.source_values_sha256)
 
     def test_workspace_refuses_overwrite_of_generated_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -430,14 +394,21 @@ data:
         bind_addr: 198.51.100.234
     ru_sdr:
       device_driver: uhd
-      device_args: addr=192.0.2.103,type=n3xx
+      device_args: addr=192.0.2.103,name=ni-n3xx-31D98C7,product=n300,num_recv_frames=32,num_send_frames=32,recv_frame_size=8000,send_frame_size=8000
+      srate: 61.44
+      tx_gain: 35
+      rx_gain: 60
     cell_cfg:
-      dl_arfcn: 621312
+      dl_arfcn: 640000
       band: 78
-      channel_bandwidth_MHz: 40
+      channel_bandwidth_MHz: 20
       common_scs: 30
-      nof_antennas_dl: 2
-      nof_antennas_ul: 2
+      pdcch:
+        common:
+          ss0_index: 0
+          coreset0_index: 12
+      prach:
+        prach_config_index: 1
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -462,70 +433,93 @@ spec:
 """
 
     def test_valid_render_is_evidence_but_not_live_acceptance(self) -> None:
+        source_digest = hashlib.sha256(SOURCE_VALUES_FIXTURE.encode()).hexdigest()
         payload = validate_physical_helm_render(
-            text=self.valid_render(), bundle=self.bundle
+            text=self.valid_render(),
+            bundle=self.bundle,
+            source_values_text=SOURCE_VALUES_FIXTURE,
+            source_values_sha256=source_digest,
         ).to_dict()
         self.assertEqual(0, payload["replicas"])
         self.assertEqual("Recreate", payload["strategy"])
-        self.assertEqual(621_312, payload["carrier_arfcn"])
-        self.assertEqual(40, payload["channel_bandwidth_mhz"])
-        self.assertEqual(2, payload["antennas_dl"])
-        self.assertEqual(2, payload["antennas_ul"])
+        self.assertEqual(source_digest, payload["source_values_sha256"])
+        self.assertEqual(640_000, payload["carrier_arfcn"])
+        self.assertEqual(78, payload["band"])
+        self.assertEqual(20, payload["channel_bandwidth_mhz"])
+        self.assertEqual(30, payload["common_scs_khz"])
+        self.assertEqual(61.44, payload["sample_rate_mhz"])
+        self.assertEqual(35, payload["tx_gain_db"])
+        self.assertEqual(60, payload["rx_gain_db"])
+        self.assertEqual(0, payload["ss0_index"])
+        self.assertEqual(12, payload["coreset0_index"])
+        self.assertEqual(1, payload["prach_config_index"])
         self.assertEqual("offline-render-validated", payload["acceptance"])
         self.assertEqual(64, len(payload["sha256"]))
 
     def test_render_rejects_stale_nonreference_radio_values(self) -> None:
-        stale = self.valid_render().replace("dl_arfcn: 621312", "dl_arfcn: 621984")
-        stale = stale.replace("channel_bandwidth_MHz: 40", "channel_bandwidth_MHz: 60")
-        with self.assertRaisesRegex(R2LabPhysicalHelmError, "reviewed chart intent"):
-            validate_physical_helm_render(text=stale, bundle=self.bundle)
+        stale = self.valid_render().replace("dl_arfcn: 640000", "dl_arfcn: 621312")
+        with self.assertRaisesRegex(R2LabPhysicalHelmError, "pinned R2Lab source"):
+            self.validate(stale)
+
+    def validate(self, text: str):
+        return validate_physical_helm_render(
+            text=text,
+            bundle=self.bundle,
+            source_values_text=SOURCE_VALUES_FIXTURE,
+            source_values_sha256=hashlib.sha256(
+                SOURCE_VALUES_FIXTURE.encode()
+            ).hexdigest(),
+        )
 
     def test_render_rejects_nonzero_replicas_or_rolling_strategy(self) -> None:
         with self.assertRaisesRegex(R2LabPhysicalHelmError, "remain stopped"):
-            validate_physical_helm_render(
-                text=self.valid_render().replace("replicas: 0", "replicas: 1"),
-                bundle=self.bundle,
-            )
+            self.validate(self.valid_render().replace("replicas: 0", "replicas: 1"))
         with self.assertRaisesRegex(R2LabPhysicalHelmError, "Recreate"):
-            validate_physical_helm_render(
-                text=self.valid_render().replace("type: Recreate", "type: RollingUpdate"),
-                bundle=self.bundle,
+            self.validate(
+                self.valid_render().replace("type: Recreate", "type: RollingUpdate")
             )
 
     def test_render_rejects_mutable_image_and_srsue_overrides(self) -> None:
         with self.assertRaisesRegex(R2LabPhysicalHelmError, "digest-locked"):
-            validate_physical_helm_render(
-                text=self.valid_render().replace(
+            self.validate(
+                self.valid_render().replace(
                     self.expected_image, self.expected_image.split("@", 1)[0]
-                ),
-                bundle=self.bundle,
+                )
             )
-        with self.assertRaisesRegex(R2LabPhysicalHelmError, "srsUE-specific"):
-            validate_physical_helm_render(
+        with self.assertRaisesRegex(R2LabPhysicalHelmError, "pinned R2Lab source"):
+            self.validate(
                 text=self.valid_render().replace(
-                    "      nof_antennas_ul: 2",
-                    "      nof_antennas_ul: 2\n      coreset0_index: 12",
-                ),
-                bundle=self.bundle,
+                    "          coreset0_index: 12",
+                    "          coreset0_index: 11",
+                )
             )
 
     def test_render_rejects_unpinned_optional_log_sidecar(self) -> None:
         with self.assertRaisesRegex(R2LabPhysicalHelmError, "optional log sidecar"):
-            validate_physical_helm_render(
-                text=self.valid_render()
+            self.validate(
+                self.valid_render()
                 + "      containers:\n        - name: gnb-logs\n          image: busybox\n",
-                bundle=self.bundle,
             )
 
-    def test_offline_runner_checks_locked_helm_and_uses_template_only(self) -> None:
-        workspace = PhysicalChartWorkspace(
-            chart_root=Path("/tmp/chart"),
-            deployment_template=Path("/tmp/chart/templates/deployment.yaml"),
-            values_file=Path("/tmp/chart/synthran-physical-values.json"),
+    def workspace(self, root: Path) -> PhysicalChartWorkspace:
+        source_values = root / "values-n300-n78-20MHz.yaml"
+        source_values.write_text(SOURCE_VALUES_FIXTURE)
+        values = root / "synthran-physical-values.json"
+        values.write_text("{}\n")
+        return PhysicalChartWorkspace(
+            chart_root=root,
+            deployment_template=root / "templates/deployment.yaml",
+            source_values_file=source_values,
+            values_file=values,
             source_template_sha256="a" * 64,
             overlaid_template_sha256="b" * 64,
-            values_sha256="c" * 64,
+            source_values_sha256=hashlib.sha256(
+                SOURCE_VALUES_FIXTURE.encode()
+            ).hexdigest(),
+            values_sha256=hashlib.sha256(b"{}\n").hexdigest(),
         )
+
+    def test_offline_runner_checks_locked_helm_and_uses_template_only(self) -> None:
         commands: list[tuple[str, ...]] = []
 
         def runner(command, timeout_seconds: int) -> CommandResult:
@@ -535,36 +529,30 @@ spec:
                 return CommandResult(0, "v3.18.4+g123\n", "")
             return CommandResult(0, self.valid_render(), "")
 
-        text, evidence = render_physical_chart_offline(
-            lock=self.lock,
-            bundle=self.bundle,
-            workspace=workspace,
-            runner=runner,
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            text, evidence = render_physical_chart_offline(
+                lock=self.lock,
+                bundle=self.bundle,
+                workspace=self.workspace(Path(directory)),
+                runner=runner,
+            )
         self.assertEqual(self.valid_render(), text)
-        self.assertEqual(621_312, evidence.carrier_arfcn)
+        self.assertEqual(640_000, evidence.carrier_arfcn)
         self.assertEqual(("helm", "version", "--short"), commands[0])
         self.assertEqual("template", commands[1][1])
-        self.assertIn("--values", commands[1])
+        self.assertEqual(2, commands[1].count("--values"))
         self.assertNotIn("upgrade", commands[1])
         self.assertNotIn("install", commands[1])
 
     def test_offline_runner_rejects_unlocked_helm_version(self) -> None:
-        workspace = PhysicalChartWorkspace(
-            chart_root=Path("/tmp/chart"),
-            deployment_template=Path("/tmp/chart/templates/deployment.yaml"),
-            values_file=Path("/tmp/chart/synthran-physical-values.json"),
-            source_template_sha256="a" * 64,
-            overlaid_template_sha256="b" * 64,
-            values_sha256="c" * 64,
-        )
-        with self.assertRaisesRegex(R2LabPhysicalHelmError, "exactly match"):
-            render_physical_chart_offline(
-                lock=self.lock,
-                bundle=self.bundle,
-                workspace=workspace,
-                runner=lambda command, timeout_seconds: CommandResult(0, "v3.19.0\n", ""),
-            )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(R2LabPhysicalHelmError, "exactly match"):
+                render_physical_chart_offline(
+                    lock=self.lock,
+                    bundle=self.bundle,
+                    workspace=self.workspace(Path(directory)),
+                    runner=lambda command, timeout_seconds: CommandResult(0, "v3.19.0\n", ""),
+                )
 
 
 class R2LabPhysicalArtifactTests(unittest.TestCase):
@@ -575,15 +563,21 @@ class R2LabPhysicalArtifactTests(unittest.TestCase):
         (chart / "Chart.yaml").write_text("apiVersion: v2\nname: srsran-gnb\nversion: 0.1.0\n")
         deployment = templates / "deployment.yaml"
         deployment.write_text("kind: Deployment\n")
+        source_values = chart / Path(PHYSICAL_VALUES_SOURCE).name
+        source_values.write_text(SOURCE_VALUES_FIXTURE)
         values = chart / VALUES_FILE_NAME
         values.write_text('{"replicas": 0}\n')
         values_sha256 = hashlib.sha256(values.read_bytes()).hexdigest()
         return PhysicalChartWorkspace(
             chart_root=chart,
             deployment_template=deployment,
+            source_values_file=source_values,
             values_file=values,
             source_template_sha256="a" * 64,
             overlaid_template_sha256="b" * 64,
+            source_values_sha256=hashlib.sha256(
+                source_values.read_bytes()
+            ).hexdigest(),
             values_sha256=values_sha256,
         )
 
@@ -598,6 +592,10 @@ class R2LabPhysicalArtifactTests(unittest.TestCase):
                 workspace=workspace, run_id="r2lab-artifact", destination=root / "out-b"
             )
             self.assertEqual(first.package_sha256, second.package_sha256)
+            self.assertEqual(
+                workspace.source_values_sha256,
+                first.source_values_sha256,
+            )
             self.assertEqual(workspace.values_sha256, first.values_sha256)
             self.assertEqual("offline-packaged-only", first.to_dict()["acceptance"])
             self.assertTrue(first.package_path.is_file())

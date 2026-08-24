@@ -1,9 +1,9 @@
 """Physical R2Lab deployment subsystem.
 
 This module owns the complete physical gNB path as one coherent subsystem:
-reviewed deployment intent, canonical srsRAN render, pinned chart overlay,
-isolated workspace, offline Helm validation, deterministic packaging, stopped
-cluster staging, and the non-overlapping singleton gNB lifecycle.
+pinned R2Lab configuration, chart overlay, isolated workspace, offline Helm
+validation, deterministic packaging, stopped cluster staging, and the
+non-overlapping singleton gNB lifecycle.
 """
 
 from __future__ import annotations
@@ -24,29 +24,21 @@ from typing import Callable, Mapping, Sequence
 from synthran.dependencies import DependencyLock
 from synthran.live_preflight import CommandResult, verify_allocations, verify_reservation
 from synthran.network.runtime import validate_run_id
-from synthran.r2lab.radio import (
-    ReferenceAlignedPhysicalIntent,
-    R2LabRadioProfileError,
-    r2lab_oai_aligned_candidate,
-)
-
-
 # Reviewed topology / deployment contract.
 PHYSICAL_DEPLOYMENT_SCHEMA = "synthran/r2lab-physical-deployment/v1alpha1"
 CURRENT_CORE_NODE = "sopnode-f2"
 CURRENT_RAN_NODE = "sopnode-f3"
 CURRENT_RADIO = "n300"
 
-# Canonical render placeholders.
-AMF_ADDRESS_PLACEHOLDER = "<AMF_N2_ADDRESS>"
-GNB_BIND_ADDRESS_PLACEHOLDER = "<GNB_N2_ADDRESS>"
-N300_DEVICE_ARGS_PLACEHOLDER = "<N300_UHD_DEVICE_ARGS>"
-
 # Pinned chart contract.
+PINNED_FIVEG_ANSIBLE_COMMIT = "a0149fc0dde39e2872945a0f3c91e804ece52d4f"
 PINNED_SRSRAN_HELM_COMMIT = "8dfb9890d127734cdcd6eee9df8c5d09b1a8076a"
+FIVEG_R2LAB_PROFILE_TASK = "roles/5g/srsRAN/config/tasks/main.yml"
 PHYSICAL_GNB_CONTAINER = "srsran_gnb_physical"
 PHYSICAL_CHART_PATH = "charts/srsran-gnb"
 PHYSICAL_DEPLOYMENT_TEMPLATE = f"{PHYSICAL_CHART_PATH}/templates/deployment.yaml"
+PHYSICAL_VALUES_SOURCE = f"{PHYSICAL_CHART_PATH}/values-n300-n78-20MHz.yaml"
+SOURCE_VALUES_FILE_NAME = "r2lab-n300-values.yaml"
 VALUES_FILE_NAME = "synthran-physical-values.json"
 PHYSICAL_GNB_CPU_COUNT = 8
 PHYSICAL_GNB_MEMORY = "4Gi"
@@ -83,10 +75,6 @@ class R2LabPhysicalDeploymentError(ValueError):
     """Raised when a physical deployment plan crosses the reviewed boundary."""
 
 
-class R2LabPhysicalRenderError(ValueError):
-    """Raised when the canonical physical render violates reviewed semantics."""
-
-
 class R2LabPhysicalChartError(ValueError):
     """Raised when the pinned physical chart contract cannot be proven."""
 
@@ -117,9 +105,6 @@ class R2LabPhysicalDeploymentPlan:
     core_node: str
     ran_node: str
     radio: str
-    radio_intent: ReferenceAlignedPhysicalIntent
-    tx_gain_db: int = 25
-    rx_gain_db: int = 35
 
     def validate(self) -> "R2LabPhysicalDeploymentPlan":
         try:
@@ -140,20 +125,6 @@ class R2LabPhysicalDeploymentPlan:
             raise R2LabPhysicalDeploymentError(
                 f"physical R2Lab deployment requires radio {CURRENT_RADIO}"
             )
-        if self.tx_gain_db < 0 or self.tx_gain_db > 30:
-            raise R2LabPhysicalDeploymentError(
-                "physical N300 TX gain must stay within the supported 0-30 dB range"
-            )
-        if self.rx_gain_db < 0 or self.rx_gain_db > 40:
-            raise R2LabPhysicalDeploymentError(
-                "physical N300 RX gain must stay within the supported 0-40 dB range"
-            )
-        try:
-            self.radio_intent.validate()
-        except R2LabRadioProfileError as exc:
-            raise R2LabPhysicalDeploymentError(
-                "physical radio intent is not reference aligned"
-            ) from exc
         return self
 
     def to_dict(self) -> dict[str, object]:
@@ -168,21 +139,23 @@ class R2LabPhysicalDeploymentPlan:
             "ran": "srsran",
             "radio": self.radio,
             "nodes": {"core": self.core_node, "ran": self.ran_node},
-            "radio_intent": self.radio_intent.to_dict(),
-            "gains_db": {"tx": self.tx_gain_db, "rx": self.rx_gain_db},
+            "configuration": {
+                "adapter_commit": PINNED_FIVEG_ANSIBLE_COMMIT,
+                "adapter_task": FIVEG_R2LAB_PROFILE_TASK,
+                "chart_commit": PINNED_SRSRAN_HELM_COMMIT,
+                "values_file": PHYSICAL_VALUES_SOURCE,
+                "radio_overrides": False,
+            },
             "deployment": {
                 "strategy": "Recreate",
                 "desired_replicas": 1,
                 "max_concurrent_gnb_pods": 1,
-                "srsue_specific_overrides": False,
-                "coreset0_index_override": None,
-                "prach_config_index_override": None,
             },
             "required_lifecycle": [
                 "scale exact srsran-gnb deployment to zero",
                 "prove matching gNB pod count is zero",
                 "allow UHD claim release",
-                "apply reviewed physical configuration",
+                "apply pinned R2Lab configuration",
                 "scale exact srsran-gnb deployment to one",
                 "prove exactly one matching pod is Running and ready",
             ],
@@ -199,19 +172,16 @@ class R2LabPhysicalDeploymentPlan:
         payload = self.to_dict()
         if as_json:
             return json.dumps(payload, indent=2, sort_keys=True)
-        carrier = payload["radio_intent"]["profile"]["carrier"]
-        expected_ssb = payload["radio_intent"]["expected_ssb"]
         return "\n".join(
             (
                 "SynthRAN physical R2Lab deployment plan (NON-EXECUTING)",
                 f"Run ID: {self.run_id}",
                 f"Path: Open5GS@{self.core_node} + srsRAN@{self.ran_node} + {self.radio}",
-                f"Carrier: ARFCN {carrier['arfcn']} ({carrier['frequency_mhz']:.2f} MHz, carrier-center)",
-                f"Expected SSB reference: ARFCN {expected_ssb['arfcn']} ({expected_ssb['frequency_mhz']:.2f} MHz)",
-                "Radio intent: reference-aligned offline candidate; not live accepted",
+                f"R2Lab adapter: {PINNED_FIVEG_ANSIBLE_COMMIT}",
+                f"N300 values: {PHYSICAL_VALUES_SOURCE}",
+                "Radio overrides: none",
                 "Deployment strategy: Recreate / maximum one matching gNB pod",
-                "srsUE-specific CORESET/PRACH overrides: disabled",
-                "Execution: disabled until rendered physical values are reviewed",
+                "Execution: disabled until the pinned values render is validated",
             )
         )
 
@@ -222,209 +192,13 @@ def build_physical_deployment_plan(
     core_node: str = CURRENT_CORE_NODE,
     ran_node: str = CURRENT_RAN_NODE,
     radio: str = CURRENT_RADIO,
-    radio_intent: ReferenceAlignedPhysicalIntent | None = None,
-    tx_gain_db: int = 25,
-    rx_gain_db: int = 35,
 ) -> R2LabPhysicalDeploymentPlan:
     return R2LabPhysicalDeploymentPlan(
         run_id=run_id,
         core_node=core_node,
         ran_node=ran_node,
         radio=radio,
-        radio_intent=radio_intent or r2lab_oai_aligned_candidate(),
-        tx_gain_db=tx_gain_db,
-        rx_gain_db=rx_gain_db,
     ).validate()
-
-
-@dataclass(frozen=True)
-class PhysicalSrsranRender:
-    run_id: str
-    gnb_config: Mapping[str, object]
-    deployment: Mapping[str, object]
-
-    def validate(self) -> "PhysicalSrsranRender":
-        ru_sdr = self.gnb_config.get("ru_sdr")
-        cell_cfg = self.gnb_config.get("cell_cfg")
-        cu_cp = self.gnb_config.get("cu_cp")
-        remote_control = self.gnb_config.get("remote_control")
-        if not isinstance(ru_sdr, dict) or not isinstance(cell_cfg, dict):
-            raise R2LabPhysicalRenderError(
-                "physical render is missing SDR or cell configuration"
-            )
-        if not isinstance(cu_cp, dict) or not isinstance(cu_cp.get("amf"), dict):
-            raise R2LabPhysicalRenderError(
-                "physical render is missing the pinned cu_cp AMF configuration"
-            )
-        if not isinstance(remote_control, dict) or remote_control.get("port") != 8001:
-            raise R2LabPhysicalRenderError(
-                "physical render must expose the pinned-chart remote control port"
-            )
-        amf = cu_cp["amf"]
-        reviewed = r2lab_oai_aligned_candidate().profile
-        if ru_sdr.get("device_driver") != "uhd":
-            raise R2LabPhysicalRenderError("physical render must use the UHD radio driver")
-        if "rfsim" in json.dumps(self.gnb_config).lower():
-            raise R2LabPhysicalRenderError("physical render must not contain RFSIM settings")
-        if cell_cfg.get("dl_arfcn") != reviewed.carrier.value:
-            raise R2LabPhysicalRenderError(
-                "physical render carrier does not match the reviewed R2Lab reference"
-            )
-        if cell_cfg.get("band") != reviewed.band:
-            raise R2LabPhysicalRenderError(
-                "physical render band does not match the reviewed R2Lab reference"
-            )
-        if cell_cfg.get("channel_bandwidth_MHz") != reviewed.channel_bandwidth_mhz:
-            raise R2LabPhysicalRenderError(
-                "physical render bandwidth does not match the reviewed R2Lab reference"
-            )
-        if cell_cfg.get("common_scs") != reviewed.common_scs_khz:
-            raise R2LabPhysicalRenderError(
-                "physical render SCS does not match the reviewed R2Lab reference"
-            )
-        if (
-            cell_cfg.get("nof_antennas_dl") != reviewed.nof_antennas_dl
-            or cell_cfg.get("nof_antennas_ul") != reviewed.nof_antennas_ul
-        ):
-            raise R2LabPhysicalRenderError(
-                "physical render antenna count does not match the reviewed R2Lab reference"
-            )
-        if "pdcch" in cell_cfg or "prach" in cell_cfg:
-            raise R2LabPhysicalRenderError(
-                "physical render must not inherit srsUE-specific PDCCH/PRACH overrides"
-            )
-        if amf.get("addr") != AMF_ADDRESS_PLACEHOLDER:
-            raise R2LabPhysicalRenderError(
-                "AMF address must remain an explicit runtime placeholder"
-            )
-        if amf.get("bind_addr") != GNB_BIND_ADDRESS_PLACEHOLDER:
-            raise R2LabPhysicalRenderError(
-                "gNB N2 bind address must remain an explicit runtime placeholder"
-            )
-        if ru_sdr.get("device_args") != N300_DEVICE_ARGS_PLACEHOLDER:
-            raise R2LabPhysicalRenderError(
-                "N300 device arguments must remain an explicit runtime placeholder"
-            )
-        if self.deployment.get("replicas") != 0:
-            raise R2LabPhysicalRenderError(
-                "configuration render must keep the physical gNB stopped"
-            )
-        strategy = self.deployment.get("strategy")
-        if not isinstance(strategy, dict) or strategy.get("type") != "Recreate":
-            raise R2LabPhysicalRenderError("physical Deployment strategy must be Recreate")
-        return self
-
-    def to_dict(self) -> dict[str, object]:
-        self.validate()
-        return {
-            "schema": "synthran/r2lab-physical-render/v1alpha1",
-            "run_id": self.run_id,
-            "execution_ready": False,
-            "acceptance": "offline-render-only",
-            "gnb_config": dict(self.gnb_config),
-            "deployment": dict(self.deployment),
-            "runtime_placeholders": [
-                AMF_ADDRESS_PLACEHOLDER,
-                GNB_BIND_ADDRESS_PLACEHOLDER,
-                N300_DEVICE_ARGS_PLACEHOLDER,
-            ],
-        }
-
-    def render_json(self) -> str:
-        return json.dumps(self.to_dict(), indent=2, sort_keys=True)
-
-
-def render_physical_srsran(plan: R2LabPhysicalDeploymentPlan) -> PhysicalSrsranRender:
-    plan.validate()
-    intent = plan.radio_intent.validate()
-    profile = intent.profile
-    gnb_config: dict[str, object] = {
-        "cu_cp": {
-            "inactivity_timer": 7200,
-            "request_pdu_session_timeout": 30,
-            "amf": {
-                "sctp_rto_initial": 200,
-                "sctp_rto_min": 200,
-                "sctp_rto_max": 2000,
-                "sctp_init_max_attempts": 5,
-                "sctp_hb_interval": 1000,
-                "sctp_assoc_max_retx": 5,
-                "sctp_nodelay": True,
-                "addr": AMF_ADDRESS_PLACEHOLDER,
-                "port": 38412,
-                "bind_addr": GNB_BIND_ADDRESS_PLACEHOLDER,
-                "supported_tracking_areas": [
-                    {
-                        "tac": 1,
-                        "plmn_list": [
-                            {
-                                "plmn": "00101",
-                                "tai_slice_support_list": [{"sst": 1}],
-                            }
-                        ],
-                    }
-                ],
-            },
-        },
-        "ru_sdr": {
-            "device_driver": "uhd",
-            "device_args": N300_DEVICE_ARGS_PLACEHOLDER,
-            "srate": 61.44,
-            "tx_gain": plan.tx_gain_db,
-            "rx_gain": plan.rx_gain_db,
-            "clock": "internal",
-            "sync": "internal",
-        },
-        "cell_cfg": {
-            "dl_arfcn": profile.carrier.value,
-            "band": profile.band,
-            "channel_bandwidth_MHz": profile.channel_bandwidth_mhz,
-            "common_scs": profile.common_scs_khz,
-            "plmn": "00101",
-            "tac": 1,
-            "nof_antennas_dl": profile.nof_antennas_dl,
-            "nof_antennas_ul": profile.nof_antennas_ul,
-            "slicing": [{"sst": 1}],
-        },
-        "log": {
-            "filename": "/tmp/gnb.log",
-            "all_level": "warning",
-            "config_level": "debug",
-        },
-        "pcap": {
-            "mac_enable": False,
-            "mac_filename": "/tmp/gnb_mac.pcap",
-            "ngap_enable": False,
-            "ngap_filename": "/tmp/gnb_ngap.pcap",
-        },
-        "remote_control": {
-            "bind_addr": "0.0.0.0",
-            "enabled": True,
-            "port": 8001,
-        },
-        "synthran_review": {
-            "carrier_semantic": profile.carrier.semantic.value,
-            "expected_ssb_arfcn": intent.expected_ssb.value,
-            "reference_point_a_arfcn": intent.reference.point_a.value,
-            "reference_carrier_prbs": intent.reference.carrier_prbs,
-            "reference_scs_khz": intent.reference.subcarrier_spacing_khz,
-            "reference_nominal_bandwidth_mhz": profile.channel_bandwidth_mhz,
-            "reference_aligned": True,
-            "live_accepted": False,
-        },
-    }
-    deployment = {
-        "replicas": 0,
-        "strategy": {"type": "Recreate"},
-        "selector": GNB_SELECTOR,
-        "desired_replicas_after_lifecycle_start": 1,
-    }
-    return PhysicalSrsranRender(
-        run_id=plan.run_id,
-        gnb_config=gnb_config,
-        deployment=deployment,
-    ).validate()
-
 
 @dataclass(frozen=True)
 class PhysicalChartBindings:
@@ -492,7 +266,11 @@ class PhysicalChartBundle:
             "execution_enabled": False,
             "acceptance": "offline-chart-bundle-only",
             "run_id": self.run_id,
-            "chart": {"commit": self.chart_commit, "path": self.chart_path},
+            "chart": {
+                "commit": self.chart_commit,
+                "path": self.chart_path,
+                "values_source": PHYSICAL_VALUES_SOURCE,
+            },
             "values": deepcopy(dict(self.values)),
             "review": deepcopy(dict(self.review)),
         }
@@ -501,19 +279,36 @@ class PhysicalChartBundle:
         return json.dumps(self.to_dict(), indent=2, sort_keys=True)
 
 
-def _locked_chart_commit(lock: DependencyLock) -> str:
+def _locked_git_commit(lock: DependencyLock, name: str) -> str:
     git = lock.raw.get("git")
     if not isinstance(git, dict):
         raise R2LabPhysicalChartError("dependency lock Git mapping is unavailable")
-    entry = git.get("srsran_helm")
+    entry = git.get(name)
     if not isinstance(entry, dict):
-        raise R2LabPhysicalChartError("dependency lock is missing srsran_helm")
+        raise R2LabPhysicalChartError(f"dependency lock is missing {name}")
     commit = entry.get("commit")
+    if not isinstance(commit, str):
+        raise R2LabPhysicalChartError(f"dependency lock commit is missing for {name}")
+    return commit
+
+
+def _locked_source_contract(lock: DependencyLock) -> tuple[str, str]:
+    adapter_commit = _locked_git_commit(lock, "fiveg_ansible")
+    chart_commit = _locked_git_commit(lock, "srsran_helm")
+    if adapter_commit != PINNED_FIVEG_ANSIBLE_COMMIT:
+        raise R2LabPhysicalChartError(
+            "physical adapter is reviewed only for the pinned fiveg_ansible commit"
+        )
+    commit = chart_commit
     if commit != PINNED_SRSRAN_HELM_COMMIT:
         raise R2LabPhysicalChartError(
             "physical chart adapter is reviewed only for the pinned srsran_helm commit"
         )
-    return commit
+    return adapter_commit, chart_commit
+
+
+def _locked_chart_commit(lock: DependencyLock) -> str:
+    return _locked_source_contract(lock)[1]
 
 
 def _physical_image(lock: DependencyLock) -> Mapping[str, str]:
@@ -581,25 +376,8 @@ def build_physical_chart_bundle(
 ) -> PhysicalChartBundle:
     plan.validate()
     bindings.validate()
-    chart_commit = _locked_chart_commit(lock)
+    adapter_commit, chart_commit = _locked_source_contract(lock)
     image = _physical_image(lock)
-    rendered = render_physical_srsran(plan).to_dict()
-    gnb_config = deepcopy(rendered["gnb_config"])
-    if not isinstance(gnb_config, dict):
-        raise R2LabPhysicalChartError("canonical gNB render is malformed")
-    review = gnb_config.pop("synthran_review", None)
-    if not isinstance(review, dict):
-        raise R2LabPhysicalChartError("canonical gNB review metadata is missing")
-    cu_cp = gnb_config.get("cu_cp")
-    ru_sdr = gnb_config.get("ru_sdr")
-    if not isinstance(cu_cp, dict) or not isinstance(cu_cp.get("amf"), dict):
-        raise R2LabPhysicalChartError("canonical AMF configuration is malformed")
-    if not isinstance(ru_sdr, dict):
-        raise R2LabPhysicalChartError("canonical SDR configuration is malformed")
-    amf = cu_cp["amf"]
-    amf["addr"] = bindings.amf_n2_address
-    amf["bind_addr"] = bindings.gnb_n2_address
-    ru_sdr["device_args"] = f"addr={bindings.n300_address},type=n3xx"
 
     values: dict[str, object] = {
         "image": {
@@ -613,38 +391,42 @@ def build_physical_chart_bundle(
         "resources": _reviewed_resource_values(),
         "start": {"gnb": True, "logs": False},
         "gnbIp": bindings.gnb_n2_address,
-        "gnbConfig": gnb_config,
-        "n3networkName": bindings.n3_network_name,
-        "ru": bindings.ru_master,
-        "ruPodIp": bindings.ru_pod_address,
-        "usrp": {
-            "cniVersion": "0.3.1",
-            "type": "macvlan",
-            "master": bindings.ru_master,
-            "mode": "bridge",
-            "mtu": 9216,
-            "ipam": {"type": "host-local", "subnet": bindings.ru_subnet},
+        "gnbConfig": {
+            "cu_cp": {
+                "amf": {
+                    "addr": bindings.amf_n2_address,
+                    "bind_addr": bindings.gnb_n2_address,
+                }
+            },
+            "cu_up": {
+                "ngu": {
+                    "socket": [{"bind_addr": bindings.gnb_n2_address}],
+                }
+            },
         },
+        "n3networkName": bindings.n3_network_name,
+        "namespace": NAMESPACE,
+        "ru": True,
+        "ruSubnet": bindings.ru_subnet,
+        "ruPodIp": bindings.ru_pod_address,
         "nodeName": bindings.node_name,
         "sriov": {"enabled": False},
     }
     serialized = json.dumps(values, sort_keys=True).lower()
     if "rfsim" in serialized or "all-off" in serialized:
         raise R2LabPhysicalChartError("physical chart bundle contains forbidden backend behavior")
-    cell_cfg = gnb_config.get("cell_cfg")
-    if not isinstance(cell_cfg, dict):
-        raise R2LabPhysicalChartError("canonical cell configuration is malformed")
-    if "pdcch" in cell_cfg or "prach" in cell_cfg:
-        raise R2LabPhysicalChartError(
-            "physical chart bundle inherited srsUE-specific radio overrides"
-        )
     return PhysicalChartBundle(
         run_id=plan.run_id,
         chart_commit=chart_commit,
         chart_path=PHYSICAL_CHART_PATH,
         values=values,
         review={
-            **review,
+            "adapter_commit": adapter_commit,
+            "adapter_task": FIVEG_R2LAB_PROFILE_TASK,
+            "configuration_source": PHYSICAL_VALUES_SOURCE,
+            "chart_commit": chart_commit,
+            "radio_values_overridden": False,
+            "n300_address": bindings.n300_address,
             "image_digest_locked": True,
             "singleton_deployment": True,
             "logs_sidecar_disabled": True,
@@ -694,18 +476,24 @@ def overlay_pinned_deployment_template(*, source: str, lock: DependencyLock) -> 
 class PhysicalChartWorkspace:
     chart_root: Path
     deployment_template: Path
+    source_values_file: Path
     values_file: Path
     source_template_sha256: str
     overlaid_template_sha256: str
+    source_values_sha256: str
     values_sha256: str
 
     def to_dict(self) -> dict[str, str]:
         return {
             "chart_root": PHYSICAL_CHART_PATH,
             "deployment_template": "templates/deployment.yaml",
+            "source_values_file": PHYSICAL_VALUES_SOURCE.removeprefix(
+                f"{PHYSICAL_CHART_PATH}/"
+            ),
             "values_file": VALUES_FILE_NAME,
             "source_template_sha256": self.source_template_sha256,
             "overlaid_template_sha256": self.overlaid_template_sha256,
+            "source_values_sha256": self.source_values_sha256,
             "values_sha256": self.values_sha256,
         }
 
@@ -722,9 +510,15 @@ def materialize_physical_chart_workspace(
 ) -> PhysicalChartWorkspace:
     chart_root = checkout_root / PHYSICAL_CHART_PATH
     template_path = checkout_root / PHYSICAL_DEPLOYMENT_TEMPLATE
+    source_values_path = checkout_root / PHYSICAL_VALUES_SOURCE
     chart_metadata = chart_root / "Chart.yaml"
     values_path = chart_root / VALUES_FILE_NAME
-    if not chart_root.is_dir() or not chart_metadata.is_file() or not template_path.is_file():
+    if (
+        not chart_root.is_dir()
+        or not chart_metadata.is_file()
+        or not template_path.is_file()
+        or not source_values_path.is_file()
+    ):
         raise R2LabPhysicalChartError(
             "isolated srsran_helm checkout is missing the reviewed chart structure"
         )
@@ -734,6 +528,8 @@ def materialize_physical_chart_workspace(
         )
     try:
         source = template_path.read_text(encoding="utf-8")
+        source_values_bytes = source_values_path.read_bytes()
+        source_values_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise R2LabPhysicalChartError(
             "unable to read the pinned physical Deployment template"
@@ -750,9 +546,11 @@ def materialize_physical_chart_workspace(
     return PhysicalChartWorkspace(
         chart_root=chart_root,
         deployment_template=template_path,
+        source_values_file=source_values_path,
         values_file=values_path,
         source_template_sha256=_sha256_text(source),
         overlaid_template_sha256=_sha256_text(overlaid),
+        source_values_sha256=hashlib.sha256(source_values_bytes).hexdigest(),
         values_sha256=_sha256_text(values_text),
     )
 
@@ -760,24 +558,40 @@ def materialize_physical_chart_workspace(
 @dataclass(frozen=True)
 class PhysicalHelmRenderEvidence:
     sha256: str
+    source_values_sha256: str
     replicas: int
     strategy: str
     image_reference: str
     carrier_arfcn: int
+    band: int
     channel_bandwidth_mhz: int
-    antennas_dl: int
-    antennas_ul: int
+    common_scs_khz: int
+    sample_rate_mhz: float
+    tx_gain_db: int
+    rx_gain_db: int
+    ss0_index: int
+    coreset0_index: int
+    prach_config_index: int
+    device_args_sha256: str
 
     def to_dict(self) -> dict[str, object]:
         return {
             "sha256": self.sha256,
+            "source_values_sha256": self.source_values_sha256,
             "replicas": self.replicas,
             "strategy": self.strategy,
             "image_reference": self.image_reference,
             "carrier_arfcn": self.carrier_arfcn,
+            "band": self.band,
             "channel_bandwidth_mhz": self.channel_bandwidth_mhz,
-            "antennas_dl": self.antennas_dl,
-            "antennas_ul": self.antennas_ul,
+            "common_scs_khz": self.common_scs_khz,
+            "sample_rate_mhz": self.sample_rate_mhz,
+            "tx_gain_db": self.tx_gain_db,
+            "rx_gain_db": self.rx_gain_db,
+            "ss0_index": self.ss0_index,
+            "coreset0_index": self.coreset0_index,
+            "prach_config_index": self.prach_config_index,
+            "device_args_sha256": self.device_args_sha256,
             "acceptance": "offline-render-validated",
         }
 
@@ -792,9 +606,14 @@ class PhysicalHelmRenderEvidence:
         integer_fields = (
             "replicas",
             "carrier_arfcn",
+            "band",
             "channel_bandwidth_mhz",
-            "antennas_dl",
-            "antennas_ul",
+            "common_scs_khz",
+            "tx_gain_db",
+            "rx_gain_db",
+            "ss0_index",
+            "coreset0_index",
+            "prach_config_index",
         )
         if any(
             not isinstance(payload.get(field), int)
@@ -804,31 +623,84 @@ class PhysicalHelmRenderEvidence:
             raise R2LabPhysicalHelmError(
                 "stored physical render evidence contains malformed numeric values"
             )
+        sample_rate = payload.get("sample_rate_mhz")
+        if not isinstance(sample_rate, (int, float)) or isinstance(sample_rate, bool):
+            raise R2LabPhysicalHelmError(
+                "stored physical render evidence contains a malformed sample rate"
+            )
+        text_fields = (
+            "sha256",
+            "source_values_sha256",
+            "strategy",
+            "image_reference",
+            "device_args_sha256",
+        )
         if any(
             not isinstance(payload.get(field), str) or not payload.get(field)
-            for field in ("sha256", "strategy", "image_reference")
+            for field in text_fields
         ):
             raise R2LabPhysicalHelmError(
                 "stored physical render evidence contains malformed text values"
             )
         evidence = cls(
             sha256=str(payload.get("sha256", "")),
+            source_values_sha256=str(payload.get("source_values_sha256", "")),
             replicas=payload.get("replicas", -1),
             strategy=str(payload.get("strategy", "")),
             image_reference=str(payload.get("image_reference", "")),
             carrier_arfcn=payload.get("carrier_arfcn", -1),
+            band=payload.get("band", -1),
             channel_bandwidth_mhz=payload.get("channel_bandwidth_mhz", -1),
-            antennas_dl=payload.get("antennas_dl", -1),
-            antennas_ul=payload.get("antennas_ul", -1),
+            common_scs_khz=payload.get("common_scs_khz", -1),
+            sample_rate_mhz=float(sample_rate),
+            tx_gain_db=payload.get("tx_gain_db", -1),
+            rx_gain_db=payload.get("rx_gain_db", -1),
+            ss0_index=payload.get("ss0_index", -1),
+            coreset0_index=payload.get("coreset0_index", -1),
+            prach_config_index=payload.get("prach_config_index", -1),
+            device_args_sha256=str(payload.get("device_args_sha256", "")),
         )
         if evidence.to_dict() != dict(payload):
             raise R2LabPhysicalHelmError(
                 "stored physical render evidence is malformed"
             )
-        _validate_sha256_digest(
-            evidence.sha256, "render digest", R2LabPhysicalHelmError
-        )
+        for value, label in (
+            (evidence.sha256, "render digest"),
+            (evidence.source_values_sha256, "source values digest"),
+            (evidence.device_args_sha256, "device arguments digest"),
+        ):
+            _validate_sha256_digest(value, label, R2LabPhysicalHelmError)
         return evidence
+
+
+@dataclass(frozen=True)
+class _PinnedRadioValues:
+    carrier_arfcn: int
+    band: int
+    channel_bandwidth_mhz: int
+    common_scs_khz: int
+    sample_rate_mhz: float
+    tx_gain_db: int
+    rx_gain_db: int
+    ss0_index: int
+    coreset0_index: int
+    prach_config_index: int
+    device_args: str
+
+    def comparable(self) -> tuple[object, ...]:
+        return (
+            self.carrier_arfcn,
+            self.band,
+            self.channel_bandwidth_mhz,
+            self.common_scs_khz,
+            self.sample_rate_mhz,
+            self.tx_gain_db,
+            self.rx_gain_db,
+            self.ss0_index,
+            self.coreset0_index,
+            self.prach_config_index,
+            self.device_args,
+        )
 
 
 def _locked_helm_version(lock: DependencyLock, error_type: type[RuntimeError]) -> str:
@@ -853,19 +725,88 @@ def _expected_image(bundle: PhysicalChartBundle) -> str:
 
 
 def _integer_after(text: str, key: str) -> int:
-    matches = re.findall(rf"(?m)^\s*{re.escape(key)}:\s*([0-9]+)\s*$", text)
+    matches = re.findall(
+        rf"(?m)^\s*{re.escape(key)}:\s*([0-9]+)(?:\s+#.*)?\s*$",
+        text,
+    )
     if len(matches) != 1:
         raise R2LabPhysicalHelmError(
-            f"rendered physical chart must contain exactly one {key} value"
+            f"physical configuration must contain exactly one {key} value"
         )
     return int(matches[0])
 
 
+def _number_after(text: str, key: str) -> float:
+    matches = re.findall(
+        rf"(?m)^\s*{re.escape(key)}:\s*([0-9]+(?:\.[0-9]+)?)(?:\s+#.*)?\s*$",
+        text,
+    )
+    if len(matches) != 1:
+        raise R2LabPhysicalHelmError(
+            f"physical configuration must contain exactly one {key} value"
+        )
+    return float(matches[0])
+
+
+def _text_after(text: str, key: str) -> str:
+    matches = re.findall(
+        rf"(?m)^\s*{re.escape(key)}:\s*([^#\r\n]+?)(?:\s+#.*)?\s*$",
+        text,
+    )
+    if len(matches) != 1:
+        raise R2LabPhysicalHelmError(
+            f"physical configuration must contain exactly one {key} value"
+        )
+    return matches[0].strip().strip("\"'")
+
+
+def _pinned_radio_values(text: str) -> _PinnedRadioValues:
+    if _text_after(text, "device_driver") != "uhd":
+        raise R2LabPhysicalHelmError(
+            "pinned R2Lab configuration must use the UHD radio driver"
+        )
+    return _PinnedRadioValues(
+        carrier_arfcn=_integer_after(text, "dl_arfcn"),
+        band=_integer_after(text, "band"),
+        channel_bandwidth_mhz=_integer_after(text, "channel_bandwidth_MHz"),
+        common_scs_khz=_integer_after(text, "common_scs"),
+        sample_rate_mhz=_number_after(text, "srate"),
+        tx_gain_db=_integer_after(text, "tx_gain"),
+        rx_gain_db=_integer_after(text, "rx_gain"),
+        ss0_index=_integer_after(text, "ss0_index"),
+        coreset0_index=_integer_after(text, "coreset0_index"),
+        prach_config_index=_integer_after(text, "prach_config_index"),
+        device_args=_text_after(text, "device_args"),
+    )
+
+
+def _device_address(device_args: str) -> str:
+    match = re.search(r"(?:^|,)addr=([^,]+)", device_args)
+    if match is None:
+        raise R2LabPhysicalHelmError(
+            "pinned R2Lab device arguments do not contain an N300 address"
+        )
+    return match.group(1)
+
+
 def validate_physical_helm_render(
-    *, text: str, bundle: PhysicalChartBundle
+    *,
+    text: str,
+    bundle: PhysicalChartBundle,
+    source_values_text: str,
+    source_values_sha256: str,
 ) -> PhysicalHelmRenderEvidence:
     if not text.strip():
         raise R2LabPhysicalHelmError("Helm rendered no physical chart output")
+    _validate_sha256_digest(
+        source_values_sha256,
+        "source values digest",
+        R2LabPhysicalHelmError,
+    )
+    if hashlib.sha256(source_values_text.encode("utf-8")).hexdigest() != source_values_sha256:
+        raise R2LabPhysicalHelmError(
+            "pinned R2Lab source values changed after workspace review"
+        )
     expected_image = _expected_image(bundle)
     if text.count(expected_image) != 1:
         raise R2LabPhysicalHelmError(
@@ -883,32 +824,23 @@ def validate_physical_helm_render(
         raise R2LabPhysicalHelmError(
             "rendered physical gNB must use exactly one Recreate strategy"
         )
-    carrier = _integer_after(text, "dl_arfcn")
-    bandwidth = _integer_after(text, "channel_bandwidth_MHz")
-    antennas_dl = _integer_after(text, "nof_antennas_dl")
-    antennas_ul = _integer_after(text, "nof_antennas_ul")
-    gnb_config = bundle.values.get("gnbConfig")
-    cell_cfg = gnb_config.get("cell_cfg") if isinstance(gnb_config, dict) else None
-    if not isinstance(cell_cfg, dict):
-        raise R2LabPhysicalHelmError("physical chart bundle cell intent is missing")
-    expected_carrier = cell_cfg.get("dl_arfcn")
-    expected_bandwidth = cell_cfg.get("channel_bandwidth_MHz")
-    expected_antennas_dl = cell_cfg.get("nof_antennas_dl")
-    expected_antennas_ul = cell_cfg.get("nof_antennas_ul")
+
+    source_radio = _pinned_radio_values(source_values_text)
+    rendered_radio = _pinned_radio_values(text)
+    if rendered_radio.comparable() != source_radio.comparable():
+        raise R2LabPhysicalHelmError(
+            "rendered physical radio values differ from the pinned R2Lab source"
+        )
+    expected_n300 = bundle.review.get("n300_address")
     if (
-        carrier != expected_carrier
-        or bandwidth != expected_bandwidth
-        or antennas_dl != expected_antennas_dl
-        or antennas_ul != expected_antennas_ul
+        not isinstance(expected_n300, str)
+        or _device_address(rendered_radio.device_args) != expected_n300
     ):
         raise R2LabPhysicalHelmError(
-            "rendered physical radio values do not match the reviewed chart intent"
+            "pinned R2Lab N300 address does not match the authorized binding"
         )
+
     lowered = text.lower()
-    if "coreset0_index" in lowered or "prach_config_index" in lowered:
-        raise R2LabPhysicalHelmError(
-            "rendered physical chart inherited srsUE-specific radio overrides"
-        )
     if re.search(r"(?m)^\s*image:\s*busybox(?::|\s|$)", text):
         raise R2LabPhysicalHelmError(
             "rendered physical chart contains the unpinned optional log sidecar"
@@ -944,13 +876,23 @@ def validate_physical_helm_render(
         )
     return PhysicalHelmRenderEvidence(
         sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        source_values_sha256=source_values_sha256,
         replicas=replicas,
         strategy="Recreate",
         image_reference=expected_image,
-        carrier_arfcn=carrier,
-        channel_bandwidth_mhz=bandwidth,
-        antennas_dl=antennas_dl,
-        antennas_ul=antennas_ul,
+        carrier_arfcn=rendered_radio.carrier_arfcn,
+        band=rendered_radio.band,
+        channel_bandwidth_mhz=rendered_radio.channel_bandwidth_mhz,
+        common_scs_khz=rendered_radio.common_scs_khz,
+        sample_rate_mhz=rendered_radio.sample_rate_mhz,
+        tx_gain_db=rendered_radio.tx_gain_db,
+        rx_gain_db=rendered_radio.rx_gain_db,
+        ss0_index=rendered_radio.ss0_index,
+        coreset0_index=rendered_radio.coreset0_index,
+        prach_config_index=rendered_radio.prach_config_index,
+        device_args_sha256=hashlib.sha256(
+            rendered_radio.device_args.encode("utf-8")
+        ).hexdigest(),
     )
 
 
@@ -984,6 +926,8 @@ def render_physical_chart_offline(
         "--namespace",
         NAMESPACE,
         "--values",
+        str(workspace.source_values_file),
+        "--values",
         str(workspace.values_file),
     )
     try:
@@ -992,7 +936,19 @@ def render_physical_chart_offline(
         raise R2LabPhysicalHelmError("offline Helm template command failed") from exc
     if result.returncode != 0:
         raise R2LabPhysicalHelmError("offline Helm template command returned nonzero")
-    evidence = validate_physical_helm_render(text=result.stdout, bundle=bundle)
+    try:
+        source_values_bytes = workspace.source_values_file.read_bytes()
+        source_values_text = source_values_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise R2LabPhysicalHelmError(
+            "pinned R2Lab source values could not be read"
+        ) from exc
+    evidence = validate_physical_helm_render(
+        text=result.stdout,
+        bundle=bundle,
+        source_values_text=source_values_text,
+        source_values_sha256=workspace.source_values_sha256,
+    )
     return result.stdout, evidence
 
 
@@ -1000,8 +956,10 @@ def render_physical_chart_offline(
 class PhysicalChartArtifact:
     run_id: str
     package_path: Path
+    source_values_path: Path
     values_path: Path
     package_sha256: str
+    source_values_sha256: str
     values_sha256: str
 
     def to_dict(self) -> dict[str, str]:
@@ -1009,6 +967,8 @@ class PhysicalChartArtifact:
             "run_id": self.run_id,
             "package_file": self.package_path.name,
             "package_sha256": self.package_sha256,
+            "source_values_file": self.source_values_path.name,
+            "source_values_sha256": self.source_values_sha256,
             "values_file": self.values_path.name,
             "values_sha256": self.values_sha256,
             "acceptance": "offline-packaged-only",
@@ -1034,7 +994,11 @@ def package_physical_chart(
     except Exception as exc:
         raise R2LabPhysicalArtifactError(str(exc)) from exc
     chart_root = workspace.chart_root
-    if not chart_root.is_dir() or not workspace.values_file.is_file():
+    if (
+        not chart_root.is_dir()
+        or not workspace.source_values_file.is_file()
+        or not workspace.values_file.is_file()
+    ):
         raise R2LabPhysicalArtifactError("physical chart workspace is incomplete")
     try:
         files = sorted(
@@ -1053,8 +1017,9 @@ def package_physical_chart(
     destination = destination.resolve()
     destination.mkdir(parents=True, exist_ok=True)
     package_path = destination / f"srsran-gnb-{validated_run_id}.tgz"
+    source_values_path = destination / SOURCE_VALUES_FILE_NAME
     values_path = destination / VALUES_FILE_NAME
-    if package_path.exists() or values_path.exists():
+    if package_path.exists() or source_values_path.exists() or values_path.exists():
         raise R2LabPhysicalArtifactError("physical chart artifact already exists")
     try:
         with package_path.open("wb") as raw:
@@ -1072,14 +1037,25 @@ def package_physical_chart(
                         info.mode = 0o644
                         with path.open("rb") as stream:
                             archive.addfile(info, stream)
+        source_values_path.write_bytes(workspace.source_values_file.read_bytes())
         values_path.write_bytes(workspace.values_file.read_bytes())
     except OSError as exc:
         package_path.unlink(missing_ok=True)
+        source_values_path.unlink(missing_ok=True)
         values_path.unlink(missing_ok=True)
         raise R2LabPhysicalArtifactError("unable to package physical chart workspace") from exc
+    source_values_sha256 = _artifact_sha256_file(source_values_path)
+    if source_values_sha256 != workspace.source_values_sha256:
+        package_path.unlink(missing_ok=True)
+        source_values_path.unlink(missing_ok=True)
+        values_path.unlink(missing_ok=True)
+        raise R2LabPhysicalArtifactError(
+            "copied R2Lab source values do not match the pinned workspace digest"
+        )
     values_sha256 = _artifact_sha256_file(values_path)
     if values_sha256 != workspace.values_sha256:
         package_path.unlink(missing_ok=True)
+        source_values_path.unlink(missing_ok=True)
         values_path.unlink(missing_ok=True)
         raise R2LabPhysicalArtifactError(
             "copied physical chart values do not match the reviewed workspace digest"
@@ -1087,8 +1063,10 @@ def package_physical_chart(
     return PhysicalChartArtifact(
         run_id=validated_run_id,
         package_path=package_path,
+        source_values_path=source_values_path,
         values_path=values_path,
         package_sha256=_artifact_sha256_file(package_path),
+        source_values_sha256=source_values_sha256,
         values_sha256=values_sha256,
     )
 
@@ -1452,34 +1430,43 @@ def discover_physical_chart_bindings(
     ru_sdr = gnb_config.get("ru_sdr") if isinstance(gnb_config, dict) else None
     usrp = values.get("usrp")
     ipam = usrp.get("ipam") if isinstance(usrp, dict) else None
-    if not all(isinstance(item, dict) for item in (amf, ru_sdr, usrp, ipam)):
+    if not isinstance(amf, dict):
         raise R2LabPhysicalChartError(
             "stopped physical Helm values do not contain complete network bindings"
         )
-    device_args = ru_sdr.get("device_args")
-    match = (
-        re.fullmatch(r"addr=([^,]+),type=n3xx", device_args)
-        if isinstance(device_args, str)
-        else None
-    )
-    if match is None:
+    n300_address = usrp.get("address") if isinstance(usrp, dict) else None
+    if not isinstance(n300_address, str) and isinstance(ru_sdr, dict):
+        device_args = ru_sdr.get("device_args")
+        match = (
+            re.search(r"(?:^|,)addr=([^,]+)", device_args)
+            if isinstance(device_args, str)
+            else None
+        )
+        n300_address = match.group(1) if match is not None else None
+    if not isinstance(n300_address, str) or not n300_address:
         raise R2LabPhysicalChartError(
-            "stopped physical Helm values do not contain reviewed N300 device arguments"
+            "stopped physical Helm values do not contain the N300 binding"
         )
     gnb_address = values.get("gnbIp")
     if gnb_address != amf.get("bind_addr"):
         raise R2LabPhysicalChartError(
             "stopped physical Helm values disagree on the gNB N2 address"
         )
+    ru_subnet = ipam.get("subnet") if isinstance(ipam, dict) else None
+    if not isinstance(ru_subnet, str) or not ru_subnet:
+        ru_subnet = values.get("ruSubnet")
+    ru_master = usrp.get("master") if isinstance(usrp, dict) else None
+    if not isinstance(ru_master, str) or not ru_master:
+        ru_master = "r2lab_usrp"
     try:
         raw_bindings = (
             amf["addr"],
             gnb_address,
-            match.group(1),
+            n300_address,
             values["ruPodIp"],
-            ipam["subnet"],
+            ru_subnet,
             values.get("n3networkName"),
-            values.get("ru"),
+            ru_master,
             values.get("nodeName"),
         )
     except (KeyError, TypeError) as exc:
@@ -1602,15 +1589,9 @@ def execute_stopped_physical_staging(
         raise R2LabPhysicalStagingError(
             "physical render evidence is not stopped and singleton-safe"
         )
-    reviewed = r2lab_oai_aligned_candidate().profile
-    if (
-        render_evidence.carrier_arfcn != reviewed.carrier.value
-        or render_evidence.channel_bandwidth_mhz != reviewed.channel_bandwidth_mhz
-        or render_evidence.antennas_dl != reviewed.nof_antennas_dl
-        or render_evidence.antennas_ul != reviewed.nof_antennas_ul
-    ):
+    if render_evidence.source_values_sha256 != artifact.source_values_sha256:
         raise R2LabPhysicalStagingError(
-            "physical render evidence does not match the reviewed R2Lab radio reference"
+            "physical render evidence does not match the pinned R2Lab source values"
         )
     if timeout_seconds < 30 or timeout_seconds > 600:
         raise R2LabPhysicalStagingError(
@@ -1619,10 +1600,21 @@ def execute_stopped_physical_staging(
     known_hosts = known_hosts.expanduser().resolve()
     if not known_hosts.is_file():
         raise R2LabPhysicalStagingError("strict SLICES known-hosts file is missing")
-    if not artifact.package_path.is_file() or not artifact.values_path.is_file():
+    if (
+        not artifact.package_path.is_file()
+        or not artifact.source_values_path.is_file()
+        or not artifact.values_path.is_file()
+    ):
         raise R2LabPhysicalStagingError("physical artifact files are missing")
     if _staging_sha256_file(artifact.package_path) != artifact.package_sha256:
         raise R2LabPhysicalStagingError("physical chart package digest changed after review")
+    if (
+        _staging_sha256_file(artifact.source_values_path)
+        != artifact.source_values_sha256
+    ):
+        raise R2LabPhysicalStagingError(
+            "pinned R2Lab source values digest changed after review"
+        )
     if _staging_sha256_file(artifact.values_path) != artifact.values_sha256:
         raise R2LabPhysicalStagingError("physical chart values digest changed after review")
 
@@ -1647,6 +1639,7 @@ def execute_stopped_physical_staging(
 
     remote_root = f"/root/.synthran/{run_id}/physical-chart"
     remote_package = f"{remote_root}/{artifact.package_path.name}"
+    remote_source_values = f"{remote_root}/{artifact.source_values_path.name}"
     remote_values = f"{remote_root}/{artifact.values_path.name}"
     _checked(
         runner,
@@ -1659,6 +1652,7 @@ def execute_stopped_physical_staging(
         (
             *_strict_scp_base(known_hosts),
             str(artifact.package_path),
+            str(artifact.source_values_path),
             str(artifact.values_path),
             f"root@{CORE_NODE}:{remote_root}/",
         ),
@@ -1667,11 +1661,21 @@ def execute_stopped_physical_staging(
     )
     hashes = _checked(
         runner,
-        _ssh(known_hosts, "sha256sum", remote_package, remote_values),
+        _ssh(
+            known_hosts,
+            "sha256sum",
+            remote_package,
+            remote_source_values,
+            remote_values,
+        ),
         min(timeout_seconds, 60),
         "remote physical artifact digest verification",
     ).stdout
-    if artifact.package_sha256 not in hashes or artifact.values_sha256 not in hashes:
+    if (
+        artifact.package_sha256 not in hashes
+        or artifact.source_values_sha256 not in hashes
+        or artifact.values_sha256 not in hashes
+    ):
         raise R2LabPhysicalStagingError(
             "remote physical artifact digests do not match review"
         )
@@ -1785,6 +1789,8 @@ def execute_stopped_physical_staging(
             remote_package,
             "--namespace",
             NAMESPACE,
+            "--values",
+            remote_source_values,
             "--values",
             remote_values,
             "--wait",

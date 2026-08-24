@@ -337,10 +337,21 @@ def sync_dependencies(
     root: Path,
     *,
     include_transitive: bool = False,
+    names: Iterable[str] | None = None,
     dry_run: bool = False,
     output: TextIO,
 ) -> None:
-    selected = [entry for entry in lock.git if entry.sync or include_transitive]
+    requested = tuple(dict.fromkeys(names or ()))
+    if requested:
+        known = {entry.name for entry in lock.git}
+        unknown = sorted(set(requested) - known)
+        if unknown:
+            raise DependencyError(
+                "unknown Git dependencies: " + ", ".join(unknown)
+            )
+        selected = [entry for entry in lock.git if entry.name in requested]
+    else:
+        selected = [entry for entry in lock.git if entry.sync or include_transitive]
     if not selected:
         raise DependencyError("the dependency lock selected no Git repositories")
     for dependency in selected:

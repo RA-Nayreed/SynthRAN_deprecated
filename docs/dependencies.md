@@ -35,6 +35,14 @@ Inspect locked transitive Git repositories as well:
 python -m synthran deps sync --all
 ```
 
+Sync named dependencies without inspecting unrelated checkouts:
+
+```text
+python -m synthran deps sync \
+  --name fiveg_ansible \
+  --name srsran_helm
+```
+
 Synchronization refuses an origin mismatch or dirty managed checkout. It never merges an upstream branch and never discards local work.
 
 ## Golden-path variable mapping

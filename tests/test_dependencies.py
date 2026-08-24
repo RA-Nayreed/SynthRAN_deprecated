@@ -48,6 +48,33 @@ class DependencyLockTests(unittest.TestCase):
         self.assertIn("open5gs_k8s", output.getvalue())
         self.assertIn("srsran_helm", output.getvalue())
 
+    def test_dry_run_can_select_only_the_physical_dependencies(self) -> None:
+        lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
+        output = StringIO()
+        sync_dependencies(
+            lock,
+            REPOSITORY_ROOT / ".dry-run-deps-must-not-exist",
+            names=("fiveg_ansible", "srsran_helm"),
+            dry_run=True,
+            output=output,
+        )
+        rendered = output.getvalue()
+        self.assertIn("fiveg_ansible", rendered)
+        self.assertIn("srsran_helm", rendered)
+        self.assertNotIn("contiki_ng", rendered)
+        self.assertNotIn("open5gs_k8s", rendered)
+
+    def test_unknown_selected_dependency_is_rejected(self) -> None:
+        lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
+        with self.assertRaisesRegex(DependencyError, "unknown Git dependencies"):
+            sync_dependencies(
+                lock,
+                REPOSITORY_ROOT / ".dry-run-deps-must-not-exist",
+                names=("missing",),
+                dry_run=True,
+                output=StringIO(),
+            )
+
     def test_mutable_git_ref_is_rejected_as_commit(self) -> None:
         lock_data = json.loads((REPOSITORY_ROOT / "dependencies.lock.yml").read_text())
         lock_data["git"]["fiveg_ansible"]["commit"] = "main"
