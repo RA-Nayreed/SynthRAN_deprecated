@@ -221,6 +221,7 @@ def execute_physical_foundation_acceptance(
             owner=owner,
             allocation_id=allocation_id,
             timeout_seconds=timeout_seconds,
+            reclaim_conflicts=True,
         )
     except RuntimeError as exc:
         raise R2LabPhysicalFoundationError(
