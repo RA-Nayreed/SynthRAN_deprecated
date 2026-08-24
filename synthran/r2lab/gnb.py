@@ -243,6 +243,20 @@ def execute_physical_gnb_staging(
             runner=r2lab_runner,
             timeout_seconds=timeout_seconds,
         )
+
+        def verify_r2lab_authority() -> None:
+            refreshed = authorize_physical_start(
+                run_id=run_id,
+                slice_name=slice_name,
+                run_root=run_root,
+                runner=r2lab_runner,
+                timeout_seconds=timeout_seconds,
+            )
+            if refreshed != initial_authority:
+                raise R2LabPhysicalGnbError(
+                    "R2Lab authority changed during stopped physical staging"
+                )
+
         if physical_directory.exists():
             return _recover_staging(
                 evidence=evidence,
@@ -319,19 +333,10 @@ def execute_physical_gnb_staging(
                 known_hosts=known_hosts,
                 now=now,
                 runner=runner,
+                reservation_verifier=verify_r2lab_authority,
                 timeout_seconds=timeout_seconds,
             )
-            refreshed_authority = authorize_physical_start(
-                run_id=run_id,
-                slice_name=slice_name,
-                run_root=run_root,
-                runner=r2lab_runner,
-                timeout_seconds=timeout_seconds,
-            )
-            if refreshed_authority != initial_authority:
-                raise R2LabPhysicalGnbError(
-                    "R2Lab authority changed during stopped physical staging"
-                )
+            verify_r2lab_authority()
             _write_json(
                 temporary_directory / "physical-staging.json",
                 staging.to_dict(),
