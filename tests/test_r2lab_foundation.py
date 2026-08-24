@@ -429,6 +429,19 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
         self.assertNotIn("name: 5g/oai", wrapper)
         self.assertNotIn("name: 5g/srsRAN", wrapper)
 
+    def test_open5gs_ownership_labels_do_not_mutate_workload_selectors(self) -> None:
+        image_pins = (
+            REPOSITORY_ROOT
+            / "deploy"
+            / "ansible"
+            / "tasks"
+            / "pin-open5gs-images.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("includeSelectors: false", image_pins)
+        self.assertIn("includeTemplates: false", image_pins)
+        self.assertNotIn("commonLabels:", image_pins)
+
     def test_reconciliation_bootstraps_locked_core_runtime_before_wrapper(self) -> None:
         runner = ReconciliationRunner()
         authority_checks: list[bool] = []
