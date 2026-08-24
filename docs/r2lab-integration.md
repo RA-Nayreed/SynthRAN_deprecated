@@ -146,12 +146,15 @@ matching pods still fails before mutation.
 After the exact, retry-safe namespace handoff, the command requires exactly one
 ready AMF, SMF, and UPF pod. A missing or unready network function triggers one
 guarded reconciliation of the pinned `fiveg_ansible` Open5GS roles. That wrapper
-uses the default R2Lab profile for `qfit07`, the locked Open5GS source commit,
-digest-addressed images, the existing f2/f3 Kubernetes cluster, and the current
-run-owned namespace. It does not execute OAI, srsRAN, N300, qfit power, POS, or
-reservation roles. It removes only the pinned deferred `smf2` and `upf2`
-objects before reconciling the selected `smf1` and `upf1`. Current R2Lab and
-SLICES authority is refreshed immediately before and after the core mutation,
+first reconciles the dedicated Python runtime on the core node from the exact
+`remote_python` package versions in `dependencies.lock.yml`. The runtime action
+is limited to `core_node`; it does not prepare the RAN node or rebuild the
+cluster. The wrapper then uses the default R2Lab profile for `qfit07`, the locked
+Open5GS source commit, digest-addressed images, the existing f2/f3 Kubernetes
+cluster, and the current run-owned namespace. It does not execute OAI, srsRAN,
+N300, qfit power, POS, or reservation roles. It removes only the pinned deferred
+`smf2` and `upf2` objects before reconciling the selected `smf1` and `upf1`.
+Current R2Lab and SLICES authority is refreshed around both software mutations,
 and all three selected core functions are observed again before acceptance
 evidence is written.
 

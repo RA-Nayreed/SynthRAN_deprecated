@@ -18,7 +18,10 @@ from synthran.ansible_streaming import parse_ansible_line, run_streaming_ansible
 from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import validate_fiveg_checkout
 from synthran.live_preflight import CommandResult, Runner, subprocess_runner
-from synthran.network.resources import build_preparation_inventory
+from synthran.network.resources import (
+    build_preparation_inventory,
+    locked_preparation_variables,
+)
 from synthran.network.runtime import (
     RunCommand,
     atomic_json,
@@ -193,16 +196,22 @@ def reconcile_open5gs_foundation(
     try:
         lock = load_lock(lock_path)
         checkout = validate_fiveg_checkout(lock, dependency_root)
+        preparation_variables = locked_preparation_variables(lock)
     except Exception as exc:
         raise R2LabPhysicalFoundationError(
-            "locked fiveg_ansible checkout is not ready"
+            "locked Open5GS reconciliation inputs are not ready"
         ) from exc
 
     overlay_source = repository_root / "deploy" / "ansible"
     wrapper_source = overlay_source / "r2lab-open5gs-core.yml"
-    if not wrapper_source.is_file():
+    runtime_source = overlay_source / "prepare-python-runtime.yml"
+    runtime_tasks_source = overlay_source / "tasks" / "prepare-python-runtime.yml"
+    if any(
+        not source.is_file()
+        for source in (wrapper_source, runtime_source, runtime_tasks_source)
+    ):
         raise R2LabPhysicalFoundationError(
-            "physical Open5GS wrapper playbook is missing"
+            "physical Open5GS reconciliation overlay is incomplete"
         )
 
     inventory_path = output_directory / "hosts-physical.ini"
@@ -222,7 +231,10 @@ def reconcile_open5gs_foundation(
     overlay_sha256 = tree_sha256(overlay_source)
     atomic_json(
         variables_path,
-        {"synthran_images": golden_path_image_variables(lock)},
+        {
+            "synthran_images": golden_path_image_variables(lock),
+            **preparation_variables,
+        },
     )
 
     log_parts: list[str] = []
@@ -242,6 +254,9 @@ def reconcile_open5gs_foundation(
             "dependencies": {
                 "fiveg_ansible": fiveg_commit,
                 "open5gs_k8s": open5gs_commit,
+                "remote_python": preparation_variables[
+                    "synthran_remote_python_expected"
+                ],
             },
             "overlay_sha256": overlay_sha256,
             "hardware_mutation": False,
@@ -306,6 +321,20 @@ def reconcile_open5gs_foundation(
             )
         report(f"{name}: OK ({monotonic() - started:.1f}s)")
         return result
+
+    def verify_authority(name: str) -> None:
+        report(f"{name}: running...")
+        log_parts.append(f"=== {name} ===")
+        try:
+            authority_verifier()
+        except Exception as exc:
+            persist("failed", name)
+            report(f"{name}: FAILED")
+            raise R2LabPhysicalFoundationError(
+                f"Open5GS reconciliation stage {name} could not complete"
+            ) from exc
+        log_parts.append("authority verified")
+        report(f"{name}: OK")
 
     environment = dict(os.environ)
     collections = output_directory / "collections"
@@ -380,6 +409,16 @@ def reconcile_open5gs_foundation(
                 worktree,
                 environment,
             )
+            runtime_playbook = (
+                "ansible-playbook",
+                "-i",
+                str(inventory_path),
+                "--limit",
+                "core_node",
+                "-e",
+                f"@{variables_path}",
+                str(overlay_directory / "prepare-python-runtime.yml"),
+            )
             playbook = (
                 "ansible-playbook",
                 "-i",
@@ -399,12 +438,26 @@ def reconcile_open5gs_foundation(
                 str(overlay_directory / "r2lab-open5gs-core.yml"),
             )
             stage(
+                "open5gs-runtime-syntax",
+                (*runtime_playbook[:-1], "--syntax-check", runtime_playbook[-1]),
+                worktree,
+                environment,
+            )
+            stage(
                 "open5gs-syntax",
                 (*playbook[:-1], "--syntax-check", playbook[-1]),
                 worktree,
                 environment,
             )
-            authority_verifier()
+            verify_authority("open5gs-runtime-authority-before")
+            stage(
+                "open5gs-runtime",
+                runtime_playbook,
+                worktree,
+                environment,
+                streaming=True,
+            )
+            verify_authority("open5gs-runtime-authority-after")
             stage(
                 "open5gs-reconcile",
                 playbook,
@@ -412,7 +465,7 @@ def reconcile_open5gs_foundation(
                 environment,
                 streaming=True,
             )
-            authority_verifier()
+            verify_authority("open5gs-reconcile-authority-after")
         except UpstreamOverlayError as exc:
             persist("failed", "open5gs-overlay")
             raise R2LabPhysicalFoundationError(str(exc)) from exc
