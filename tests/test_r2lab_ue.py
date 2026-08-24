@@ -24,6 +24,7 @@ from synthran.r2lab.radio import (
 )
 from synthran.r2lab.runtime import GnbN2Evidence, N2State
 from synthran.r2lab.ue import (
+    _verify_current_gnb_n2,
     PhysicalWorkloadResult,
     QfitActivationRequest,
     QfitActivationResult,
@@ -391,7 +392,7 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
     @patch("synthran.r2lab.ue.execute_qfit_activation")
     @patch("synthran.r2lab.runtime.execute_qfit_runtime_probe")
     @patch("synthran.r2lab.runtime.execute_qfit_management_probe")
-    @patch("synthran.r2lab.runtime.verify_gnb_n2")
+    @patch("synthran.r2lab.ue._verify_current_gnb_n2")
     @patch("synthran.r2lab.controller.authorize_physical_start")
     def test_authorized_activation_advances_only_through_pdu(
         self,
@@ -434,7 +435,7 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
     @patch("synthran.r2lab.ue.execute_qfit_activation")
     @patch("synthran.r2lab.runtime.execute_qfit_runtime_probe")
     @patch("synthran.r2lab.runtime.execute_qfit_management_probe")
-    @patch("synthran.r2lab.runtime.verify_gnb_n2")
+    @patch("synthran.r2lab.ue._verify_current_gnb_n2")
     @patch("synthran.r2lab.controller.authorize_physical_start")
     def test_provider_attach_can_precede_registration_acceptance(
         self,
@@ -480,7 +481,7 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
     @patch("synthran.r2lab.ue.execute_user_plane_probe")
     @patch("synthran.r2lab.runtime.execute_qfit_runtime_probe")
     @patch("synthran.r2lab.runtime.execute_qfit_management_probe")
-    @patch("synthran.r2lab.runtime.verify_gnb_n2")
+    @patch("synthran.r2lab.ue._verify_current_gnb_n2")
     @patch("synthran.r2lab.controller.authorize_physical_start")
     def test_authorized_user_plane_requires_current_pdu_reproof(
         self,
@@ -522,6 +523,31 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
             outcome.evidence.acceptance.next_stage,
         )
 
+    @patch("synthran.r2lab.runtime.verify_gnb_n2")
+    @patch(
+        "synthran.r2lab.gnb.load_expected_gnb_n2_peer",
+        return_value="198.51.100.234",
+    )
+    def test_current_gnb_check_reuses_rendered_peer(self, load_peer, verify_gnb) -> None:
+        verify_gnb.return_value = proven_gnb()
+
+        result = _verify_current_gnb_n2(
+            evidence=base_evidence(),
+            run_root=Path("/tmp/r2lab-tests"),
+            known_hosts=Path(__file__),
+            runner=lambda command, timeout: CommandResult(0, "", ""),
+            timeout_seconds=30,
+        )
+
+        self.assertTrue(result.proven)
+        load_peer.assert_called_once_with(
+            Path("/tmp/r2lab-tests") / RUN_ID / "physical"
+        )
+        self.assertEqual(
+            "198.51.100.234",
+            verify_gnb.call_args.kwargs["expected_gnb_n2_peer"],
+        )
+
 
 class R2LabPhysicalWorkloadHandoffTests(unittest.TestCase):
     def patch_current_path(self):
@@ -531,7 +557,7 @@ class R2LabPhysicalWorkloadHandoffTests(unittest.TestCase):
                 return_value=authority(),
             ),
             patch(
-                "synthran.r2lab.runtime.verify_gnb_n2",
+                "synthran.r2lab.ue._verify_current_gnb_n2",
                 return_value=proven_gnb(),
             ),
             patch(

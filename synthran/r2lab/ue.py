@@ -642,6 +642,27 @@ def _persist(evidence: PhysicalRunEvidence, path: Path | None) -> None:
         evidence.write_json(path)
 
 
+def _verify_current_gnb_n2(
+    *,
+    evidence: PhysicalRunEvidence,
+    run_root: Path,
+    known_hosts: Path,
+    runner: Runner,
+    timeout_seconds: int,
+):
+    from synthran.r2lab.gnb import load_expected_gnb_n2_peer
+    from synthran.r2lab.runtime import verify_gnb_n2
+
+    physical_directory = run_root / evidence.run_id / "physical"
+    return verify_gnb_n2(
+        evidence=evidence,
+        known_hosts=known_hosts,
+        runner=runner,
+        expected_gnb_n2_peer=load_expected_gnb_n2_peer(physical_directory),
+        timeout_seconds=min(timeout_seconds, 60),
+    )
+
+
 @dataclass(frozen=True)
 class AuthorizedQfitActivationOutcome:
     evidence: PhysicalRunEvidence
@@ -668,7 +689,6 @@ def execute_authorized_qfit_activation(
     from synthran.r2lab.runtime import (
         execute_qfit_management_probe,
         execute_qfit_runtime_probe,
-        verify_gnb_n2,
     )
 
     if evidence.gnb_start is None:
@@ -686,11 +706,12 @@ def execute_authorized_qfit_activation(
         raise R2LabQfitActivationError("R2Lab claim or selected-resource authority changed")
 
     if state.acceptance.next_stage is PhysicalAcceptanceStage.GNB_N2:
-        gnb = verify_gnb_n2(
+        gnb = _verify_current_gnb_n2(
             evidence=state,
+            run_root=run_root,
             known_hosts=known_hosts,
             runner=cluster_runner,
-            timeout_seconds=min(timeout_seconds, 60),
+            timeout_seconds=timeout_seconds,
         )
         source = (
             "qfit-preactivation-gnb:"
@@ -767,11 +788,12 @@ def execute_authorized_qfit_activation(
     ).validate()
     if not _same_authority(authority, state):
         raise R2LabQfitActivationError("R2Lab authority changed before qfit activation")
-    current_gnb = verify_gnb_n2(
+    current_gnb = _verify_current_gnb_n2(
         evidence=state,
+        run_root=run_root,
         known_hosts=known_hosts,
         runner=cluster_runner,
-        timeout_seconds=min(timeout_seconds, 60),
+        timeout_seconds=timeout_seconds,
     )
     if not current_gnb.proven:
         raise R2LabQfitActivationError("current singleton gNB/N2 proof was lost before attach")
@@ -857,7 +879,6 @@ def execute_authorized_qfit_user_plane(
     from synthran.r2lab.runtime import (
         execute_qfit_management_probe,
         execute_qfit_runtime_probe,
-        verify_gnb_n2,
     )
 
     if evidence.acceptance.next_stage is not PhysicalAcceptanceStage.USER_PLANE:
@@ -871,11 +892,12 @@ def execute_authorized_qfit_user_plane(
     ).validate()
     if not _same_authority(authority, evidence):
         raise R2LabQfitActivationError("R2Lab authority changed before user-plane proof")
-    gnb = verify_gnb_n2(
+    gnb = _verify_current_gnb_n2(
         evidence=evidence,
+        run_root=run_root,
         known_hosts=known_hosts,
         runner=cluster_runner,
-        timeout_seconds=min(timeout_seconds, 60),
+        timeout_seconds=timeout_seconds,
     )
     if not gnb.proven:
         raise R2LabQfitActivationError("current singleton gNB/N2 proof was lost before user plane")
@@ -1020,7 +1042,6 @@ def execute_physical_workload_handoff(
     from synthran.r2lab.runtime import (
         execute_qfit_management_probe,
         execute_qfit_runtime_probe,
-        verify_gnb_n2,
     )
 
     if evidence.acceptance.next_stage is not PhysicalAcceptanceStage.WORKLOAD:
@@ -1039,11 +1060,12 @@ def execute_physical_workload_handoff(
     ).validate()
     if not _same_authority(authority, evidence):
         raise R2LabQfitActivationError("R2Lab authority changed before workload handoff")
-    gnb = verify_gnb_n2(
+    gnb = _verify_current_gnb_n2(
         evidence=evidence,
+        run_root=run_root,
         known_hosts=known_hosts,
         runner=cluster_runner,
-        timeout_seconds=min(timeout_seconds, 60),
+        timeout_seconds=timeout_seconds,
     )
     if not gnb.proven:
         raise R2LabQfitActivationError("current singleton gNB/N2 proof was lost before workload")
