@@ -129,8 +129,14 @@ refresh current authority and reprove the physical path.
 After `r2lab prepare` has made the selected N300 and qfit ready, the physical
 foundation command verifies both authority domains, both selected Kubernetes
 nodes, exactly one ready AMF, SMF, and UPF pod, a stopped physical gNB, and the
-Open5GS namespace owner. Health checks happen before the only mutation: an exact,
-retry-safe namespace ownership handoff from the previous run to the current run.
+Open5GS namespace owner. If the allocation identifier is omitted and another
+operator still holds either selected node, one active owner reservation covering
+both nodes authorizes exact forced releases and one shared replacement allocation.
+The command binds every allocation mutation to the same live reservation and
+unchanged R2Lab claim, then proves the new allocation before continuing. An
+explicit allocation identifier never permits reclamation. Health checks happen
+before the exact, retry-safe namespace ownership handoff from the previous run to
+the current run.
 
 ```text
 python -m synthran r2lab foundation \
