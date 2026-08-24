@@ -1465,7 +1465,6 @@ def discover_physical_chart_bindings(
             ru_subnet,
             values.get("n3networkName"),
             ru_master,
-            values.get("nodeName"),
         )
     except (KeyError, TypeError) as exc:
         raise R2LabPhysicalChartError(
@@ -1483,7 +1482,7 @@ def discover_physical_chart_bindings(
         ru_subnet=raw_bindings[4],
         n3_network_name=raw_bindings[5],
         ru_master=raw_bindings[6],
-        node_name=raw_bindings[7],
+        node_name=CURRENT_RAN_NODE,
     )
     return bindings.validate()
 
