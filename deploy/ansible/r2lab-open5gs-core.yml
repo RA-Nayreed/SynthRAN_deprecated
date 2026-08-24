@@ -149,5 +149,5 @@
           - --all
           - "synthran.run/id={{ synthran_run_id }}"
       environment:
-        KUBECONFIG: /etc/kubernetes/admin.conf
+        KUBECONFIG: "{{ synthran_kubeconfig }}"
       changed_when: true
