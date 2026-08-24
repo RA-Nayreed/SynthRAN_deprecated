@@ -20,7 +20,7 @@ from pathlib import Path
 import re
 import tempfile
 import time
-from typing import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Callable, Mapping, Sequence
 
 from synthran.live_preflight import CommandResult
 from synthran.network.runtime import validate_run_id
@@ -39,6 +39,9 @@ from synthran.r2lab.radio import (
     UserPlaneProbeEvidence,
     execute_user_plane_probe,
 )
+
+if TYPE_CHECKING:
+    from synthran.r2lab.runtime import GnbN2Evidence
 
 
 Runner = Callable[[Sequence[str], int], CommandResult]
@@ -663,6 +666,19 @@ def _verify_current_gnb_n2(
     )
 
 
+def _require_proven_gnb_n2(
+    observation: "GnbN2Evidence",
+    *,
+    boundary: str,
+) -> None:
+    if observation.proven:
+        return
+    reasons = ",".join(observation.unproven_reasons) or "unspecified"
+    raise R2LabQfitActivationError(
+        f"current singleton gNB/N2 proof failed before {boundary}: {reasons}"
+    )
+
+
 @dataclass(frozen=True)
 class AuthorizedQfitActivationOutcome:
     evidence: PhysicalRunEvidence
@@ -795,8 +811,7 @@ def execute_authorized_qfit_activation(
         runner=cluster_runner,
         timeout_seconds=timeout_seconds,
     )
-    if not current_gnb.proven:
-        raise R2LabQfitActivationError("current singleton gNB/N2 proof was lost before attach")
+    _require_proven_gnb_n2(current_gnb, boundary="attach")
     if not execute_qfit_management_probe(
         slice_name=slice_name,
         qfit=authority.ue,
@@ -899,8 +914,7 @@ def execute_authorized_qfit_user_plane(
         runner=cluster_runner,
         timeout_seconds=timeout_seconds,
     )
-    if not gnb.proven:
-        raise R2LabQfitActivationError("current singleton gNB/N2 proof was lost before user plane")
+    _require_proven_gnb_n2(gnb, boundary="user plane")
     if not execute_qfit_management_probe(
         slice_name=slice_name,
         qfit=authority.ue,
@@ -1067,8 +1081,7 @@ def execute_physical_workload_handoff(
         runner=cluster_runner,
         timeout_seconds=timeout_seconds,
     )
-    if not gnb.proven:
-        raise R2LabQfitActivationError("current singleton gNB/N2 proof was lost before workload")
+    _require_proven_gnb_n2(gnb, boundary="workload")
     if not execute_qfit_management_probe(
         slice_name=slice_name,
         qfit=authority.ue,

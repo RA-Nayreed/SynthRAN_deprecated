@@ -24,6 +24,7 @@ from synthran.r2lab.radio import (
 )
 from synthran.r2lab.runtime import GnbN2Evidence, N2State
 from synthran.r2lab.ue import (
+    _require_proven_gnb_n2,
     _verify_current_gnb_n2,
     PhysicalWorkloadResult,
     QfitActivationRequest,
@@ -133,13 +134,13 @@ def authority() -> PhysicalStartAuthority:
     )
 
 
-def proven_gnb() -> GnbN2Evidence:
+def proven_gnb(*, ready_running_count: int = 1) -> GnbN2Evidence:
     return GnbN2Evidence(
         namespace_owned=True,
         deployment_bound=True,
         desired_replicas=1,
         pod_count=1,
-        ready_running_count=1,
+        ready_running_count=ready_running_count,
         n2_state=N2State.ESTABLISHED,
         log_observed=True,
         transport_error=False,
@@ -547,6 +548,16 @@ class R2LabAuthorizedQfitFlowTests(unittest.TestCase):
             "198.51.100.234",
             verify_gnb.call_args.kwargs["expected_gnb_n2_peer"],
         )
+
+    def test_current_gnb_failure_names_the_sanitized_blocker(self) -> None:
+        with self.assertRaisesRegex(
+            R2LabQfitActivationError,
+            "ready-running-count",
+        ):
+            _require_proven_gnb_n2(
+                proven_gnb(ready_running_count=0),
+                boundary="attach",
+            )
 
 
 class R2LabPhysicalWorkloadHandoffTests(unittest.TestCase):

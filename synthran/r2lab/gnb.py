@@ -81,7 +81,7 @@ class PhysicalGnbN2Summary:
 
     @property
     def proven(self) -> bool:
-        return self.verification.gnb_n2.proven
+        return self.verification.proven
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -89,6 +89,13 @@ class PhysicalGnbN2Summary:
             "status": "gnb-n2-ready" if self.proven else "gnb-n2-not-proven",
             "next_stage": "ue-management" if self.proven else None,
             "attempts": self.verification.attempts,
+            "stability": {
+                "consecutive_proofs": self.verification.consecutive_proofs,
+                "required_consecutive_proofs": (
+                    self.verification.required_consecutive_proofs
+                ),
+                "proven": self.verification.proven,
+            },
             "evidence_path": str(self.evidence_path),
             "observation_path": str(self.observation_path),
             "gnb_n2": self.verification.gnb_n2.to_dict(),
@@ -510,10 +517,11 @@ def execute_physical_gnb_n2_acceptance(
             evidence_path=evidence_path,
             timeout_seconds=min(timeout_seconds, 60),
             attempts=attempts,
+            required_consecutive_proofs=attempts,
             poll_interval_seconds=poll_interval_seconds,
         )
         _write_json(observation_path, verification.gnb_n2.to_dict())
-        if not verification.gnb_n2.proven:
+        if not verification.proven:
             _stop_gnb_after_unsuccessful_proof(
                 staging=staging,
                 owner=owner,

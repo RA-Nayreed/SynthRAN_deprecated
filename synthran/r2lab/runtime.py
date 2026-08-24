@@ -125,6 +125,29 @@ class GnbN2Evidence:
             and self.n2_source in {"gnb-log", "amf-exact-peer"}
         )
 
+    @property
+    def unproven_reasons(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self.transport_error:
+            reasons.append("transport-error")
+        if not self.namespace_owned:
+            reasons.append("namespace-ownership")
+        if not self.deployment_bound:
+            reasons.append("deployment-binding")
+        if self.desired_replicas != 1:
+            reasons.append("desired-replicas")
+        if self.pod_count != 1:
+            reasons.append("pod-count")
+        if self.ready_running_count != 1:
+            reasons.append("ready-running-count")
+        if not self.log_observed:
+            reasons.append("log-observation")
+        if self.n2_state is not N2State.ESTABLISHED:
+            reasons.append("n2-state")
+        if self.n2_source not in {"gnb-log", "amf-exact-peer"}:
+            reasons.append("n2-source")
+        return tuple(reasons)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "namespace_owned": self.namespace_owned,
@@ -209,6 +232,15 @@ class PhysicalGnbN2VerificationResult:
     evidence: PhysicalRunEvidence
     gnb_n2: GnbN2Evidence
     attempts: int
+    consecutive_proofs: int = 1
+    required_consecutive_proofs: int = 1
+
+    @property
+    def proven(self) -> bool:
+        return (
+            self.gnb_n2.proven
+            and self.consecutive_proofs >= self.required_consecutive_proofs
+        )
 
 
 def _validate_digest(value: str, label: str) -> str:
@@ -529,6 +561,7 @@ def execute_physical_gnb_n2_verification(
     evidence_path: Path | None = None,
     timeout_seconds: int = 30,
     attempts: int = 12,
+    required_consecutive_proofs: int = 1,
     poll_interval_seconds: float = 5.0,
     sleeper: Sleeper = time.sleep,
 ) -> PhysicalGnbN2VerificationResult:
@@ -546,6 +579,13 @@ def execute_physical_gnb_n2_verification(
         raise R2LabRuntimeVerificationError(
             "gNB/N2 verification attempts must be between 1 and 120"
         )
+    if (
+        required_consecutive_proofs < 1
+        or required_consecutive_proofs > attempts
+    ):
+        raise R2LabRuntimeVerificationError(
+            "required consecutive gNB/N2 proofs must fit within the attempt limit"
+        )
     if poll_interval_seconds < 0 or poll_interval_seconds > 60:
         raise R2LabRuntimeVerificationError(
             "gNB/N2 poll interval must be between 0 and 60 seconds"
@@ -554,6 +594,7 @@ def execute_physical_gnb_n2_verification(
     from synthran.r2lab.controller import authorize_physical_start
 
     observed: GnbN2Evidence | None = None
+    consecutive_proofs = 0
     for attempt in range(1, attempts + 1):
         authority = authorize_physical_start(
             run_id=evidence.run_id,
@@ -573,7 +614,8 @@ def execute_physical_gnb_n2_verification(
             expected_gnb_n2_peer=expected_gnb_n2_peer,
             timeout_seconds=timeout_seconds,
         )
-        if observed.proven:
+        consecutive_proofs = consecutive_proofs + 1 if observed.proven else 0
+        if consecutive_proofs >= required_consecutive_proofs:
             source = (
                 "sanitized-gnb-n2:"
                 f"bound-{int(observed.deployment_bound)}:"
@@ -585,7 +627,13 @@ def execute_physical_gnb_n2_verification(
                 source=source,
             )
             _persist(accepted, evidence_path)
-            return PhysicalGnbN2VerificationResult(accepted, observed, attempt)
+            return PhysicalGnbN2VerificationResult(
+                accepted,
+                observed,
+                attempt,
+                consecutive_proofs,
+                required_consecutive_proofs,
+            )
         if attempt < attempts:
             sleeper(poll_interval_seconds)
 
@@ -599,7 +647,13 @@ def execute_physical_gnb_n2_verification(
     )
     failed = evidence.fail_stage(PhysicalAcceptanceStage.GNB_N2, source=source)
     _persist(failed, evidence_path)
-    return PhysicalGnbN2VerificationResult(failed, observed, attempts)
+    return PhysicalGnbN2VerificationResult(
+        failed,
+        observed,
+        attempts,
+        consecutive_proofs,
+        required_consecutive_proofs,
+    )
 
 
 def execute_physical_runtime_verification(
