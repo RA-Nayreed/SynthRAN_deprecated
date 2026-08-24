@@ -136,6 +136,13 @@ The command binds every allocation mutation to the same live reservation and
 unchanged R2Lab claim, then proves the new allocation before continuing. An
 explicit allocation identifier never permits reclamation.
 
+The namespace handoff also recovers the exact legacy state where the `open5gs`
+namespace and `srsran-gnb` Deployment have no run owner. Recovery is allowed
+only when at most one matching unowned gNB pod exists. The command refreshes
+both authority domains, scales that exact Deployment to zero, proves that its
+pod is gone, and then assigns the current run owner. A foreign owner or multiple
+matching pods still fails before mutation.
+
 After the exact, retry-safe namespace handoff, the command requires exactly one
 ready AMF, SMF, and UPF pod. A missing or unready network function triggers one
 guarded reconciliation of the pinned `fiveg_ansible` Open5GS roles. That wrapper

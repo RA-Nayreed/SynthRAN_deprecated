@@ -83,6 +83,7 @@ class PhysicalFoundationResult:
             "run_id": self.run_id,
             "previous_run_id": self.previous_run_id,
             "namespace_changed": self.handoff.changed,
+            "legacy_gnb_stopped": self.handoff.legacy_gnb_stopped,
             "ready_node_count": self.ready_node_count,
             "ready_open5gs_pod_count": self.ready_open5gs_pod_count,
             "open5gs_reconciled": self.open5gs_reconciled,
@@ -641,11 +642,12 @@ def execute_physical_foundation_acceptance(
             known_hosts=known_hosts,
             runner=foundation_runner,
             authority_verifier=authority.verify,
+            reclaim_unowned=True,
             timeout_seconds=probe_timeout_seconds,
         )
     except R2LabPhysicalHandoffError as exc:
         raise R2LabPhysicalFoundationError(
-            "physical namespace ownership was not proven"
+            f"physical namespace ownership was not proven: {exc}"
         ) from exc
 
     unhealthy_network_functions = _open5gs_health(
