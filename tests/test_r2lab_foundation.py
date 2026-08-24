@@ -163,8 +163,10 @@ class FoundationRunner:
 
 
 class ReconciliationRunner:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_runtime: bool = False) -> None:
         self.commands: list[tuple[str, ...]] = []
+        self.events: list[str] = []
+        self.fail_runtime = fail_runtime
 
     def __call__(self, command, cwd, environment, timeout_seconds):
         value = tuple(command)
@@ -180,10 +182,67 @@ class ReconciliationRunner:
                 "a0149fc0dde39e2872945a0f3c91e804ece52d4f\n",
                 "",
             )
+        if (
+            value
+            and value[0] == "ansible-playbook"
+            and "--syntax-check" not in value
+        ):
+            if value[-1].endswith("prepare-python-runtime.yml"):
+                self.events.append("runtime")
+                if self.fail_runtime:
+                    return CommandResult(2, "", "runtime failed\n")
+            elif value[-1].endswith("r2lab-open5gs-core.yml"):
+                self.events.append("reconcile")
         return CommandResult(0, "ok\n", "")
 
 
 class R2LabPhysicalFoundationTests(unittest.TestCase):
+    def run_reconciliation(
+        self,
+        runner: ReconciliationRunner,
+        directory: str,
+        authority_checks: list[bool],
+    ) -> Open5gsFoundationResult:
+        root = Path(directory)
+        run_root = root / "runs"
+        (run_root / RUN_ID).mkdir(parents=True, exist_ok=True)
+        checkout = root / "fiveg_ansible"
+        checkout.mkdir(exist_ok=True)
+        known_hosts = root / "known_hosts"
+        known_hosts.write_text(
+            "sopnode-f2 ssh-ed25519 AAAATEST\n",
+            encoding="utf-8",
+        )
+
+        def verify_authority() -> None:
+            authority_checks.append(True)
+            runner.events.append("authority")
+
+        with (
+            patch(
+                "synthran.r2lab.foundation.validate_fiveg_checkout",
+                return_value=checkout,
+            ),
+            patch("synthran.r2lab.foundation.apply_network_overlay") as overlay,
+        ):
+            result = reconcile_open5gs_foundation(
+                run_id=RUN_ID,
+                known_hosts=known_hosts,
+                authority_verifier=verify_authority,
+                lock_path=REPOSITORY_ROOT / "dependencies.lock.yml",
+                dependency_root=root / "deps",
+                run_root=run_root,
+                repository_root=REPOSITORY_ROOT,
+                runner=runner,
+                timeout_seconds=60,
+            )
+
+        overlay.assert_called_once_with(
+            ANY,
+            subscriber_name="qfit07",
+        )
+        return result
+
     def run_foundation(
         self,
         runner: FoundationRunner,
@@ -365,65 +424,128 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
         self.assertNotIn("name: 5g/oai", wrapper)
         self.assertNotIn("name: 5g/srsRAN", wrapper)
 
-    def test_reconciliation_executes_only_the_core_wrapper_with_qfit07(self) -> None:
+    def test_reconciliation_bootstraps_locked_core_runtime_before_wrapper(self) -> None:
         runner = ReconciliationRunner()
-        authority_checks = []
+        authority_checks: list[bool] = []
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            run_root = root / "runs"
-            (run_root / RUN_ID).mkdir(parents=True)
-            checkout = root / "fiveg_ansible"
-            checkout.mkdir()
-            known_hosts = root / "known_hosts"
-            known_hosts.write_text(
-                "sopnode-f2 ssh-ed25519 AAAATEST\n",
-                encoding="utf-8",
+            result = self.run_reconciliation(
+                runner,
+                directory,
+                authority_checks,
             )
-
-            with (
-                patch(
-                    "synthran.r2lab.foundation.validate_fiveg_checkout",
-                    return_value=checkout,
-                ),
-                patch("synthran.r2lab.foundation.apply_network_overlay") as overlay,
-            ):
-                result = reconcile_open5gs_foundation(
-                    run_id=RUN_ID,
-                    known_hosts=known_hosts,
-                    authority_verifier=lambda: authority_checks.append(True),
-                    lock_path=REPOSITORY_ROOT / "dependencies.lock.yml",
-                    dependency_root=root / "deps",
-                    run_root=run_root,
-                    repository_root=REPOSITORY_ROOT,
-                    runner=runner,
-                    timeout_seconds=60,
-                )
-
             manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+            variables = json.loads(
+                (result.manifest_path.parent / "locked-open5gs-images.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             inventory = (
-                run_root
-                / RUN_ID
-                / "open5gs-foundation"
-                / "hosts-physical.ini"
+                result.manifest_path.parent / "hosts-physical.ini"
             ).read_text(encoding="utf-8")
 
-        overlay.assert_called_once_with(
-            ANY,
-            subscriber_name="qfit07",
+        self.assertEqual([True, True, True], authority_checks)
+        self.assertEqual(
+            ["authority", "runtime", "authority", "reconcile", "authority"],
+            runner.events,
         )
-        self.assertEqual([True, True], authority_checks)
         self.assertEqual("reconciled", manifest["status"])
         self.assertEqual("qfit07", manifest["subscriber"])
+        self.assertEqual(
+            "32.0.1",
+            manifest["dependencies"]["remote_python"]["kubernetes"],
+        )
+        self.assertEqual(
+            "32.0.1",
+            variables["synthran_remote_python_expected"]["kubernetes"],
+        )
+        self.assertIn(
+            "kubernetes==32.0.1",
+            variables["synthran_remote_python_packages"],
+        )
         self.assertIn('rru="n300"', inventory)
         playbooks = [
             command
             for command in runner.commands
             if command and command[0] == "ansible-playbook"
         ]
-        self.assertEqual(2, len(playbooks))
-        self.assertTrue(
-            all(command[-1].endswith("r2lab-open5gs-core.yml") for command in playbooks)
+        self.assertEqual(4, len(playbooks))
+        runtime_commands = [
+            command
+            for command in playbooks
+            if command[-1].endswith("prepare-python-runtime.yml")
+        ]
+        wrapper_commands = [
+            command
+            for command in playbooks
+            if command[-1].endswith("r2lab-open5gs-core.yml")
+        ]
+        self.assertEqual(2, len(runtime_commands))
+        self.assertEqual(2, len(wrapper_commands))
+        runtime = next(
+            command for command in runtime_commands if "--syntax-check" not in command
         )
+        wrapper = next(
+            command for command in wrapper_commands if "--syntax-check" not in command
+        )
+        limit_index = runtime.index("--limit")
+        self.assertEqual("core_node", runtime[limit_index + 1])
+        self.assertLess(
+            runner.commands.index(runtime),
+            runner.commands.index(wrapper),
+        )
+
+    def test_runtime_failure_blocks_open5gs_reconciliation(self) -> None:
+        runner = ReconciliationRunner(fail_runtime=True)
+        authority_checks: list[bool] = []
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                R2LabPhysicalFoundationError,
+                "stage open5gs-runtime failed",
+            ):
+                self.run_reconciliation(runner, directory, authority_checks)
+            run_directory = Path(directory) / "runs" / RUN_ID
+            manifest = json.loads(
+                (run_directory / "open5gs-foundation" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse((run_directory / "physical-run.json").exists())
+
+        self.assertEqual([True], authority_checks)
+        self.assertEqual(["authority", "runtime"], runner.events)
+        self.assertEqual("failed", manifest["status"])
+        self.assertEqual("open5gs-runtime", manifest["failure_stage"])
+        self.assertFalse(
+            any(
+                command[-1].endswith("r2lab-open5gs-core.yml")
+                and "--syntax-check" not in command
+                for command in runner.commands
+                if command and command[0] == "ansible-playbook"
+            )
+        )
+
+    def test_runtime_bootstrap_is_retry_safe(self) -> None:
+        runner = ReconciliationRunner()
+        authority_checks: list[bool] = []
+        with tempfile.TemporaryDirectory() as directory:
+            first = self.run_reconciliation(runner, directory, authority_checks)
+            first_manifest = first.manifest_path.read_bytes()
+            first_variables = (
+                first.manifest_path.parent / "locked-open5gs-images.json"
+            ).read_bytes()
+            second = self.run_reconciliation(runner, directory, authority_checks)
+
+            self.assertEqual(first_manifest, second.manifest_path.read_bytes())
+            self.assertEqual(
+                first_variables,
+                (
+                    second.manifest_path.parent / "locked-open5gs-images.json"
+                ).read_bytes(),
+            )
+
+        self.assertEqual(6, len(authority_checks))
+        self.assertEqual(2, runner.events.count("runtime"))
+        self.assertEqual(2, runner.events.count("reconcile"))
 
 
 if __name__ == "__main__":
