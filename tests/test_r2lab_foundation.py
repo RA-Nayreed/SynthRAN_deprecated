@@ -41,6 +41,7 @@ class FoundationRunner:
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.namespace_owner = PREVIOUS_RUN_ID
+        self.deployment_owner = PREVIOUS_RUN_ID
         self.ready_nodes = {"sopnode-f2", "sopnode-f3"}
         self.unready_nf: str | None = None
 
@@ -88,8 +89,8 @@ class FoundationRunner:
                 json.dumps(
                     [
                         {
-                            "id": 6360,
-                            "owner": "rnayreed",
+                            "id": "reservation-1",
+                            "owner": "test-owner",
                             "nodes": ["sopnode-f2", "sopnode-f3"],
                             "start_date": "2026-08-24 09:00:00",
                             "end_date": "2026-08-24 12:00:00",
@@ -103,8 +104,8 @@ class FoundationRunner:
                 0,
                 json.dumps(
                     {
-                        "id": "rnayreed_260824_090000_000001",
-                        "owner": "rnayreed",
+                        "id": "allocation-1",
+                        "owner": "test-owner",
                     }
                 ),
                 "",
@@ -130,12 +131,14 @@ class FoundationRunner:
         if remote[:4] == ("kubectl", "get", "namespace", "open5gs"):
             return CommandResult(0, self.namespace_owner, "")
         if remote[:3] == ("kubectl", "get", "deployment/srsran-gnb"):
+            if any(item.startswith("jsonpath=") for item in remote):
+                return CommandResult(0, self.deployment_owner, "")
             return CommandResult(
                 0,
                 json.dumps(
                     {
                         "metadata": {
-                            "labels": {"synthran.run/id": PREVIOUS_RUN_ID}
+                            "labels": {"synthran.run/id": self.deployment_owner}
                         },
                         "spec": {"replicas": 0},
                     }
@@ -147,6 +150,9 @@ class FoundationRunner:
         if remote[:4] == ("kubectl", "label", "namespace", "open5gs"):
             self.namespace_owner = RUN_ID
             return CommandResult(0, "namespace/open5gs labeled\n", "")
+        if remote[:3] == ("kubectl", "label", "deployment/srsran-gnb"):
+            self.deployment_owner = RUN_ID
+            return CommandResult(0, "deployment.apps/srsran-gnb labeled\n", "")
         raise AssertionError(f"unexpected remote command: {remote}")
 
 
@@ -166,10 +172,10 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
             result = execute_physical_foundation_acceptance(
                 run_id=RUN_ID,
                 previous_run_id=PREVIOUS_RUN_ID,
-                slice_name="oulu_rnayreed",
-                owner="rnayreed",
-                reservation_id="6360",
-                allocation_id="rnayreed_260824_090000_000001",
+                slice_name="test-slice",
+                owner="test-owner",
+                reservation_id="reservation-1",
+                allocation_id="allocation-1",
                 known_hosts=known_hosts,
                 now=self.NOW,
                 run_root=Path(directory) / "runs",
