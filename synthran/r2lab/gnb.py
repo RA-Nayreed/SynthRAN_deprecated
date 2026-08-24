@@ -355,7 +355,7 @@ def execute_physical_gnb_staging(
         raise R2LabPhysicalGnbError(str(exc)) from exc
 
 
-def _expected_gnb_peer(physical_directory: Path) -> str:
+def load_expected_gnb_n2_peer(physical_directory: Path) -> str:
     bundle = _read_json(
         physical_directory / "physical-chart.json", "physical chart evidence"
     )
@@ -506,7 +506,7 @@ def execute_physical_gnb_n2_acceptance(
             known_hosts=known_hosts,
             r2lab_runner=r2lab_runner,
             cluster_runner=cluster_runner,
-            expected_gnb_n2_peer=_expected_gnb_peer(physical_directory),
+            expected_gnb_n2_peer=load_expected_gnb_n2_peer(physical_directory),
             evidence_path=evidence_path,
             timeout_seconds=min(timeout_seconds, 60),
             attempts=attempts,
