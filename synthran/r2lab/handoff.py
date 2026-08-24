@@ -110,9 +110,9 @@ def _checked(
 
 def _parse_existing_deployment(
     text: str, *, allowed_owners: set[str]
-) -> tuple[bool, int | None]:
+) -> tuple[bool, int | None, str | None]:
     if not text.strip():
-        return False, None
+        return False, None, None
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -127,7 +127,8 @@ def _parse_existing_deployment(
     desired = spec.get("replicas")
     if not isinstance(labels, dict):
         raise R2LabPhysicalHandoffError("existing physical gNB Deployment ownership is missing")
-    if labels.get(DEPLOYMENT_RUN_LABEL) not in allowed_owners:
+    deployment_owner = labels.get(DEPLOYMENT_RUN_LABEL)
+    if deployment_owner not in allowed_owners:
         raise R2LabPhysicalHandoffError(
             "existing physical gNB Deployment has an unexpected run owner"
         )
@@ -137,7 +138,7 @@ def _parse_existing_deployment(
         raise R2LabPhysicalHandoffError(
             "existing physical gNB is not stopped; ownership handoff requires replicas=0"
         )
-    return True, desired
+    return True, desired, deployment_owner
 
 
 def _parse_pod_count(text: str) -> int:
@@ -224,11 +225,6 @@ def execute_physical_namespace_handoff(
             "Open5GS namespace is owned by neither the expected previous run nor the new run"
         )
 
-    allowed_deployment_owners = (
-        {from_run_id, to_run_id}
-        if namespace_owner == to_run_id
-        else {from_run_id}
-    )
     existing = _checked(
         runner=runner,
         command=_ssh(
@@ -245,8 +241,8 @@ def execute_physical_namespace_handoff(
         timeout_seconds=min(timeout_seconds, 60),
         label="existing physical gNB Deployment query",
     ).stdout
-    deployment_present, desired = _parse_existing_deployment(
-        existing, allowed_owners=allowed_deployment_owners
+    deployment_present, desired, deployment_owner = _parse_existing_deployment(
+        existing, allowed_owners={from_run_id, to_run_id}
     )
 
     pod_count = _parse_pod_count(
@@ -273,7 +269,9 @@ def execute_physical_namespace_handoff(
             "existing physical gNB pods remain; ownership handoff requires zero pods"
         )
 
-    if namespace_owner == to_run_id:
+    namespace_changed = namespace_owner != to_run_id
+    deployment_changed = deployment_present and deployment_owner != to_run_id
+    if not namespace_changed and not deployment_changed:
         return PhysicalNamespaceHandoffResult(
             from_run_id=from_run_id,
             to_run_id=to_run_id,
@@ -283,7 +281,7 @@ def execute_physical_namespace_handoff(
             gnb_pod_count=pod_count,
         )
 
-    # Re-prove both reservation and allocation immediately before the only write.
+    # Re-prove both reservation and allocation immediately before ownership writes.
     try:
         verify_reservation(
             runner=runner,
@@ -305,20 +303,59 @@ def execute_physical_namespace_handoff(
             "SLICES authority changed before namespace ownership handoff"
         ) from exc
 
-    _checked(
-        runner=runner,
-        command=_ssh(
-            known_hosts,
-            "kubectl",
-            "label",
-            "namespace",
-            NAMESPACE,
-            f"{DEPLOYMENT_RUN_LABEL}={to_run_id}",
-            "--overwrite",
-        ),
-        timeout_seconds=min(timeout_seconds, 60),
-        label="Open5GS namespace ownership handoff",
-    )
+    if deployment_changed:
+        _checked(
+            runner=runner,
+            command=_ssh(
+                known_hosts,
+                "kubectl",
+                "label",
+                f"deployment/{RELEASE}",
+                "-n",
+                NAMESPACE,
+                f"{DEPLOYMENT_RUN_LABEL}={to_run_id}",
+                "--overwrite",
+            ),
+            timeout_seconds=min(timeout_seconds, 60),
+            label="physical gNB Deployment ownership handoff",
+        )
+
+    if namespace_changed:
+        _checked(
+            runner=runner,
+            command=_ssh(
+                known_hosts,
+                "kubectl",
+                "label",
+                "namespace",
+                NAMESPACE,
+                f"{DEPLOYMENT_RUN_LABEL}={to_run_id}",
+                "--overwrite",
+            ),
+            timeout_seconds=min(timeout_seconds, 60),
+            label="Open5GS namespace ownership handoff",
+        )
+
+    if deployment_present:
+        observed_deployment_owner = _checked(
+            runner=runner,
+            command=_ssh(
+                known_hosts,
+                "kubectl",
+                "get",
+                f"deployment/{RELEASE}",
+                "-n",
+                NAMESPACE,
+                "-o",
+                "jsonpath={.metadata.labels.synthran\\.run/id}",
+            ),
+            timeout_seconds=min(timeout_seconds, 60),
+            label="physical gNB Deployment ownership verification",
+        ).stdout.strip()
+        if observed_deployment_owner != to_run_id:
+            raise R2LabPhysicalHandoffError(
+                "physical gNB Deployment ownership handoff was not independently observed"
+            )
 
     observed_owner = _checked(
         runner=runner,
