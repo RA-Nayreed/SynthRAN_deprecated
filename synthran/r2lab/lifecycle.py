@@ -14,7 +14,6 @@ from synthran.experiment.r2lab import (
     PhysicalExperimentConfig,
     build_physical_workload_executor,
 )
-from synthran.fiveg_ansible import load_inventory
 from synthran.live_preflight import subprocess_runner as cluster_subprocess_runner
 from synthran.privacy import repository_root
 from synthran.r2lab.acceptance import (
@@ -23,6 +22,8 @@ from synthran.r2lab.acceptance import (
     R2LabAcceptanceError,
 )
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
+from synthran.r2lab.physical_inventory import load_physical_inventory
+from synthran.r2lab.resources import load_topology
 from synthran.r2lab.ue import (
     R2LabPhysicalUeError,
     execute_physical_workload_handoff,
@@ -277,9 +278,11 @@ def run_physical_workload(
                 "physical workload requires an accepted UE/PDU/user-plane path"
             )
 
+        topology = load_topology(run_root=run_root, run_id=run_id).validate()
+        inventory = load_physical_inventory(inventory_path, topology=topology)
         config = PhysicalExperimentConfig(
             slice_name=slice_name,
-            inventory=load_inventory(inventory_path),
+            inventory=inventory,
             lock=load_lock(lock_path),
             dependency_root=deps_root,
             repository_root=repository_root(),
