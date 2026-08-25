@@ -1,33 +1,30 @@
-"""Backend-aware command dispatch for SynthRAN."""
+"""Single public command surface for SynthRAN."""
 
 from __future__ import annotations
 
+import argparse
 import sys
 from typing import Sequence
 
-from synthran import command_runtime
-from synthran.backends import (
-    BackendError,
-    backend_for_argv,
-    configure_backend_parser,
-)
+from synthran.backends.base import BackendError
+from synthran.operator import configure_operator_parser, dispatch
 
 
-def _parser():
-    parser = command_runtime._parser()
-    configure_backend_parser(parser)
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="synthran",
+        description="Run and inspect reproducible SynthRAN experiments across virtual and physical radio backends.",
+    )
+    parser.add_subparsers(dest="command", required=True)
+    configure_operator_parser(parser)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    backend = backend_for_argv(arguments)
-    if backend is None:
-        return command_runtime.main(arguments)
-
     args = _parser().parse_args(arguments)
     try:
-        return backend.dispatch(args)
+        return dispatch(args)
     except BackendError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
