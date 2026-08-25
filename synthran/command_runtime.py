@@ -1,4 +1,4 @@
-"""Single command-line interface for SynthRAN."""
+"""Internal runtime support used by the unified SynthRAN operator surface."""
 
 from __future__ import annotations
 
@@ -9,52 +9,13 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
-from typing import Mapping, Sequence
+from typing import Mapping
 
-from synthran.dependencies import DependencyError, load_lock, sync_dependencies
-from synthran.experiment import ExperimentError, build_scenario
-from synthran.experiment.runtime import (
-    DEFAULT_COLLECTION_SECONDS,
-    DEFAULT_MINIMUM_PER_SENSOR,
-    execute_experiment,
-)
-from synthran.fiveg_ansible import (
-    FiveGAnsibleError,
-    build_network_plan,
-    load_inventory,
-    run_offline_doctor,
-)
-from synthran.live_preflight import (
-    LivePreflightError,
-    run_live_preflight,
-    save_live_evidence,
-)
-from synthran.r2lab.controller import (
-    DEFAULT_TIMEOUT_SECONDS as DEFAULT_R2LAB_TIMEOUT_SECONDS,
-    R2LabResourceError,
-    R2LabSelection,
-    SUPPORTED_QFITS,
-    SUPPORTED_QHATS,
-    SUPPORTED_RADIOS,
-    build_plan as build_r2lab_plan,
-    execute_prepare as execute_r2lab_prepare,
-    execute_release as execute_r2lab_release,
-    run_doctor as run_r2lab_doctor,
-)
-from synthran.r2lab.foundation import (
-    DEFAULT_FOUNDATION_TIMEOUT_SECONDS,
-    R2LabPhysicalFoundationError,
-    execute_physical_foundation_acceptance,
-)
-from synthran.r2lab.deployment import PhysicalChartBindings
-from synthran.r2lab.gnb import (
-    DEFAULT_N2_CONVERGENCE_ATTEMPTS,
-    R2LabPhysicalGnbError,
-    execute_physical_gnb_n2_acceptance,
-    execute_physical_gnb_staging,
-)
+from synthran.dependencies import load_lock, sync_dependencies
+from synthran.experiment.runtime import execute_experiment
+from synthran.fiveg_ansible import build_network_plan, load_inventory, run_offline_doctor
+from synthran.live_preflight import run_live_preflight, save_live_evidence
 from synthran.network.resources import (
-    DEFAULT_DURATION_MINUTES,
     ResourcePreparationError,
     build_resource_preparation_plan,
     execute_resource_preparation,
@@ -69,7 +30,6 @@ from synthran.network.runtime import (
 from synthran.privacy import (
     PrivacyError,
     outgoing_commits,
-    redact_file,
     report_findings,
     repository_root,
     scan_commits,
@@ -89,11 +49,7 @@ from synthran.research import (
     save_campaign,
 )
 from synthran.research.runtime import calibrate_capacity, execute_research_experiment
-from synthran.slices_controller import (
-    DEFAULT_CONTROLLER_TIMEOUT_SECONDS,
-    SlicesControllerError,
-    verify_slices_controller,
-)
+from synthran.slices_controller import SlicesControllerError, verify_slices_controller
 
 
 def _network_paths(root: Path, run_id: str) -> tuple[Path, Path]:
@@ -127,18 +83,14 @@ def _add_research_parser(
 ) -> None:
     research = commands.add_parser(
         "research",
-        help="plan, run, schedule, or analyze controlled measurement experiments",
+        help="plan, run, schedule, or analyze controlled measurements",
     )
     sub = research.add_subparsers(dest="research_command", required=True)
 
-    plan = sub.add_parser(
-        "plan", help="render one immutable controlled-experiment specification"
-    )
+    plan = sub.add_parser("plan", help="render one immutable measurement specification")
     _add_research_spec_arguments(plan, require_target=False)
 
-    run = sub.add_parser(
-        "run", help="execute one controlled fixed-window measurement"
-    )
+    run = sub.add_parser("run", help="execute one controlled fixed-window measurement")
     _add_research_spec_arguments(run, require_target=True)
     run.add_argument("--inventory", type=Path, required=True)
     run.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
@@ -156,9 +108,7 @@ def _add_research_parser(
         help=argparse.SUPPRESS,
     )
 
-    calibrate = sub.add_parser(
-        "calibrate", help="measure reference UE-path capacity"
-    )
+    calibrate = sub.add_parser("calibrate", help="measure reference UE-path capacity")
     calibrate.add_argument("--inventory", type=Path, required=True)
     calibrate.add_argument("--network-run-id", required=True)
     calibrate.add_argument("--target", required=True)
@@ -177,9 +127,7 @@ def _add_research_parser(
     campaign_plan.add_argument("--campaign-seed", type=int, required=True)
     campaign_plan.add_argument("--out", type=Path, required=True)
 
-    campaign_run = sub.add_parser(
-        "campaign-run", help="execute a persisted campaign sequentially"
-    )
+    campaign_run = sub.add_parser("campaign-run", help="execute a persisted campaign")
     campaign_run.add_argument("--campaign", type=Path, required=True)
     campaign_run.add_argument("--inventory", type=Path, required=True)
     campaign_run.add_argument("--target", required=True)
@@ -191,9 +139,7 @@ def _add_research_parser(
     campaign_run.add_argument("--probe-interval", type=float, default=1.0)
     campaign_run.add_argument("--parallel-flows", type=int, default=1)
     campaign_run.add_argument("--load-port", type=int, default=5201)
-    campaign_run.add_argument(
-        "--lock", type=Path, default=Path("dependencies.lock.yml")
-    )
+    campaign_run.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
     campaign_run.add_argument("--deps-root", type=Path, default=Path(".deps"))
     campaign_run.add_argument(
         "--network-run-root",
@@ -208,9 +154,7 @@ def _add_research_parser(
         help=argparse.SUPPRESS,
     )
 
-    analyze = sub.add_parser(
-        "analyze", help="analyze persisted run summaries without live access"
-    )
+    analyze = sub.add_parser("analyze", help="analyze persisted valid runs")
     analyze.add_argument("--campaign", type=Path, required=True)
     analyze.add_argument(
         "--run-root",
@@ -219,453 +163,6 @@ def _add_research_parser(
         help=argparse.SUPPRESS,
     )
     analyze.add_argument("--out", type=Path, required=True)
-
-
-def _add_experiment_parser(
-    subcommands: argparse._SubParsersAction[argparse.ArgumentParser],
-) -> None:
-    experiment = subcommands.add_parser(
-        "experiment",
-        help="plan, run, verify, or measure deterministic IoT-to-5G experiments",
-    )
-    commands = experiment.add_subparsers(dest="experiment_command", required=True)
-
-    plan = commands.add_parser(
-        "plan",
-        help="validate a path-proven network and print the experiment scenario",
-    )
-    plan.add_argument("--network-run-id", required=True)
-    plan.add_argument("--run-id", required=True)
-    plan.add_argument(
-        "--network-run-root",
-        type=Path,
-        default=Path(".synthran/runs"),
-        help=argparse.SUPPRESS,
-    )
-
-    run = commands.add_parser(
-        "run",
-        help="run the ten-sensor experiment against a path-proven network",
-    )
-    run.add_argument("--inventory", type=Path, required=True)
-    run.add_argument("--network-run-id", required=True)
-    run.add_argument("--run-id", required=True)
-    run.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
-    run.add_argument("--deps-root", type=Path, default=Path(".deps"))
-    run.add_argument(
-        "--network-run-root",
-        type=Path,
-        default=Path(".synthran/runs"),
-        help=argparse.SUPPRESS,
-    )
-    run.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/experiments"),
-        help=argparse.SUPPRESS,
-    )
-    run.add_argument(
-        "--collection-seconds",
-        type=int,
-        default=DEFAULT_COLLECTION_SECONDS,
-    )
-    run.add_argument(
-        "--minimum-per-sensor",
-        type=int,
-        default=DEFAULT_MINIMUM_PER_SENSOR,
-    )
-
-    verify = commands.add_parser(
-        "verify",
-        help="read persisted experiment acceptance evidence without changing live state",
-    )
-    verify.add_argument("--run-id", required=True)
-    verify.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/experiments"),
-        help=argparse.SUPPRESS,
-    )
-
-    _add_research_parser(commands)
-
-
-def _add_slices_context(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--slices-project",
-        default=os.environ.get("SYNTHRAN_SLICES_PROJECT"),
-        help="selected SLICES project (or SYNTHRAN_SLICES_PROJECT)",
-    )
-    parser.add_argument(
-        "--slices-experiment",
-        default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"),
-        help="existing SLICES experiment (or SYNTHRAN_SLICES_EXPERIMENT)",
-    )
-
-
-def _add_r2lab_selection_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--slice",
-        dest="r2lab_slice",
-        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-        help="R2Lab slice name (or SYNTHRAN_R2LAB_SLICE)",
-    )
-    parser.add_argument("--radio", required=True, choices=sorted(SUPPORTED_RADIOS))
-    parser.add_argument(
-        "--ue", required=True, choices=sorted(SUPPORTED_QHATS | SUPPORTED_QFITS)
-    )
-    parser.add_argument(
-        "--timeout", type=int, default=DEFAULT_R2LAB_TIMEOUT_SECONDS
-    )
-
-
-def _add_physical_authority_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--slice",
-        dest="r2lab_slice",
-        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-        help="R2Lab slice name (or SYNTHRAN_R2LAB_SLICE)",
-    )
-    parser.add_argument(
-        "--owner",
-        default=os.environ.get("SYNTHRAN_OWNER"),
-        help="expected SLICES/POS owner (or SYNTHRAN_OWNER)",
-    )
-    parser.add_argument(
-        "--allocation-id",
-        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
-        help="expected current allocation identifier",
-    )
-    parser.add_argument(
-        "--known-hosts",
-        type=Path,
-        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
-        help="strict SLICES known-hosts path",
-    )
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="synthran")
-    subcommands = parser.add_subparsers(dest="command", required=True)
-    _add_experiment_parser(subcommands)
-
-    slices = subcommands.add_parser(
-        "slices", help="verify the SLICES CLI controller context"
-    )
-    slices_commands = slices.add_subparsers(dest="slices_command", required=True)
-    slices_doctor = slices_commands.add_parser(
-        "doctor", help="read-only SLICES login, project, and experiment checks"
-    )
-    slices_doctor.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
-    slices_doctor.add_argument(
-        "--timeout", type=int, default=DEFAULT_CONTROLLER_TIMEOUT_SECONDS
-    )
-    _add_slices_context(slices_doctor)
-
-    r2lab = subcommands.add_parser(
-        "r2lab", help="verify and control exact R2Lab radio resources"
-    )
-    r2lab_commands = r2lab.add_subparsers(dest="r2lab_command", required=True)
-
-    r2lab_doctor = r2lab_commands.add_parser(
-        "doctor", help="verify Faraday access and an active R2Lab lease"
-    )
-    _add_r2lab_selection_arguments(r2lab_doctor)
-    r2lab_doctor.add_argument("--json", action="store_true")
-
-    r2lab_plan = r2lab_commands.add_parser(
-        "plan", help="print exact R2Lab resource actions without executing them"
-    )
-    _add_r2lab_selection_arguments(r2lab_plan)
-    r2lab_plan.add_argument("--run-id", required=True)
-    r2lab_plan.add_argument("--json", action="store_true")
-
-    r2lab_prepare = r2lab_commands.add_parser(
-        "prepare", help="claim and power one R2Lab radio and UE under an active lease"
-    )
-    _add_r2lab_selection_arguments(r2lab_prepare)
-    r2lab_prepare.add_argument("--run-id", required=True)
-    r2lab_prepare.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/r2lab"),
-        help=argparse.SUPPRESS,
-    )
-
-    r2lab_release = r2lab_commands.add_parser(
-        "release", help="power off only resources owned by one SynthRAN R2Lab run"
-    )
-    _add_physical_authority_arguments(r2lab_release)
-    r2lab_release.add_argument("--run-id", required=True)
-    r2lab_release.add_argument(
-        "--timeout", type=int, default=DEFAULT_R2LAB_TIMEOUT_SECONDS
-    )
-    r2lab_release.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/r2lab"),
-        help=argparse.SUPPRESS,
-    )
-
-    r2lab_foundation = r2lab_commands.add_parser(
-        "foundation",
-        help="reconcile and bind the stopped SLICES and Open5GS foundation",
-    )
-    _add_physical_authority_arguments(r2lab_foundation)
-    r2lab_foundation.add_argument("--run-id", required=True)
-    r2lab_foundation.add_argument("--previous-run-id", required=True)
-    r2lab_foundation.add_argument(
-        "--lock", type=Path, default=Path("dependencies.lock.yml")
-    )
-    r2lab_foundation.add_argument("--deps-root", type=Path, default=Path(".deps"))
-    r2lab_foundation.add_argument(
-        "--timeout", type=int, default=DEFAULT_FOUNDATION_TIMEOUT_SECONDS
-    )
-    r2lab_foundation.add_argument("--json", action="store_true")
-    r2lab_foundation.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/r2lab"),
-        help=argparse.SUPPRESS,
-    )
-
-    r2lab_gnb_stage = r2lab_commands.add_parser(
-        "gnb-stage",
-        help="render and stage the physical gNB while it remains stopped",
-    )
-    _add_physical_authority_arguments(r2lab_gnb_stage)
-    r2lab_gnb_stage.add_argument("--run-id", required=True)
-    r2lab_gnb_stage.add_argument("--amf-n2-address")
-    r2lab_gnb_stage.add_argument("--gnb-n2-address")
-    r2lab_gnb_stage.add_argument("--n300-address")
-    r2lab_gnb_stage.add_argument("--ru-pod-address")
-    r2lab_gnb_stage.add_argument("--ru-subnet")
-    r2lab_gnb_stage.add_argument(
-        "--lock", type=Path, default=Path("dependencies.lock.yml")
-    )
-    r2lab_gnb_stage.add_argument("--deps-root", type=Path, default=Path(".deps"))
-    r2lab_gnb_stage.add_argument("--timeout", type=int, default=120)
-    r2lab_gnb_stage.add_argument("--json", action="store_true")
-    r2lab_gnb_stage.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/r2lab"),
-        help=argparse.SUPPRESS,
-    )
-
-    r2lab_gnb_start = r2lab_commands.add_parser(
-        "gnb-start",
-        help="start one physical gNB and prove its N2 association",
-    )
-    _add_physical_authority_arguments(r2lab_gnb_start)
-    r2lab_gnb_start.add_argument("--run-id", required=True)
-    r2lab_gnb_start.add_argument("--timeout", type=int, default=120)
-    r2lab_gnb_start.add_argument(
-        "--n2-attempts",
-        type=int,
-        default=12,
-        help="consecutive current gNB/N2 proofs required for acceptance",
-    )
-    r2lab_gnb_start.add_argument(
-        "--n2-convergence-attempts",
-        type=int,
-        default=DEFAULT_N2_CONVERGENCE_ATTEMPTS,
-        help="polls allowed for initial gNB/N2 convergence",
-    )
-    r2lab_gnb_start.add_argument("--n2-interval", type=float, default=5.0)
-    r2lab_gnb_start.add_argument("--json", action="store_true")
-    r2lab_gnb_start.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/r2lab"),
-        help=argparse.SUPPRESS,
-    )
-
-    deps = subcommands.add_parser("deps", help="manage immutable external dependencies")
-    deps_commands = deps.add_subparsers(dest="deps_command", required=True)
-    sync = deps_commands.add_parser("sync", help="synchronize detached pinned checkouts")
-    sync.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
-    sync.add_argument("--root", type=Path, default=Path(".deps"))
-    dependency_selection = sync.add_mutually_exclusive_group()
-    dependency_selection.add_argument(
-        "--all", action="store_true", help="include transitive repositories"
-    )
-    dependency_selection.add_argument(
-        "--name",
-        action="append",
-        dest="dependency_names",
-        metavar="DEPENDENCY",
-        help="synchronize one named dependency; repeat to select more than one",
-    )
-    sync.add_argument("--dry-run", action="store_true")
-
-    privacy = subcommands.add_parser("privacy", help="scan or redact sensitive context")
-    privacy_commands = privacy.add_subparsers(dest="privacy_command", required=True)
-    scan = privacy_commands.add_parser("scan", help="fail when sensitive context is detected")
-    scan_mode = scan.add_mutually_exclusive_group()
-    scan_mode.add_argument("--worktree", action="store_true", help="scan tracked and unignored files")
-    scan_mode.add_argument("--history", action="store_true", help="scan every Git commit")
-    scan_mode.add_argument(
-        "--outgoing",
-        action="store_true",
-        help="scan pre-push updates read from standard input",
-    )
-    scan.add_argument("--remote", default="origin", help="remote name used with --outgoing")
-
-    redact = privacy_commands.add_parser("redact", help="write a sanitized text derivative")
-    redact.add_argument("source", type=Path)
-    redact.add_argument("destination", type=Path)
-    redact.add_argument("--dry-run", action="store_true")
-
-    hooks = subcommands.add_parser("hooks", help="configure repository-local Git hooks")
-    hooks_commands = hooks.add_subparsers(dest="hooks_command", required=True)
-    install = hooks_commands.add_parser("install", help="activate the tracked .githooks directory")
-    install.add_argument("--dry-run", action="store_true")
-
-    doctor = subcommands.add_parser("doctor", help="validate deployment prerequisites")
-    _add_slices_context(doctor)
-    doctor.add_argument("--inventory", type=Path, required=True)
-    doctor.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
-    doctor.add_argument("--deps-root", type=Path, default=Path(".deps"))
-    doctor.add_argument(
-        "--offline",
-        action="store_true",
-        help="validate only inventory, lock, and pinned checkout state",
-    )
-    doctor.add_argument(
-        "--timeout",
-        type=int,
-        default=DEFAULT_CONTROLLER_TIMEOUT_SECONDS,
-        help="timeout in seconds for each read-only live probe",
-    )
-    doctor.add_argument(
-        "--owner",
-        default=os.environ.get("SYNTHRAN_OWNER"),
-        help="expected current SLICES/POS owner",
-    )
-    doctor.add_argument(
-        "--reservation-id",
-        default=os.environ.get("SYNTHRAN_RESERVATION_ID"),
-        help="expected active reservation identifier",
-    )
-    doctor.add_argument(
-        "--allocation-id",
-        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
-        help="expected current allocation identifier",
-    )
-    doctor.add_argument(
-        "--evidence-out",
-        type=Path,
-        help="write sanitized live readiness evidence (required for live doctor)",
-    )
-
-    network = subcommands.add_parser("network", help="plan or deploy the 5G network")
-    network_commands = network.add_subparsers(dest="network_command", required=True)
-    prepare = network_commands.add_parser(
-        "prepare",
-        help="explicitly reserve, allocate, image, and prepare a SLICES node pair",
-    )
-    _add_slices_context(prepare)
-    prepare.add_argument("--core-node", default="sopnode-f2")
-    prepare.add_argument("--ran-node", default="sopnode-f3")
-    prepare.add_argument(
-        "--owner",
-        default=os.environ.get("SYNTHRAN_OWNER"),
-        help="expected SLICES/POS owner (or SYNTHRAN_OWNER)",
-    )
-    prepare.add_argument(
-        "--reservation-id",
-        default=os.environ.get("SYNTHRAN_RESERVATION_ID"),
-        help="reuse an active reservation instead of creating one",
-    )
-    prepare.add_argument(
-        "--duration-minutes",
-        type=int,
-        default=DEFAULT_DURATION_MINUTES,
-    )
-    prepare.add_argument("--run-id", required=True)
-    prepare.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
-    prepare.add_argument("--deps-root", type=Path, default=Path(".deps"))
-    prepare.add_argument("--dry-run", action="store_true")
-    prepare.add_argument("--json", action="store_true", help="emit a redacted JSON plan")
-    prepare.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/preparations"),
-        help=argparse.SUPPRESS,
-    )
-    prepare.add_argument(
-        "--timeout",
-        type=int,
-        default=3600,
-        help="timeout in seconds for each preparation stage",
-    )
-
-    deploy = network_commands.add_parser(
-        "deploy", help="plan the explicit 5G network deployment"
-    )
-    _add_slices_context(deploy)
-    deploy.add_argument("--inventory", type=Path, required=True)
-    deploy.add_argument("--profile", default="default")
-    deploy.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
-    deploy.add_argument("--deps-root", type=Path, default=Path(".deps"))
-    deploy.add_argument("--dry-run", action="store_true")
-    deploy.add_argument("--json", action="store_true", help="emit a redacted JSON plan")
-    deploy.add_argument(
-        "--owner",
-        default=os.environ.get("SYNTHRAN_OWNER"),
-        help="expected current SLICES/POS owner",
-    )
-    deploy.add_argument(
-        "--reservation-id",
-        default=os.environ.get("SYNTHRAN_RESERVATION_ID"),
-        help="expected active reservation identifier",
-    )
-    deploy.add_argument(
-        "--allocation-id",
-        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
-        help="expected current allocation identifier",
-    )
-    deploy.add_argument(
-        "--preflight-evidence",
-        type=Path,
-        help="fresh READY evidence written by the live doctor",
-    )
-    deploy.add_argument("--run-id", help="unique lowercase run identifier")
-    deploy.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/runs"),
-        help=argparse.SUPPRESS,
-    )
-    deploy.add_argument(
-        "--timeout",
-        type=int,
-        default=3600,
-        help="timeout in seconds for each deployment stage",
-    )
-
-    verify = network_commands.add_parser(
-        "verify", help="record gNB, srsUE, PDU tunnel, and UPF route evidence"
-    )
-    _add_slices_context(verify)
-    verify.add_argument("--inventory", type=Path, required=True)
-    verify.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
-    verify.add_argument("--deps-root", type=Path, default=Path(".deps"))
-    verify.add_argument("--run-id", required=True)
-    verify.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/runs"),
-        help=argparse.SUPPRESS,
-    )
-    verify.add_argument(
-        "--timeout",
-        type=int,
-        default=30,
-        help="timeout in seconds for each read-only proof command",
-    )
-    return parser
 
 
 def _require_slices_context(
@@ -679,214 +176,6 @@ def _require_slices_context(
     if missing:
         raise SlicesControllerError(f"{operation} requires " + ", ".join(missing))
     return args.slices_project, args.slices_experiment
-
-
-def _slices_doctor(args: argparse.Namespace) -> int:
-    project, experiment = _require_slices_context(args, "SLICES doctor")
-    lock = load_lock(args.lock)
-    report = verify_slices_controller(
-        lock=lock,
-        project=project,
-        experiment=experiment,
-        timeout_seconds=args.timeout,
-    )
-    print(report.render())
-    return 0
-
-
-def _r2lab_selection(args: argparse.Namespace) -> R2LabSelection:
-    if args.r2lab_slice is None:
-        raise R2LabResourceError(
-            "R2Lab control requires --slice or SYNTHRAN_R2LAB_SLICE"
-        )
-    return R2LabSelection.build(
-        slice_name=args.r2lab_slice,
-        radio=args.radio,
-        ue=args.ue,
-    )
-
-
-def _require_physical_authority(
-    args: argparse.Namespace, operation: str
-) -> tuple[str, str, str | None, Path]:
-    required = {
-        "--slice or SYNTHRAN_R2LAB_SLICE": args.r2lab_slice,
-        "--owner or SYNTHRAN_OWNER": args.owner,
-        "--known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS": args.known_hosts,
-    }
-    missing = [name for name, value in required.items() if value is None]
-    if missing:
-        raise R2LabPhysicalGnbError(
-            f"{operation} requires " + ", ".join(missing)
-        )
-    return (
-        args.r2lab_slice,
-        args.owner,
-        args.allocation_id,
-        Path(args.known_hosts),
-    )
-
-
-def _physical_chart_bindings(args: argparse.Namespace) -> PhysicalChartBindings | None:
-    values = {
-        "--amf-n2-address": args.amf_n2_address,
-        "--gnb-n2-address": args.gnb_n2_address,
-        "--n300-address": args.n300_address,
-        "--ru-pod-address": args.ru_pod_address,
-        "--ru-subnet": args.ru_subnet,
-    }
-    supplied = {name for name, value in values.items() if value is not None}
-    if not supplied:
-        return None
-    missing = [name for name, value in values.items() if value is None]
-    if missing:
-        raise R2LabPhysicalGnbError(
-            "explicit physical chart bindings require " + ", ".join(missing)
-        )
-    return PhysicalChartBindings(
-        amf_n2_address=args.amf_n2_address,
-        gnb_n2_address=args.gnb_n2_address,
-        n300_address=args.n300_address,
-        ru_pod_address=args.ru_pod_address,
-        ru_subnet=args.ru_subnet,
-    )
-
-
-def _dispatch_r2lab(args: argparse.Namespace) -> int:
-    if args.r2lab_command == "doctor":
-        report = run_r2lab_doctor(
-            selection=_r2lab_selection(args),
-            timeout_seconds=args.timeout,
-        )
-        print(
-            json.dumps(report.to_dict(), indent=2, sort_keys=True)
-            if args.json
-            else report.render()
-        )
-        return 0 if report.ready else 2
-    if args.r2lab_command == "plan":
-        plan = build_r2lab_plan(
-            run_id=args.run_id,
-            selection=_r2lab_selection(args),
-        )
-        print(plan.render(as_json=args.json))
-        return 0
-    if args.r2lab_command == "prepare":
-        plan = build_r2lab_plan(
-            run_id=args.run_id,
-            selection=_r2lab_selection(args),
-        )
-        result = execute_r2lab_prepare(
-            plan=plan,
-            run_root=args.run_root,
-            timeout_seconds=args.timeout,
-            progress=sys.stdout,
-        )
-        print(f"R2Lab resources prepared for run {result.run_id}.")
-        print(f"Sanitized manifest: {result.manifest_path}")
-        print(f"Sanitized log: {result.log_path}")
-        return 0
-    if args.r2lab_command == "release":
-        if args.r2lab_slice is None:
-            raise R2LabResourceError(
-                "R2Lab release requires --slice or SYNTHRAN_R2LAB_SLICE"
-            )
-        result = execute_r2lab_release(
-            run_id=args.run_id,
-            slice_name=args.r2lab_slice,
-            run_root=args.run_root,
-            timeout_seconds=args.timeout,
-            progress=sys.stdout,
-            owner=args.owner,
-            allocation_id=args.allocation_id,
-            known_hosts=(Path(args.known_hosts) if args.known_hosts else None),
-        )
-        print(f"R2Lab resources released for run {result.run_id}.")
-        print(f"Sanitized manifest: {result.manifest_path}")
-        return 0
-    if args.r2lab_command == "foundation":
-        slice_name, owner, allocation_id, known_hosts = _require_physical_authority(
-            args, "R2Lab foundation"
-        )
-        result = execute_physical_foundation_acceptance(
-            run_id=args.run_id,
-            previous_run_id=args.previous_run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            known_hosts=known_hosts,
-            run_root=args.run_root,
-            lock_path=args.lock,
-            dependency_root=args.deps_root,
-            repository_root=repository_root(),
-            timeout_seconds=args.timeout,
-            progress=sys.stdout,
-        )
-        print(
-            json.dumps(result.to_dict(), indent=2, sort_keys=True)
-            if args.json
-            else (
-                f"Physical foundation accepted for run {result.run_id}.\n"
-                f"Sanitized evidence: {result.evidence_path}"
-            )
-        )
-        return 0
-    if args.r2lab_command == "gnb-stage":
-        slice_name, owner, allocation_id, known_hosts = (
-            _require_physical_authority(args, "physical gNB staging")
-        )
-        result = execute_physical_gnb_staging(
-            run_id=args.run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            known_hosts=known_hosts,
-            bindings=_physical_chart_bindings(args),
-            lock_path=args.lock,
-            deps_root=args.deps_root,
-            run_root=args.run_root,
-            timeout_seconds=args.timeout,
-        )
-        print(
-            json.dumps(result.to_dict(), indent=2, sort_keys=True)
-            if args.json
-            else (
-                f"Physical gNB staged and proven stopped for run {result.run_id}.\n"
-                f"Sanitized evidence: {result.evidence_path}"
-            )
-        )
-        return 0
-    if args.r2lab_command == "gnb-start":
-        slice_name, owner, allocation_id, known_hosts = (
-            _require_physical_authority(args, "physical gNB start")
-        )
-        result = execute_physical_gnb_n2_acceptance(
-            run_id=args.run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            known_hosts=known_hosts,
-            run_root=args.run_root,
-            timeout_seconds=args.timeout,
-            attempts=args.n2_attempts,
-            convergence_attempts=args.n2_convergence_attempts,
-            poll_interval_seconds=args.n2_interval,
-        )
-        print(
-            json.dumps(result.to_dict(), indent=2, sort_keys=True)
-            if args.json
-            else (
-                f"Physical gNB and N2 accepted for run {result.run_id}.\n"
-                f"Sanitized evidence: {result.evidence_path}"
-                if result.proven
-                else (
-                    f"Physical gNB N2 was not proven for run {result.run_id}.\n"
-                    f"Sanitized evidence: {result.evidence_path}"
-                )
-            )
-        )
-        return 0 if result.proven else 2
-    raise AssertionError("unreachable R2Lab command")
 
 
 def _deps_sync(args: argparse.Namespace) -> int:
@@ -939,6 +228,8 @@ def _hooks_install(args: argparse.Namespace) -> int:
 
 
 def _doctor(args: argparse.Namespace) -> int:
+    """Internal RFSIM live preflight used by the unified run."""
+
     offline_report = run_offline_doctor(
         inventory_path=args.inventory,
         lock_path=args.lock,
@@ -960,7 +251,7 @@ def _doctor(args: argparse.Namespace) -> int:
     }
     missing = [name for name, value in required.items() if value is None]
     if missing:
-        raise LivePreflightError("live doctor requires " + ", ".join(missing))
+        raise NetworkRuntimeError("live preflight requires " + ", ".join(missing))
     inventory = load_inventory(args.inventory)
     lock = load_lock(args.lock)
     live_report = run_live_preflight(
@@ -990,16 +281,9 @@ def _network_prepare(args: argparse.Namespace) -> int:
         run_id=args.run_id,
         reservation_id=args.reservation_id,
     )
-    if args.dry_run:
-        print(plan.render(as_json=args.json))
-        return 0
-    if args.json:
-        raise ResourcePreparationError("--json is supported only with --dry-run")
-    project, experiment = _require_slices_context(args, "live preparation")
+    project, experiment = _require_slices_context(args, "resource preparation")
     if args.owner is None:
-        raise ResourcePreparationError(
-            "live preparation requires --owner or SYNTHRAN_OWNER"
-        )
+        raise ResourcePreparationError("resource preparation requires an owner")
     result = execute_resource_preparation(
         plan=plan,
         lock=lock,
@@ -1014,7 +298,6 @@ def _network_prepare(args: argparse.Namespace) -> int:
         progress=sys.stdout,
     )
     print(f"SLICES resources prepared for run {result.run_id}.")
-    print("Open5GS and srsRAN were not deployed.")
     print(f"Generated inventory: {result.inventory_path}")
     print(f"Private authority: {result.authority_path}")
     print(f"Sanitized manifest: {result.manifest_path}")
@@ -1023,24 +306,6 @@ def _network_prepare(args: argparse.Namespace) -> int:
 
 
 def _network_deploy(args: argparse.Namespace) -> int:
-    if not args.dry_run:
-        if args.json:
-            raise FiveGAnsibleError("--json is supported only with --dry-run")
-        required = {
-            "--slices-project": args.slices_project,
-            "--slices-experiment": args.slices_experiment,
-            "--owner": args.owner,
-            "--reservation-id": args.reservation_id,
-            "--allocation-id": args.allocation_id,
-            "--preflight-evidence": args.preflight_evidence,
-            "--run-id": args.run_id,
-        }
-        missing = [name for name, value in required.items() if value is None]
-        if missing:
-            raise NetworkRuntimeError(
-                "live deployment requires " + ", ".join(missing)
-            )
-
     report = run_offline_doctor(
         inventory_path=args.inventory,
         lock_path=args.lock,
@@ -1052,12 +317,6 @@ def _network_deploy(args: argparse.Namespace) -> int:
     lock = load_lock(args.lock)
     inventory = load_inventory(args.inventory)
     plan = build_network_plan(lock=lock, inventory=inventory, profile=args.profile)
-    if not args.json:
-        print(report.render())
-        print()
-    if args.dry_run:
-        print(plan.render(as_json=args.json))
-        return 0
     result = execute_network_deployment(
         plan=plan,
         lock=lock,
@@ -1125,30 +384,8 @@ def _network_verify(args: argparse.Namespace) -> int:
     return 0 if verification.ready else 2
 
 
-def _experiment_plan(args: argparse.Namespace) -> int:
-    manifest, evidence = _network_paths(
-        args.network_run_root, args.network_run_id
-    )
-    scenario = build_scenario(
-        run_id=args.run_id,
-        network_manifest=manifest,
-        network_evidence=evidence,
-    )
-    print(json.dumps(scenario.to_dict(), indent=2, sort_keys=True))
-    print(
-        "\nPDU note: the displayed address is accepted network evidence;\n"
-        "experiment execution rediscovers the live address after the srsUE rollout."
-    )
-    print("\nExecution action: none")
-    print("Reservation action: none")
-    print("Network deployment action: none")
-    return 0
-
-
 def _experiment_run(args: argparse.Namespace) -> int:
-    manifest, evidence = _network_paths(
-        args.network_run_root, args.network_run_id
-    )
+    manifest, evidence = _network_paths(args.network_run_root, args.network_run_id)
     result = execute_experiment(
         inventory=load_inventory(args.inventory),
         lock=load_lock(args.lock),
@@ -1166,49 +403,6 @@ def _experiment_run(args: argparse.Namespace) -> int:
     if result.evidence_path.is_file():
         print(f"Sanitized evidence: {result.evidence_path}")
     return 0 if result.ready else 2
-
-
-def _experiment_verify(args: argparse.Namespace) -> int:
-    run_directory = args.run_root.resolve() / args.run_id
-    evidence_path = run_directory / "experiment-evidence.json"
-    manifest_path = run_directory / "manifest.json"
-    try:
-        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise ExperimentError("experiment manifest/evidence is missing") from exc
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ExperimentError(
-            "experiment manifest/evidence must be readable JSON"
-        ) from exc
-
-    if (
-        not isinstance(evidence, dict)
-        or evidence.get("schema") != "synthran/iot-evidence/v1alpha1"
-    ):
-        raise ExperimentError("experiment evidence schema is unsupported")
-    if not isinstance(manifest, dict) or manifest.get("run_id") != args.run_id:
-        raise ExperimentError(
-            "experiment manifest does not match the requested run"
-        )
-
-    print(f"SynthRAN experiment verification ({args.run_id})")
-    checks = evidence.get("checks")
-    if not isinstance(checks, list):
-        raise ExperimentError("experiment evidence checks are malformed")
-    for check in checks:
-        if not isinstance(check, dict):
-            raise ExperimentError(
-                "experiment evidence contains a malformed check"
-            )
-        state = "PASS" if check.get("passed") is True else "FAIL"
-        print(f"[{state}] {check.get('name')}: {check.get('detail')}")
-    ready = (
-        evidence.get("ready") is True
-        and manifest.get("status") == "iot-to-5g-path-proven"
-    )
-    print(f"Result: {'IOT-TO-5G PATH PROVEN' if ready else 'NOT PROVEN'}")
-    return 0 if ready else 2
 
 
 def _research_spec(args: argparse.Namespace) -> ResearchExperimentSpec:
@@ -1242,13 +436,9 @@ def _research_spec(args: argparse.Namespace) -> ResearchExperimentSpec:
 
 def _parse_seeds(value: str) -> tuple[int, ...]:
     try:
-        seeds = tuple(
-            int(item.strip()) for item in value.split(",") if item.strip()
-        )
+        seeds = tuple(int(item.strip()) for item in value.split(",") if item.strip())
     except ValueError as exc:
-        raise ResearchError(
-            "campaign seeds must be comma-separated integers"
-        ) from exc
+        raise ResearchError("campaign seeds must be comma-separated integers") from exc
     if not seeds:
         raise ResearchError("campaign seeds must not be empty")
     return seeds
@@ -1284,15 +474,8 @@ def _parse_conditions(value: str) -> tuple[CampaignCondition, ...]:
 def _load_campaign(path: Path) -> ResearchCampaign:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (
-        FileNotFoundError,
-        OSError,
-        UnicodeDecodeError,
-        json.JSONDecodeError,
-    ) as exc:
-        raise ResearchError(
-            "campaign specification must be readable JSON"
-        ) from exc
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ResearchError("campaign specification must be readable JSON") from exc
     if (
         not isinstance(value, Mapping)
         or value.get("schema") != "synthran/research-campaign/v1alpha1"
@@ -1304,9 +487,7 @@ def _load_campaign(path: Path) -> ResearchCampaign:
         raise ResearchError("campaign conditions and runs must be arrays")
     conditions: list[CampaignCondition] = []
     for item in raw_conditions:
-        if not isinstance(item, Mapping) or not isinstance(
-            item.get("name"), str
-        ):
+        if not isinstance(item, Mapping) or not isinstance(item.get("name"), str):
             raise ResearchError("campaign contains a malformed condition")
         conditions.append(
             CampaignCondition(
@@ -1330,10 +511,9 @@ def _load_campaign(path: Path) -> ResearchCampaign:
         conditions=tuple(conditions),
         campaign_seed=int(value.get("campaign_seed")),
     )
-    expected_runs = [run.to_dict() for run in campaign.runs]
-    if raw_runs != expected_runs:
+    if raw_runs != [run.to_dict() for run in campaign.runs]:
         raise ResearchError(
-            "persisted campaign run schedule does not match its deterministic campaign contract"
+            "persisted campaign run schedule does not match its deterministic contract"
         )
     return campaign
 
@@ -1341,16 +521,12 @@ def _load_campaign(path: Path) -> ResearchCampaign:
 def _dispatch_research(args: argparse.Namespace) -> int:
     if args.research_command == "plan":
         print(json.dumps(_research_spec(args).to_dict(), indent=2, sort_keys=True))
-        print(
-            "\nExecution action: none\nReservation action: none\nNetwork deployment action: none"
-        )
+        print("\nExecution action: none")
         return 0
 
     if args.research_command == "run":
         spec = _research_spec(args)
-        manifest, evidence = _network_paths(
-            args.network_run_root, args.network_run_id
-        )
+        manifest, evidence = _network_paths(args.network_run_root, args.network_run_id)
         result = execute_research_experiment(
             spec=spec,
             inventory=load_inventory(args.inventory),
@@ -1366,19 +542,7 @@ def _dispatch_research(args: argparse.Namespace) -> int:
         print(f"Research summary: {result.summary_path}")
         print(
             "Research result: "
-            + (
-                "READY FOR CAMPAIGN ANALYSIS"
-                if result.ready_for_campaign_analysis
-                else "INVALID"
-            )
-        )
-        print(
-            "Path acceptance: "
-            + (
-                "IOT-TO-5G PATH PROVEN"
-                if result.path_acceptance_ready
-                else "NOT PROVEN"
-            )
+            + ("READY FOR ANALYSIS" if result.ready_for_campaign_analysis else "INVALID")
         )
         return 0 if result.ready_for_campaign_analysis else 2
 
@@ -1412,19 +576,14 @@ def _dispatch_research(args: argparse.Namespace) -> int:
 
     if args.research_command == "campaign-run":
         campaign = _load_campaign(args.campaign)
-        manifest, evidence = _network_paths(
-            args.network_run_root, campaign.network_run_id
-        )
+        manifest, evidence = _network_paths(args.network_run_root, campaign.network_run_id)
         inventory = load_inventory(args.inventory)
         lock = load_lock(args.lock)
-        conditions = {
-            condition.name: condition for condition in campaign.conditions
-        }
+        conditions = {condition.name: condition for condition in campaign.conditions}
         for scheduled in campaign.runs:
             if (args.run_root.resolve() / scheduled.run_id).exists():
                 raise ResearchError(
-                    f"campaign run directory already exists for {scheduled.run_id}; "
-                    "run IDs are never reused"
+                    f"campaign run directory already exists for {scheduled.run_id}; run IDs are never reused"
                 )
             condition = conditions[scheduled.condition]
             if condition.name == "baseline":
@@ -1465,9 +624,8 @@ def _dispatch_research(args: argparse.Namespace) -> int:
                 probe_target=args.target,
             )
             print(
-                f"Campaign {campaign.campaign_id}: "
-                f"{scheduled.ordinal}/{len(campaign.runs)} {scheduled.run_id} "
-                f"({scheduled.condition}, seed={scheduled.seed})"
+                f"Campaign {campaign.campaign_id}: {scheduled.ordinal}/{len(campaign.runs)} "
+                f"{scheduled.run_id} ({scheduled.condition}, seed={scheduled.seed})"
             )
             result = execute_research_experiment(
                 spec=spec,
@@ -1481,9 +639,7 @@ def _dispatch_research(args: argparse.Namespace) -> int:
                 progress=sys.stdout,
             )
             if not result.ready_for_campaign_analysis:
-                print(
-                    f"Campaign stopped: {scheduled.run_id} is invalid for analysis"
-                )
+                print(f"Campaign stopped: {scheduled.run_id} is invalid for analysis")
                 return 2
         print(f"Campaign complete: {campaign.campaign_id}")
         return 0
@@ -1493,11 +649,7 @@ def _dispatch_research(args: argparse.Namespace) -> int:
         summaries = [
             load_run_summary(path)
             for run in campaign.runs
-            if (
-                path := args.run_root.resolve()
-                / run.run_id
-                / "research-summary.json"
-            ).is_file()
+            if (path := args.run_root.resolve() / run.run_id / "research-summary.json").is_file()
         ]
         analysis = analyze_campaign(campaign, summaries)
         args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -1510,65 +662,3 @@ def _dispatch_research(args: argparse.Namespace) -> int:
         return 0 if analysis["usable_runs"] == analysis["expected_runs"] else 2
 
     raise AssertionError("unreachable research command")
-
-
-def _dispatch_experiment(args: argparse.Namespace) -> int:
-    if args.experiment_command == "plan":
-        return _experiment_plan(args)
-    if args.experiment_command == "run":
-        return _experiment_run(args)
-    if args.experiment_command == "verify":
-        return _experiment_verify(args)
-    if args.experiment_command == "research":
-        return _dispatch_research(args)
-    raise AssertionError("unreachable experiment command")
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    try:
-        if args.command == "experiment":
-            return _dispatch_experiment(args)
-        if args.command == "slices" and args.slices_command == "doctor":
-            return _slices_doctor(args)
-        if args.command == "r2lab":
-            return _dispatch_r2lab(args)
-        if args.command == "deps" and args.deps_command == "sync":
-            return _deps_sync(args)
-        if args.command == "privacy" and args.privacy_command == "scan":
-            return _privacy_scan(args)
-        if args.command == "privacy" and args.privacy_command == "redact":
-            redact_file(args.source, args.destination, dry_run=args.dry_run, output=sys.stdout)
-            return 0
-        if args.command == "hooks" and args.hooks_command == "install":
-            return _hooks_install(args)
-        if args.command == "doctor":
-            return _doctor(args)
-        if args.command == "network" and args.network_command == "prepare":
-            return _network_prepare(args)
-        if args.command == "network" and args.network_command == "deploy":
-            return _network_deploy(args)
-        if args.command == "network" and args.network_command == "verify":
-            return _network_verify(args)
-    except (
-        DependencyError,
-        ExperimentError,
-        FiveGAnsibleError,
-        LivePreflightError,
-        NetworkRuntimeError,
-        PrivacyError,
-        R2LabPhysicalFoundationError,
-        R2LabPhysicalGnbError,
-        R2LabResourceError,
-        ResearchError,
-        ResourcePreparationError,
-        SlicesControllerError,
-        OSError,
-    ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    raise AssertionError("unreachable command dispatch")
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
