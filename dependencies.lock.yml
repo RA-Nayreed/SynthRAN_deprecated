@@ -203,11 +203,6 @@
         "role": "runtime",
         "license": "PSF-2.0"
       },
-      "nodejs": {
-        "version": "22.21.1",
-        "role": "Ink workbench runtime and package tooling",
-        "license": "MIT"
-      },
       "git": {
         "version": "2.51.0",
         "role": "dependency synchronization and repository hooks",
@@ -237,11 +232,6 @@
         "version": "21.0.9",
         "role": "Java runtime required by Cooja",
         "license": "GPL-2.0-with-classpath-exception"
-      },
-      "prompt-toolkit": {
-        "version": "3.0.52",
-        "role": "interactive terminal input, completion, and history",
-        "license": "BSD-3-Clause"
       }
     },
     "lock_status": "direct-versions-only"
