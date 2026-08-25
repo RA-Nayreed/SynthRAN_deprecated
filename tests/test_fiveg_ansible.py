@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from synthran.dependencies import load_lock
-from synthran.cli import _parser, main
+from synthran.cli import _parser
 from synthran.fiveg_ansible import (
     FiveGAnsibleError,
     PLAN_SCHEMA,
@@ -66,28 +66,51 @@ class InventoryContractTests(unittest.TestCase):
 
 
 class DeploymentPlanTests(unittest.TestCase):
-    def test_live_commands_accept_preparation_authority_environment(self) -> None:
-        authority = {
+    def test_unified_run_accepts_operator_and_provider_environment(self) -> None:
+        environment = {
             "SYNTHRAN_OWNER": "operator",
-            "SYNTHRAN_RESERVATION_ID": "7000000001",
             "SYNTHRAN_ALLOCATION_ID": "allocation-pair",
+            "SYNTHRAN_SLICES_PROJECT": "project-test",
+            "SYNTHRAN_SLICES_EXPERIMENT": "experiment-test",
+            "SYNTHRAN_R2LAB_SLICE": "oulu_user",
         }
-        with patch.dict("os.environ", authority, clear=False):
-            doctor = _parser().parse_args(
-                ["doctor", "--inventory", str(FIXTURE)]
+        with patch.dict("os.environ", environment, clear=False):
+            virtual = _parser().parse_args(
+                [
+                    "run",
+                    "--radio",
+                    "rfsim",
+                    "--run-id",
+                    "virtual-001",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
+                ]
             )
-            deploy = _parser().parse_args(
-                ["network", "deploy", "--inventory", str(FIXTURE)]
+            physical = _parser().parse_args(
+                [
+                    "run",
+                    "--radio",
+                    "r2lab",
+                    "--run-id",
+                    "physical-001",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
+                    "--device",
+                    "n300",
+                    "--ue",
+                    "qfit07",
+                ]
             )
-            prepare = _parser().parse_args(
-                ["network", "prepare", "--run-id", "prepare-001"]
-            )
-        for args in (doctor, deploy):
+        for args in (virtual, physical):
             self.assertEqual("operator", args.owner)
-            self.assertEqual("7000000001", args.reservation_id)
-            self.assertEqual("allocation-pair", args.allocation_id)
-        self.assertEqual("operator", prepare.owner)
-        self.assertEqual("7000000001", prepare.reservation_id)
+            self.assertEqual("project-test", args.slices_project)
+            self.assertEqual("experiment-test", args.slices_experiment)
+        self.assertEqual("allocation-pair", physical.allocation_id)
+        self.assertEqual("oulu_user", physical.r2lab_slice)
 
     def test_plan_uses_every_locked_deployment_commit(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
@@ -142,7 +165,7 @@ class DeploymentPlanTests(unittest.TestCase):
         self.assertIn("fiveg-ansible", failed)
         self.assertNotIn(directory, report.render())
 
-    def test_cli_requires_every_live_deployment_gate(self) -> None:
+    def test_unified_run_parser_requires_lifecycle_identity(self) -> None:
         stderr = StringIO()
         clean_env = {
             key: value
@@ -150,27 +173,33 @@ class DeploymentPlanTests(unittest.TestCase):
             if not key.startswith("SYNTHRAN_")
         }
         with (
-            tempfile.TemporaryDirectory() as directory,
             patch.dict(os.environ, clean_env, clear=True),
             redirect_stderr(stderr),
+            self.assertRaises(SystemExit) as raised,
         ):
-            result = main(
+            _parser().parse_args(["run", "--radio", "rfsim"])
+        self.assertEqual(2, raised.exception.code)
+        message = stderr.getvalue()
+        self.assertIn("--run-id", message)
+        self.assertIn("--core-node", message)
+        self.assertIn("--ran-node", message)
+
+        with patch.dict(os.environ, clean_env, clear=True):
+            args = _parser().parse_args(
                 [
-                    "network",
-                    "deploy",
-                    "--inventory",
-                    str(FIXTURE),
-                    "--deps-root",
-                    directory,
+                    "run",
+                    "--radio",
+                    "rfsim",
+                    "--run-id",
+                    "virtual-001",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
                 ]
             )
-        self.assertEqual(2, result)
-        self.assertIn(
-            "live deployment requires --slices-project, --slices-experiment, --owner, "
-            "--reservation-id, --allocation-id, "
-            "--preflight-evidence, --run-id",
-            stderr.getvalue(),
-        )
+        self.assertIsNone(args.owner)
+        self.assertIsNone(args.slices_project)
 
 
 if __name__ == "__main__":
