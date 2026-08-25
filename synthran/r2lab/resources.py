@@ -1,8 +1,8 @@
 """Topology-driven R2Lab resource ownership and live authority.
 
-One topology is selected during prepare, persisted with the run, and refreshed
-from current provider/SLICES state before later mutations.  No resource or
-compute placement silently falls back to the original validation topology.
+This module owns claims, lease checks, exact hardware power state, and strict
+management reachability.  UE modem/setup mechanics are intentionally delegated
+to the pinned 5g-Ansible roles.
 """
 
 from __future__ import annotations
@@ -23,8 +23,6 @@ from synthran.r2lab.controller import gateway_command, subprocess_runner
 from synthran.r2lab.hardware import PhysicalTopology, R2LabHardwareError, UeProfile, topology_path
 from synthran.r2lab.provider import (
     PowerState,
-    R2LabPowerStateError,
-    R2LabQfitStateError,
     execute_verified_pdu_transition,
     execute_verified_qfit_transition,
     execute_verified_qfit_usb_transition,
@@ -40,7 +38,6 @@ Sleeper = Callable[[float], None]
 RUN_SCHEMA = "synthran/r2lab-resource/v1alpha2"
 CLAIM_SCHEMA = "synthran/r2lab-claim/v1alpha2"
 QFIT_IMAGE = "mbim-quectel-any-dnn"
-QFIT_INITIALIZER = "/usr/local/bin/init.sh"
 DEFAULT_TIMEOUT_SECONDS = 30
 
 
@@ -64,7 +61,7 @@ def _atomic_json(path: Path, payload: Mapping[str, object]) -> Path:
     path = path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(dict(payload), indent=2, sort_keys=True) + "\n"
-    temporary_path: Path | None = None
+    temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -72,13 +69,13 @@ def _atomic_json(path: Path, payload: Mapping[str, object]) -> Path:
             newline="\n",
             dir=path.parent,
             delete=False,
-        ) as temporary:
-            temporary.write(content)
-            temporary_path = Path(temporary.name)
-        temporary_path.replace(path)
+        ) as stream:
+            stream.write(content)
+            temporary = Path(stream.name)
+        temporary.replace(path)
     except OSError as exc:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
         raise R2LabTopologyResourceError("R2Lab run state could not be persisted") from exc
     return path
 
@@ -96,10 +93,9 @@ def _read_json(path: Path, label: str) -> dict[str, object]:
 
 
 def _remote_runner(slice_name: str, runner: Runner) -> Runner:
-    def run(command: Sequence[str], timeout_seconds: int) -> CommandResult:
-        return runner(gateway_command(slice_name, *tuple(command)), timeout_seconds)
-
-    return run
+    return lambda command, timeout: runner(
+        gateway_command(slice_name, *tuple(command)), timeout
+    )
 
 
 def _lease(slice_name: str, runner: Runner, timeout_seconds: int) -> None:
@@ -125,7 +121,6 @@ def ue_host(profile: UeProfile) -> str:
 def _nested_ssh(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str, ...]:
     if not remote:
         raise R2LabTopologyResourceError("UE command requires an explicit remote argv")
-    host = ue_host(profile)
     return (
         "ssh",
         "-o",
@@ -139,7 +134,7 @@ def _nested_ssh(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str,
         "-o",
         "GlobalKnownHostsFile=/dev/null",
         "--",
-        f"root@{host}",
+        f"root@{ue_host(profile)}",
         *remote,
     )
 
@@ -147,10 +142,7 @@ def _nested_ssh(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str,
 def ue_gateway_command(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str, ...]:
     import shlex
 
-    nested = _nested_ssh(slice_name, profile, *remote)
-    # Faraday receives one shell-safe nested SSH command string; no generic user
-    # shell is accepted at the public API boundary.
-    return gateway_command(slice_name, shlex.join(nested))
+    return gateway_command(slice_name, shlex.join(_nested_ssh(slice_name, profile, *remote)))
 
 
 def _run_ue(
@@ -162,7 +154,9 @@ def _run_ue(
     remote: Sequence[str],
 ) -> CommandResult:
     try:
-        return runner(ue_gateway_command(slice_name, profile, *tuple(remote)), timeout_seconds)
+        return runner(
+            ue_gateway_command(slice_name, profile, *tuple(remote)), timeout_seconds
+        )
     except Exception as exc:
         raise R2LabTopologyResourceError("selected UE management command could not complete") from exc
 
@@ -170,14 +164,13 @@ def _run_ue(
 def _require_ue_ssh(
     *, slice_name: str, profile: UeProfile, runner: Runner, timeout_seconds: int
 ) -> None:
-    result = _run_ue(
+    if _run_ue(
         slice_name=slice_name,
         profile=profile,
         runner=runner,
         timeout_seconds=timeout_seconds,
         remote=("true",),
-    )
-    if result.returncode != 0:
+    ).returncode != 0:
         raise R2LabTopologyResourceError("selected UE is not strict-SSH reachable")
 
 
@@ -206,66 +199,28 @@ def _wait_ssh(
     raise R2LabTopologyResourceError("selected UE did not become strict-SSH reachable")
 
 
-def _qfit_ready(
+def _management_ready(
     *, slice_name: str, profile: UeProfile, runner: Runner, timeout_seconds: int
 ) -> bool:
-    checks = (
-        ("test", "-c", "/dev/ttyUSB2"),
-        ("test", "-c", "/dev/cdc-wdm0"),
+    checks: list[tuple[str, ...]] = [
         ("ip", "link", "show", "dev", "wwan0"),
-        ("test", "-x", QFIT_INITIALIZER),
-    )
-    for command in checks:
-        if _run_ue(
-            slice_name=slice_name,
-            profile=profile,
-            runner=runner,
-            timeout_seconds=timeout_seconds,
-            remote=command,
-        ).returncode != 0:
-            return False
-    return True
-
-
-def _qhat_ready(
-    *, slice_name: str, profile: UeProfile, runner: Runner, timeout_seconds: int
-) -> bool:
-    common = (
         ("test", "-c", "/dev/ttyUSB2"),
-        ("ip", "link", "show", "dev", "wwan0"),
-    )
-    for command in common:
-        if _run_ue(
-            slice_name=slice_name,
-            profile=profile,
-            runner=runner,
-            timeout_seconds=timeout_seconds,
-            remote=command,
-        ).returncode != 0:
-            return False
-    if profile.mode == "mbim":
-        return _run_ue(
-            slice_name=slice_name,
-            profile=profile,
-            runner=runner,
-            timeout_seconds=timeout_seconds,
-            remote=("test", "-c", "/dev/cdc-wdm0"),
-        ).returncode == 0
+    ]
+    if profile.mode in {"mbim", "qmi"}:
+        checks.append(("test", "-c", "/dev/cdc-wdm0"))
     if profile.mode == "qmi":
-        for command in (
-            ("test", "-c", "/dev/cdc-wdm0"),
-            ("command", "-v", "quectel-CM"),
-        ):
-            if _run_ue(
-                slice_name=slice_name,
-                profile=profile,
-                runner=runner,
-                timeout_seconds=timeout_seconds,
-                remote=command,
-            ).returncode != 0:
-                return False
-        return True
-    return False
+        checks.append(("command", "-v", "quectel-CM"))
+    return all(
+        _run_ue(
+            slice_name=slice_name,
+            profile=profile,
+            runner=runner,
+            timeout_seconds=timeout_seconds,
+            remote=command,
+        ).returncode
+        == 0
+        for command in checks
+    )
 
 
 def _wait_management(
@@ -286,22 +241,12 @@ def _wait_management(
                 runner=runner,
                 timeout_seconds=timeout_seconds,
             )
-            ready = (
-                _qfit_ready(
-                    slice_name=slice_name,
-                    profile=profile,
-                    runner=runner,
-                    timeout_seconds=timeout_seconds,
-                )
-                if profile.kind == "qfit"
-                else _qhat_ready(
-                    slice_name=slice_name,
-                    profile=profile,
-                    runner=runner,
-                    timeout_seconds=timeout_seconds,
-                )
-            )
-            if ready:
+            if _management_ready(
+                slice_name=slice_name,
+                profile=profile,
+                runner=runner,
+                timeout_seconds=timeout_seconds,
+            ):
                 return
         except R2LabTopologyResourceError:
             pass
@@ -379,7 +324,9 @@ def _topology_from_payload(payload: Mapping[str, object]) -> PhysicalTopology:
 
 
 def load_topology(*, run_root: Path, run_id: str) -> PhysicalTopology:
-    return _topology_from_payload(_read_json(topology_path(run_root, run_id), "physical topology"))
+    return _topology_from_payload(
+        _read_json(topology_path(run_root, run_id), "physical topology")
+    )
 
 
 def _claim_path(run_root: Path) -> Path:
@@ -437,18 +384,92 @@ def _require_claim(
     return path
 
 
+def _prove_qhat_on(*, profile: UeProfile, provider: Runner, timeout_seconds: int) -> None:
+    result = provider(("rhubarbe", "pdu", "status", profile.name), timeout_seconds)
+    observed = parse_pdu_status(
+        "\n".join(part for part in (result.stdout, result.stderr) if part),
+        resource=profile.name,
+    )
+    if observed.state is not PowerState.ON:
+        raise R2LabTopologyResourceError("selected qhat was not proven on after upstream setup")
+
+
+def _prepare_qfit(
+    *,
+    slice_name: str,
+    profile: UeProfile,
+    provider: Runner,
+    runner: Runner,
+    require_lease: Callable[[str], None],
+    sleeper: Sleeper,
+    timeout_seconds: int,
+) -> None:
+    node = qfit_node_number(profile.name)
+    require_lease("lease-before-qfit-state")
+    status = provider(("rhubarbe", "status", str(node)), timeout_seconds)
+    observed = parse_qfit_status(
+        "\n".join(part for part in (status.stdout, status.stderr) if part),
+        qfit=profile.name,
+    )
+    if observed.state is PowerState.UNKNOWN:
+        raise R2LabTopologyResourceError("selected qfit power state is unknown")
+    if observed.state is PowerState.OFF:
+        require_lease("lease-before-qfit-image-load")
+        if provider(("rhubarbe", "load", "-i", QFIT_IMAGE, str(node)), 300).returncode != 0:
+            raise R2LabTopologyResourceError("selected qfit image load returned nonzero")
+        status = provider(("rhubarbe", "status", str(node)), timeout_seconds)
+        observed = parse_qfit_status(
+            "\n".join(part for part in (status.stdout, status.stderr) if part),
+            qfit=profile.name,
+        )
+        if observed.state is not PowerState.ON:
+            raise R2LabTopologyResourceError("selected qfit was not proven on after image load")
+    if provider(("rhubarbe", "wait", str(node)), 300).returncode != 0:
+        raise R2LabTopologyResourceError("selected qfit did not become SSH-ready")
+
+    usb = observe_qfit_usb_power(
+        qfit=profile.name, runner=provider, timeout_seconds=timeout_seconds
+    )
+    if usb.state is PowerState.OFF:
+        require_lease("lease-before-qfit-usb")
+        transition = execute_verified_qfit_usb_transition(
+            qfit=profile.name,
+            requested_state=PowerState.ON,
+            runner=provider,
+            timeout_seconds=timeout_seconds,
+        )
+        if not transition.confirmed:
+            raise R2LabTopologyResourceError("selected qfit USB rail was not proven on")
+    elif usb.state is PowerState.UNKNOWN:
+        raise R2LabTopologyResourceError("selected qfit USB power is unknown")
+
+    # The pinned qfit image supplies the UE tooling.  Connection/session
+    # mechanics are deferred to r2lab/ue/connect; no local init script is run.
+    _wait_management(
+        slice_name=slice_name,
+        profile=profile,
+        runner=runner,
+        sleeper=sleeper,
+        timeout_seconds=min(timeout_seconds, 60),
+    )
+
+
 def prepare_physical_resources(
     *,
     run_id: str,
     slice_name: str,
     topology: PhysicalTopology,
+    lock_path: Path = Path("dependencies.lock.yml"),
+    deps_root: Path = Path(".deps"),
     run_root: Path = Path(".synthran/r2lab"),
     runner: Runner = subprocess_runner,
     sleeper: Sleeper = time.sleep,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     progress: TextIO | None = None,
 ) -> PreparedPhysicalRun:
-    """Claim and prove the exact selected radio/UE pair for one topology."""
+    """Claim exact hardware and prepare UE management without custom modem actuation."""
+
+    from synthran.r2lab.ue_ansible import R2LabUeAnsibleError, execute_selected_ue_role
 
     validate_run_id(run_id)
     topology = topology.validate()
@@ -494,112 +515,32 @@ def prepare_physical_resources(
 
         profile = topology.ue_profile
         if profile.kind == "qfit":
-            require_lease("lease-before-qfit-state")
-            node = qfit_node_number(profile.name)
-            status = provider(("rhubarbe", "status", str(node)), timeout_seconds)
-            observation = parse_qfit_status(
-                "\n".join(part for part in (status.stdout, status.stderr) if part),
-                qfit=profile.name,
-            )
-            if observation.state is PowerState.UNKNOWN:
-                raise R2LabTopologyResourceError("selected qfit power state is unknown")
-            if observation.state is PowerState.OFF:
-                require_lease("lease-before-qfit-image-load")
-                loaded = provider(
-                    ("rhubarbe", "load", "-i", QFIT_IMAGE, str(node)),
-                    300,
-                )
-                if loaded.returncode != 0:
-                    raise R2LabTopologyResourceError("selected qfit image load returned nonzero")
-                status = provider(("rhubarbe", "status", str(node)), timeout_seconds)
-                observation = parse_qfit_status(
-                    "\n".join(part for part in (status.stdout, status.stderr) if part),
-                    qfit=profile.name,
-                )
-                if observation.state is not PowerState.ON:
-                    raise R2LabTopologyResourceError("selected qfit was not proven on after image load")
-            waited = provider(("rhubarbe", "wait", str(node)), 300)
-            if waited.returncode != 0:
-                raise R2LabTopologyResourceError("selected qfit did not become SSH-ready")
-            usb = observe_qfit_usb_power(
-                qfit=profile.name,
-                runner=provider,
+            _prepare_qfit(
+                slice_name=slice_name,
+                profile=profile,
+                provider=provider,
+                runner=runner,
+                require_lease=require_lease,
+                sleeper=sleeper,
                 timeout_seconds=timeout_seconds,
             )
-            if usb.state is PowerState.OFF:
-                require_lease("lease-before-qfit-usb")
-                transition = execute_verified_qfit_usb_transition(
-                    qfit=profile.name,
-                    requested_state=PowerState.ON,
-                    runner=provider,
+        elif profile.kind == "qhat":
+            require_lease("lease-before-qhat-setup")
+            try:
+                execute_selected_ue_role(
+                    run_id=run_id,
+                    slice_name=slice_name,
+                    topology=topology,
+                    action="setup",
+                    lock_path=lock_path,
+                    deps_root=deps_root,
+                    run_root=run_root,
                     timeout_seconds=timeout_seconds,
                 )
-                if not transition.confirmed:
-                    raise R2LabTopologyResourceError("selected qfit USB rail was not proven on")
-            elif usb.state is PowerState.UNKNOWN:
-                raise R2LabTopologyResourceError("selected qfit USB power is unknown")
-            _wait_management(
-                slice_name=slice_name,
-                profile=profile,
-                runner=runner,
-                sleeper=sleeper,
-                timeout_seconds=min(timeout_seconds, 60),
-            )
-            require_lease("lease-before-qfit-initialize")
-            initialized = _run_ue(
-                slice_name=slice_name,
-                profile=profile,
-                runner=runner,
-                timeout_seconds=max(timeout_seconds, 60),
-                remote=(QFIT_INITIALIZER,),
-            )
-            if initialized.returncode != 0:
-                raise R2LabTopologyResourceError("selected qfit initializer returned nonzero")
-        elif profile.kind == "qhat":
-            require_lease("lease-before-qhat")
-            power = execute_verified_pdu_transition(
-                resource=profile.name,
-                requested_state=PowerState.ON,
-                runner=provider,
-                timeout_seconds=timeout_seconds,
-            )
-            if not power.confirmed:
-                raise R2LabTopologyResourceError("selected qhat was not proven on")
-            _wait_ssh(
-                slice_name=slice_name,
-                profile=profile,
-                runner=runner,
-                sleeper=sleeper,
-                timeout_seconds=min(timeout_seconds, 60),
-            )
-            for executable in ("config-ue", "init.sh"):
-                available = _run_ue(
-                    slice_name=slice_name,
-                    profile=profile,
-                    runner=runner,
-                    timeout_seconds=min(timeout_seconds, 60),
-                    remote=("command", "-v", executable),
-                )
-                if available.returncode != 0:
-                    raise R2LabTopologyResourceError(
-                        f"selected qhat is missing required {executable} utility"
-                    )
-            require_lease("lease-before-qhat-configure")
-            configured = _run_ue(
-                slice_name=slice_name,
-                profile=profile,
-                runner=runner,
-                timeout_seconds=max(timeout_seconds, 180),
-                remote=(
-                    "config-ue",
-                    "--dnn",
-                    topology.dnn,
-                    "--mode",
-                    profile.mode,
-                ),
-            )
-            if configured.returncode != 0:
-                raise R2LabTopologyResourceError("selected qhat configuration returned nonzero")
+            except R2LabUeAnsibleError as exc:
+                raise R2LabTopologyResourceError(str(exc)) from exc
+            require_lease("lease-after-qhat-setup")
+            _prove_qhat_on(profile=profile, provider=provider, timeout_seconds=timeout_seconds)
             _wait_management(
                 slice_name=slice_name,
                 profile=profile,
@@ -608,26 +549,9 @@ def prepare_physical_resources(
                 timeout_seconds=min(timeout_seconds, 60),
                 attempts=60,
             )
-            require_lease("lease-before-qhat-initialize")
-            initialized = _run_ue(
-                slice_name=slice_name,
-                profile=profile,
-                runner=runner,
-                timeout_seconds=max(timeout_seconds, 60),
-                remote=("init.sh",),
-            )
-            if initialized.returncode != 0:
-                raise R2LabTopologyResourceError("selected qhat initializer returned nonzero")
         else:
             raise R2LabTopologyResourceError("selected UE kind is outside the canonical physical path")
 
-        _wait_management(
-            slice_name=slice_name,
-            profile=profile,
-            runner=runner,
-            sleeper=sleeper,
-            timeout_seconds=min(timeout_seconds, 60),
-        )
         require_lease("lease-final")
         manifest = {
             "schema": RUN_SCHEMA,
@@ -637,6 +561,7 @@ def prepare_physical_resources(
             "resource_claim": "held",
             "topology": _topology_payload(topology),
             "global_power_off": False,
+            "ue_mechanics": "pinned-5g-ansible",
         }
         _atomic_json(manifest_path, manifest)
         report("R2Lab resources READY")
@@ -649,7 +574,6 @@ def prepare_physical_resources(
         )
     except Exception:
         if claim_path is None:
-            # No owned mutation boundary was established; remove the empty run.
             try:
                 topology_file.unlink(missing_ok=True)
                 run_directory.rmdir()
@@ -666,7 +590,7 @@ def verify_physical_authority(
     runner: Runner = subprocess_runner,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> PhysicalAuthority:
-    """Refresh the current lease, exact claim, radio, and UE management state."""
+    """Refresh current lease, exact claim, radio, and UE management state."""
 
     topology = load_topology(run_root=run_root, run_id=run_id)
     _require_claim(
@@ -678,8 +602,7 @@ def verify_physical_authority(
     _lease(slice_name, runner, timeout_seconds)
     provider = _remote_runner(slice_name, runner)
     radio_result = provider(
-        ("rhubarbe", "pdu", "status", topology.radio),
-        timeout_seconds,
+        ("rhubarbe", "pdu", "status", topology.radio), timeout_seconds
     )
     radio = parse_pdu_status(
         "\n".join(part for part in (radio_result.stdout, radio_result.stderr) if part),
@@ -739,7 +662,7 @@ def claim_selected_allocation(
     timeout_seconds: int,
     run_root: Path = Path(".synthran/r2lab"),
 ) -> str:
-    """Reuse one exact allocation or reclaim only the currently reserved selected nodes."""
+    """Reuse one exact allocation or reclaim only the selected reserved nodes."""
 
     try:
         return verify_selected_allocation(
@@ -790,7 +713,9 @@ def claim_selected_allocation(
             now=datetime.now(timezone.utc),
             timeout_seconds=min(timeout_seconds, 60),
         )
-        result = allocation_runner(("pos", "allocations", "free", "-k", node), min(timeout_seconds, 60))
+        result = allocation_runner(
+            ("pos", "allocations", "free", "-k", node), min(timeout_seconds, 60)
+        )
         if result.returncode != 0:
             raise R2LabTopologyResourceError(f"allocation release for {node} returned nonzero")
 
@@ -802,8 +727,7 @@ def claim_selected_allocation(
         timeout_seconds=min(timeout_seconds, 300),
     )
     result = allocation_runner(
-        ("pos", "allocations", "allocate", *topology.nodes),
-        min(timeout_seconds, 60),
+        ("pos", "allocations", "allocate", *topology.nodes), min(timeout_seconds, 60)
     )
     if result.returncode != 0:
         raise R2LabTopologyResourceError("selected compute allocation creation returned nonzero")
@@ -890,6 +814,7 @@ def release_physical_resources(
         raise R2LabTopologyResourceError(
             "hardware is off but the local physical claim could not be removed"
         ) from exc
+
     manifest = run_root.expanduser().resolve() / run_id / "manifest.json"
     payload = _read_json(manifest, "physical run manifest")
     payload.update(
