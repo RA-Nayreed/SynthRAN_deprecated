@@ -39,14 +39,6 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue((SOURCE / "research" / "iperf.py").is_file())
         self.assertTrue((SOURCE / "research" / "runtime.py").is_file())
         self.assertTrue((SOURCE / "research" / "sampling.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "commands.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "experiment_setup.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "initialize.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "render.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "router.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "session.py").is_file())
-        self.assertTrue((SOURCE / "terminal" / "shell.py").is_file())
         self.assertTrue((SOURCE / "workspace" / "__init__.py").is_file())
         self.assertTrue((SOURCE / "workspace" / "model.py").is_file())
         self.assertTrue((SOURCE / "workspace" / "store.py").is_file())
@@ -85,9 +77,12 @@ class ModuleLayoutTests(unittest.TestCase):
         present = {path.name for path in SOURCE.iterdir() if path.is_file()}
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
 
-    def test_cli_is_the_only_scripted_command_source(self) -> None:
+    def test_synthran_is_the_only_operator_entrypoint(self) -> None:
         self.assertTrue((SOURCE / "launcher.py").is_file())
         self.assertTrue((SOURCE / "cli.py").is_file())
+        self.assertFalse((SOURCE / "__main__.py").exists())
+        self.assertFalse((SOURCE / "terminal").exists())
+        self.assertFalse((REPOSITORY_ROOT / "cli").exists())
         self.assertFalse((SOURCE / "entrypoint.py").exists())
         self.assertFalse((SOURCE / "experiment" / "commands.py").exists())
         self.assertFalse((SOURCE / "network" / "r2lab.py").exists())
