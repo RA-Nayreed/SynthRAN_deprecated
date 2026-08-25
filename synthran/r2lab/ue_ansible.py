@@ -1,7 +1,8 @@
 """Pinned 5g-Ansible actuation boundary for one selected R2Lab UE.
 
 SynthRAN owns authority, exact resource selection, postconditions, and public
-evidence.  Modem/setup mechanics stay in the locked upstream Ansible roles.
+evidence. Modem mechanics stay in the locked upstream Ansible roles and use the
+same sanitized streaming path as every other SynthRAN Ansible operation.
 """
 
 from __future__ import annotations
@@ -12,8 +13,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Callable, Literal, Mapping, Sequence
+from typing import Callable, Literal, Mapping, Sequence, TextIO
 
+from synthran.ansible_streaming import parse_ansible_line, run_streaming_ansible_command
 from synthran.dependencies import DependencyLock, load_lock
 from synthran.fiveg_ansible import FiveGAnsibleError, validate_fiveg_checkout
 from synthran.live_preflight import CommandResult
@@ -36,9 +38,6 @@ OPEN5GS_DNN = "internet"
 OPEN5GS_UE_PREFIX = "12.1.1"
 OPEN5GS_UPF_ADDRESS = f"{OPEN5GS_UE_PREFIX}.1"
 
-# The locked upstream QMI connect role can legitimately spend more than 180 s
-# in its own retry loops.  These are action floors, not acceptance timeouts;
-# SynthRAN still applies its independent postcondition window afterwards.
 _ROLE_TIMEOUT_FLOORS: Mapping[UeRoleAction, int] = {
     "setup": 600,
     "connect": 300,
@@ -137,9 +136,6 @@ def _inventory(*, slice_name: str, topology: PhysicalTopology, action: UeRoleAct
     if mode not in {"mbim", "qmi"}:
         raise R2LabUeAnsibleError("selected UE mode is unsupported by the pinned UE roles")
 
-    # Use the literal host name because the pinned stop/setup roles delegate to
-    # faraday.inria.fr explicitly.  This keeps the slice user/key attached to
-    # both normal execution and delegated tasks.
     faraday = (
         "[faraday]\n"
         f"faraday.inria.fr ansible_user={slice_name} "
@@ -235,6 +231,7 @@ def execute_selected_ue_role(
     timeout_seconds: int = ROLE_TIMEOUT_SECONDS,
     runner: RunCommand = run_command,
     checkout_validator: CheckoutValidator = validate_fiveg_checkout,
+    progress: TextIO | None = None,
 ) -> UeRoleResult:
     """Run one locked upstream UE role for the exact selected physical UE."""
 
@@ -284,6 +281,11 @@ def execute_selected_ue_role(
     )
     _atomic_json(evidence_path, payload.to_dict())
 
+    def report(message: str) -> None:
+        if progress is not None:
+            print(f"[synthran] ue-{action}: {message}", file=progress, flush=True)
+
+    report("running...")
     try:
         with tempfile.TemporaryDirectory(prefix="ue-ansible-", dir=physical) as directory:
             root = Path(directory)
@@ -297,22 +299,35 @@ def execute_selected_ue_role(
             inventory_path.write_text(inventory_text, encoding="utf-8", newline="\n")
             profile_path.write_text(profile_text, encoding="utf-8", newline="\n")
             playbook_path.write_text(playbook_text, encoding="utf-8", newline="\n")
-            result = runner(
-                ("ansible-playbook", "-i", str(inventory_path), str(playbook_path)),
-                root,
-                environment,
-                timeout_seconds,
-            )
+            command = ("ansible-playbook", "-i", str(inventory_path), str(playbook_path))
+            if runner is run_command:
+                result = run_streaming_ansible_command(
+                    command,
+                    root,
+                    environment,
+                    timeout_seconds,
+                    report=report,
+                )
+            else:
+                result = runner(command, root, environment, timeout_seconds)
+                if progress is not None:
+                    for line in result.stdout.splitlines():
+                        rendered = parse_ansible_line(line)
+                        if rendered is not None:
+                            report(rendered)
     except Exception as exc:
         failed = UeRoleResult(**{**payload.__dict__, "status": "failed"})
         _atomic_json(evidence_path, failed.to_dict())
+        report("FAILED")
         raise R2LabUeAnsibleError(f"pinned 5g-Ansible UE {action} role could not complete") from exc
 
     if result.returncode != 0:
         failed = UeRoleResult(**{**payload.__dict__, "status": "failed"})
         _atomic_json(evidence_path, failed.to_dict())
+        report("FAILED")
         raise R2LabUeAnsibleError(f"pinned 5g-Ansible UE {action} role returned nonzero")
 
     completed = UeRoleResult(**{**payload.__dict__, "status": "completed"})
     _atomic_json(evidence_path, completed.to_dict())
+    report("OK")
     return completed
