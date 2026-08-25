@@ -9,27 +9,50 @@ Current live evidence is kept out of this architecture document. See [`results.m
 ```mermaid
 flowchart TB
     O[Operator] --> C[synthran CLI]
-    C --> X[Domain executors]
+    C --> B[Backend registry]
+    C --> X[Common experiment and research commands]
 
-    X --> S[SLICES / POS resources]
-    X --> V[RFSIM network path]
-    X --> P[R2Lab physical path]
-    X --> I[IoT experiment runtime]
-    X --> M[Research measurement runtime]
+    B --> V[RfsimBackend]
+    B --> P[R2LabBackend]
 
-    V --> I
-    P --> I
+    V --> S[SLICES / POS virtual network runtime]
+    P --> R[SLICES / POS + R2Lab physical runtime]
+
+    S --> I[Common experiment semantics]
+    R --> I
+    X --> I
     I --> D[Evidence / JSONL / Parquet]
-    M --> D
 ```
 
-The only supported operator executable is `synthran`. There is no separate interactive frontend or external workbench protocol. Internal application, workspace, reconciliation, operation, and provider modules may still enforce reusable policy and state contracts; they are implementation boundaries rather than additional products.
+The only supported operator executable is `synthran`. There is no separate interactive frontend or external workbench protocol. `synthran.cli` is the command dispatch boundary; provider-specific execution is selected through the backend registry rather than implemented by the top-level CLI. Internal application, workspace, reconciliation, operation, and provider modules remain implementation boundaries rather than additional products.
 
 ## Backend boundary
 
 RFSIM remains the accepted virtual reference path. R2Lab is the physical-radio implementation and must satisfy the same experiment-level semantics before a physical stage is described as accepted.
 
-Backend-specific mechanisms are expected below the network and user-plane boundary:
+The backend contract uses one ordered lifecycle:
+
+```text
+access
+-> resources
+-> kubernetes
+-> core
+-> gNB
+-> N2
+-> UE management
+-> cell
+-> registration
+-> PDU
+-> user plane
+-> workload
+-> data
+-> acceptance
+-> cleanup
+```
+
+A backend may advertise only a contiguous implemented prefix of that lifecycle. Implementation capability is not live acceptance: accepted physical capability still depends on current evidence for the exact run and resources. RFSIM implements the complete reference contract; R2Lab advances through the same contract as physical stages are implemented and proven.
+
+Backend-specific mechanisms stay below this boundary:
 
 | Concern | RFSIM | R2Lab |
 |---|---|---|
@@ -39,7 +62,7 @@ Backend-specific mechanisms are expected below the network and user-plane bounda
 | Cell proof | simulated cell state | current physical NR acquisition |
 | Authority | SLICES/POS run authority | SLICES/POS plus current R2Lab physical authority |
 
-Above that boundary, experiment identity, deterministic IoT inputs, telemetry semantics, research validity, evidence provenance, and cleanup rules remain common.
+Above that boundary, experiment identity, deterministic IoT inputs, telemetry semantics, research validity, evidence provenance, and cleanup rules remain common. Backend-specific interface names, resource identifiers, and provider diagnostics must not become common experiment semantics.
 
 ## Persistent state
 
