@@ -1,6 +1,10 @@
-# Current live research results
+# Current accepted results
 
-This document is the canonical public summary of the latest accepted SynthRAN research evidence. Historical pilots and failure diagnoses remain useful engineering records, but current capability claims should point here.
+This document is the canonical public summary of accepted SynthRAN research evidence. Engineering failures and intermediate testbed observations remain useful in raw run evidence, but capability and scientific claims should point here rather than to dated implementation notes.
+
+## Platform status
+
+The accepted controlled-load research campaign below was executed on the RFSIM reference backend. The R2Lab backend now implements the corresponding physical lifecycle through exact hardware authority, N3xx gNB/N2, selected Quectel UE activation, PDU/user-plane proof, deterministic workload execution, and exact cleanup. Physical controlled-load campaign results are **not** claimed here until a physical campaign satisfies the same measurement-validity standard.
 
 ## Accepted campaign
 
@@ -55,8 +59,8 @@ block 3 / baseline / sensor-09: sequence 8..42  (35 records)
 Across all 12 runs:
 
 ```text
-sequence gaps:      0
-duplicate sequences: 0
+sequence gaps:        0
+duplicate sequences:  0
 ```
 
 A 180-second observation window and a 5-second periodic source have boundary-timing ambiguity: depending on where the sensor cycle falls relative to the exact window edges, 35 or 36 records may lie inside the window even when the observed sequence is continuous.
@@ -164,7 +168,7 @@ Analysis SHA-256:
 c96a3c402088420400c8727606376c86b08b0f6658a32220466be866d89aafa3
 ```
 
-The unrounded campaign analysis JSON is intentionally tracked under [`results/`](../results/) for direct inspection. The complete immutable raw run bundle remains in SLICES object storage, where its archive checksum was verified byte-for-byte.
+The unrounded campaign analysis JSON is intentionally tracked under [`../results/`](../results/) for direct inspection. The complete immutable raw run bundle remains in SLICES object storage, where its archive checksum was verified byte-for-byte.
 
 ### Preservation-manifest note
 
@@ -178,7 +182,7 @@ The evidence supports the following bounded statement:
 
 > In the accepted SynthRAN virtual configuration, deterministic ten-sensor IoT telemetry remained sequence-continuous through the srsUE/srsRAN/Open5GS user path while controlled external UDP background traffic was sustained up to 95% of the calibrated reference capacity. The same campaign exposed a reproducible reduction in measured RTT whenever sustained background traffic was active; the mechanism remains an open research question requiring targeted replication.
 
-It does **not** yet establish physical-RF behavior, multi-UE scaling, a general causal latency effect, or performance under arbitrary RAN/core configurations.
+It does **not** establish physical-RF behavior, multi-UE scaling, a general causal latency effect, or performance under arbitrary RAN/core configurations.
 
 ## Next scientific work
 
@@ -186,6 +190,4 @@ It does **not** yet establish physical-RF behavior, multi-UE scaling, a general 
 2. Treat fixed-count telemetry coverage as window occupancy and use sequence continuity for observed loss/integrity claims.
 3. Produce publication figures directly from the raw campaign-06 traces: RTT distributions/time series, paired block effects, telemetry inter-arrival behavior, and UE/UPF transport agreement.
 4. Run a targeted active-versus-idle replication with more independent blocks.
-5. Only then decide whether the RTT observation is strong enough to become a paper result.
-
-Historical pre-campaign engineering evidence is retained in [`live-results-20260818.md`](live-results-20260818.md).
+5. Add physical controlled-load research only after the R2Lab measurement peer, load generation, timing validity, and cleanup contract are accepted end-to-end.
