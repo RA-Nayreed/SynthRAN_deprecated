@@ -6,7 +6,7 @@ SynthRAN composes upstream systems; it does not absorb them.
 
 - Git dependencies are complete detached checkouts at immutable commits.
 - Container images use immutable digests.
-- Direct Conda dependencies use exact versions under `conda.packages` (including Python 3.12.13 and OpenJDK 21.0.9 required by Cooja), and the lock declares `linux-64` as the only supported platform.
+- Direct Conda dependencies use exact versions under `conda.packages`, and the lock declares `linux-64` as the supported platform.
 - Mutable upstream branch names are provenance notes only and are never runtime selectors.
 - No Git submodules are used.
 - Dependency source belongs under ignored `.deps/` storage.
@@ -15,30 +15,30 @@ Complete checkouts matter because `5g_ansible` and Contiki-NG behavior depends o
 
 ## Synchronization
 
-Activate `synthran` before running these commands.
+Activate `synthran` and install the repository command before running these operations.
 
-Preview the two direct checkouts:
+Preview direct checkouts:
 
 ```sh
-python -m synthran deps sync --dry-run
+synthran deps sync --dry-run
 ```
 
 Synchronize them:
 
 ```sh
-python -m synthran deps sync
+synthran deps sync
 ```
 
 Inspect locked transitive Git repositories as well:
 
 ```sh
-python -m synthran deps sync --all
+synthran deps sync --all
 ```
 
 Sync named dependencies without inspecting unrelated checkouts:
 
-```text
-python -m synthran deps sync \
+```sh
+synthran deps sync \
   --name fiveg_ansible \
   --name srsran_helm
 ```
@@ -54,21 +54,20 @@ The pinned `5g_ansible` tree accepts its transitive repositories through Ansible
 | `sopnode/open5gs-k8s` | `repo_branch` |
 | `turletti/srsran-helm` | `version` |
 
-The golden-path planner and executor pass these exact commits. The SynthRAN-owned preparation overlay pins `kubernetes.core==6.5.0`, `community.general==13.0.1`, and `ansible.posix==2.2.2`; the latter two provide the locked upstream roles' required `community.general.modprobe` and `ansible.posix.mount` actions. The locked graph contains no `community.kubernetes` call, so that legacy collection is not installed. The overlay also ensures runtime host packages (`net-tools` for `ifconfig`) are present, pins Helm `3.18.4` from its locked Linux AMD64 archive digest, yq `4.45.1` from its locked binary digest, and exact direct remote Python package versions including `kubernetes==32.0.1`. Those direct Python versions do not freeze the complete transitive installation graph.
+The golden-path planner and executor pass these exact commits. The SynthRAN-owned preparation overlay pins required Ansible collections and host tooling. Deployment is separately evidence-gated, verifies locked inputs, replaces selected mutable image tags with Linux AMD64 digests before Kubernetes sees a manifest, and uses an isolated detached `5g_ansible` worktree rather than invoking upstream `deploy.sh`.
 
-The tracked `resource-preparation-boundary.patch` applies only to the locked upstream commit. It removes per-node free/allocation tasks, skips the mutable `k9s` helper, and prevents entry into Open5GS or srsRAN roles. The first native preparation intentionally accepts the remaining upstream apt, chart, manifest, and installer transitives; it is version-pinned, not artifact-reproducible. After explicit operator acceptance, `dependencies.lock.yml` records `resource_bootstrap.status` as `ready`. Later locking should target only dependencies shown by a native run to be unstable or scientifically material.
-
-Deployment is separately evidence-gated, verifies its locked inputs, and replaces every selected mutable image tag with a Linux AMD64 digest before Kubernetes sees a manifest. It uses an isolated detached `5g_ansible` worktree and never invokes upstream `deploy.sh`.
-
-The tracked `deploy/ansible/patches/golden-path-boundary.patch` applies only to the locked `5g_ansible` commit and is checked before application. It prevents the selected roles from restarting the cluster, installing or upgrading host packages, downloading mutable tools, deploying the optional WebUI, overriding remote task interpreters with the controller's local Python path, or expanding the runtime beyond slice one and one srsUE. A patch-context mismatch is terminal.
+The tracked preparation and deployment patches apply only to their locked upstream commits. A patch-context mismatch is terminal.
 
 ## Research measurement dependencies
 
 Controlled research experiments and capacity calibration rely on tooling across controller, host, and container environments:
 
-- `iperf3`: Installed in the srsUE container image (`-c ue`) and on the root core node (`inventory.core_node`), executed as a run-owned server on the core node and as a client inside srsUE for saturating capacity calibration and controlled UDP background load generation.
-- `ping` and `ip`: Installed inside the srsUE container environment and preflighted at runtime for continuous RTT probing (`-I tun_srsue1`) and temporary target route management (`ip route add`).
-- `pyarrow` (`19.0.1` in Conda lock): Used by the research collector on the controller to derive deterministic, compressed Parquet tables (`probe.parquet`, `network-samples.parquet`, `load.parquet`, `telemetry.parquet`) directly from accepted JSONL audit records.
+- `iperf3` provides reference capacity and controlled UDP background load.
+- `ping` and `ip` provide continuous path probing and route ownership checks.
+- `pyarrow` derives deterministic compressed Parquet tables from accepted JSONL audit records.
+- OpenJDK provides the Java runtime required by Cooja.
+
+The current operator interface does not require Node.js or an interactive-terminal library.
 
 ## Update procedure
 
@@ -76,10 +75,10 @@ Update one dependency at a time:
 
 1. Resolve the intended source reference to an immutable commit or digest.
 2. Inspect its license and redistribution implications.
-3. Update `dependencies.lock.yml` and `THIRD_PARTY.md` together.
+3. Update `dependencies.lock.yml` and `THIRD_PARTY.md` together when provenance changes.
 4. Synchronize and verify a clean detached checkout.
 5. Run all offline tests and privacy checks.
 6. Complete the golden-path compatibility test appropriate to that dependency.
-7. Record the rationale and evidence in the local decision journal.
+7. Preserve accepted evidence outside generated or private repository paths.
 
 Do not copy `5g_ansible` source into SynthRAN. Its pinned tree has no asserted top-level license, so derivative publication requires clarification.
