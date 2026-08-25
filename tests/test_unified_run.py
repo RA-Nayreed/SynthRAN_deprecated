@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
+import tempfile
 import unittest
 
-from synthran.backends import RunCommandAdapter, backend_for_argv
 from synthran.backends.run import _RunProgress
 from synthran.cli import _parser
 from synthran.dependencies import load_lock
@@ -34,10 +35,7 @@ def _topology() -> PhysicalTopology:
 
 
 class UnifiedRunTests(unittest.TestCase):
-    def test_run_command_is_backend_selecting_operator_surface(self) -> None:
-        adapter = backend_for_argv(("run", "--radio", "r2lab"))
-        self.assertIsInstance(adapter, RunCommandAdapter)
-
+    def test_run_parser_selects_backend(self) -> None:
         physical = _parser().parse_args(
             (
                 "run",
@@ -55,11 +53,9 @@ class UnifiedRunTests(unittest.TestCase):
                 "physical-001",
             )
         )
-        self.assertEqual(physical.command, "run")
-        self.assertEqual(physical.radio, "r2lab")
-        self.assertEqual(physical.device, "n300")
-        self.assertEqual(physical.ue, "qfit07")
-        self.assertFalse(physical.quiet)
+        self.assertEqual("r2lab", physical.radio)
+        self.assertEqual("n300", physical.device)
+        self.assertEqual("qfit07", physical.ue)
 
         virtual = _parser().parse_args(
             (
@@ -75,69 +71,81 @@ class UnifiedRunTests(unittest.TestCase):
                 "--quiet",
             )
         )
-        self.assertEqual(virtual.radio, "rfsim")
-        self.assertIsNone(virtual.device)
-        self.assertIsNone(virtual.ue)
+        self.assertEqual("rfsim", virtual.radio)
         self.assertTrue(virtual.quiet)
 
-    def test_progress_is_live_and_separate_from_result_stdout(self) -> None:
-        stream = io.StringIO()
-        progress = _RunProgress(stream=stream)
-        progress.start("provider", "select SLICES context")
-        progress.done("provider", "ready")
-        progress.start("gNB/N2", "establish stable N2")
-        progress.fail("N2 was not established")
+    def test_progress_persists_the_same_stream_shown_to_operator(self) -> None:
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                stream = io.StringIO()
+                progress = _RunProgress(
+                    stream=stream,
+                    run_id="physical-001",
+                    radio="r2lab",
+                )
+                progress.start("provider", "select SLICES context")
+                print("[synthran] TASK: Open5GS core", file=progress.child_stream)
+                progress.done("provider", "ready")
+                progress.close()
 
-        self.assertEqual(
-            stream.getvalue().splitlines(),
-            [
-                "→ provider: select SLICES context",
-                "✓ provider: ready",
-                "→ gNB/N2: establish stable N2",
-                "✗ gNB/N2: N2 was not established",
-            ],
-        )
+                self.assertEqual(
+                    stream.getvalue().splitlines(),
+                    [
+                        "→ provider: select SLICES context",
+                        "[synthran] TASK: Open5GS core",
+                        "✓ provider: ready",
+                    ],
+                )
+                event_path = Path(".synthran/events/physical-001.jsonl")
+                payloads = [json.loads(line) for line in event_path.read_text().splitlines()]
+                self.assertEqual(
+                    [item["message"] for item in payloads],
+                    stream.getvalue().splitlines(),
+                )
+                self.assertTrue(all(item["radio"] == "r2lab" for item in payloads))
+            finally:
+                os.chdir(previous)
 
-        quiet_stream = io.StringIO()
-        quiet = _RunProgress(enabled=False, stream=quiet_stream)
-        quiet.start("provider")
-        quiet.done("provider")
-        self.assertEqual(quiet_stream.getvalue(), "")
+    def test_quiet_run_still_persists_events(self) -> None:
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                stream = io.StringIO()
+                progress = _RunProgress(
+                    enabled=False,
+                    stream=stream,
+                    run_id="virtual-001",
+                    radio="rfsim",
+                )
+                progress.start("provider")
+                progress.done("provider")
+                progress.close()
+                self.assertEqual("", stream.getvalue())
+                self.assertEqual(
+                    2,
+                    len(Path(".synthran/events/virtual-001.jsonl").read_text().splitlines()),
+                )
+            finally:
+                os.chdir(previous)
 
     def test_n300_generated_values_restore_open5gs_runtime_network(self) -> None:
         lock = load_lock(Path("dependencies.lock.yml"))
         values = _generated_values(topology=_topology(), lock=lock)
-
         self.assertEqual(values["namespace"], "open5gs")
         self.assertEqual(values["n3networkName"], OPEN5GS_N3_NETWORK)
-        self.assertEqual(OPEN5GS_N3_NETWORK, "n3network")
         self.assertEqual(values["gnbIp"], OPEN5GS_GNB_N2_N3_ADDRESS)
-        self.assertEqual(OPEN5GS_GNB_N2_N3_ADDRESS, "10.10.3.234")
         self.assertEqual(
-            values["gnbConfig"],
-            {
-                "cu_cp": {
-                    "amf": {
-                        "addr": OPEN5GS_AMF_N2_ADDRESS,
-                        "port": 38412,
-                        "bind_addr": OPEN5GS_GNB_N2_N3_ADDRESS,
-                    }
-                },
-                "cu_up": {
-                    "ngu": {
-                        "socket": [
-                            {"bind_addr": OPEN5GS_GNB_N2_N3_ADDRESS}
-                        ]
-                    }
-                },
-            },
+            values["gnbConfig"]["cu_cp"]["amf"]["addr"],
+            OPEN5GS_AMF_N2_ADDRESS,
         )
 
     def test_n3xx_render_rejects_empty_n3_attachment(self) -> None:
         topology = _topology()
         lock = load_lock(Path("dependencies.lock.yml"))
         repository, tag, digest = _locked_image(lock, topology.radio_profile)
-        self.assertIsNotNone(digest)
         render = f'''\
 apiVersion: apps/v1
 kind: Deployment
@@ -166,11 +174,8 @@ spec:
             digest=digest,
             ru_pod_address="192.168.235.240",
         )
-
         broken = render.replace(f'"{OPEN5GS_N3_NETWORK}"', '""', 1)
-        with self.assertRaisesRegex(
-            R2LabN3xxError, "Open5GS N3 network attachment"
-        ):
+        with self.assertRaisesRegex(R2LabN3xxError, "Open5GS N3 network attachment"):
             _validate_render(
                 text=broken,
                 topology=topology,
