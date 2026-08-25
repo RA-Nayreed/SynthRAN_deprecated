@@ -1,6 +1,6 @@
 """Physical UE activation composed from pinned 5g-Ansible mechanics.
 
-The upstream role performs modem actuation.  SynthRAN independently verifies a
+The upstream roles perform modem actuation.  SynthRAN independently verifies a
 functional postcondition over ``wwan0`` and records ordered acceptance.  A
 convergence timeout is not a terminal acceptance failure; the run remains at the
 same stage and can be resumed safely.
@@ -89,7 +89,7 @@ def observe_functional_ue_runtime(
     runner: Runner = subprocess_runner,
     timeout_seconds: int = PROBE_TIMEOUT_SECONDS,
 ) -> PhysicalUeRuntimeEvidence:
-    """Observe only functional, sanitized postconditions after upstream actuation.
+    """Observe sanitized functional postconditions after upstream actuation.
 
     Interface-bound reachability to the Open5GS UPF is stronger than a modem AT
     string for this backend: it requires the selected UE to have acquired the
@@ -223,6 +223,24 @@ def recover_retryable_transport_failure(
     )
 
 
+def _best_effort_stop(
+    *, run_id: str, slice_name: str, topology, run_root: Path, timeout_seconds: int
+) -> None:
+    try:
+        execute_selected_ue_role(
+            run_id=run_id,
+            slice_name=slice_name,
+            topology=topology,
+            action="stop",
+            run_root=run_root,
+            timeout_seconds=min(timeout_seconds, 180),
+        )
+    except R2LabUeAnsibleError:
+        # Exact hardware power-off remains the cleanup authority.  A failed
+        # graceful stop must not fabricate acceptance or hide the original error.
+        return
+
+
 def activate_physical_ue(
     *,
     evidence: PhysicalRunEvidence,
@@ -314,6 +332,13 @@ def activate_physical_ue(
             timeout_seconds=min(timeout_seconds, 180),
         )
     except R2LabUeAnsibleError as exc:
+        _best_effort_stop(
+            run_id=state.run_id,
+            slice_name=slice_name,
+            topology=topology,
+            run_root=run_root,
+            timeout_seconds=timeout_seconds,
+        )
         raise R2LabPhysicalUeError(str(exc)) from exc
 
     deadline = clock() + min(POSTCONDITION_SECONDS, max(10, int(timeout_seconds)))
@@ -332,14 +357,23 @@ def activate_physical_ue(
     state = _pass_functional_path(state, runtime)
     if evidence_path is not None:
         state.write_json(evidence_path)
+    status = "activated" if runtime.pdu_session_established else "not-proven"
     summary = PhysicalUeActivationSummary(
         run_id=state.run_id,
         ue=topology.ue,
         mode=topology.ue_profile.mode,
-        status="activated" if runtime.pdu_session_established else "not-proven",
+        status=status,
         runtime=runtime,
         evidence_path=evidence_path or Path("physical-run.json"),
     )
     if activation_evidence_path is not None:
         _write_json(activation_evidence_path, summary.to_dict())
+    if not runtime.pdu_session_established:
+        _best_effort_stop(
+            run_id=state.run_id,
+            slice_name=slice_name,
+            topology=topology,
+            run_root=run_root,
+            timeout_seconds=timeout_seconds,
+        )
     return state, summary
