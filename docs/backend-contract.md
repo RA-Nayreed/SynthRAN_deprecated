@@ -40,6 +40,12 @@ Current provider or direct observation outranks persisted evidence, manifests, a
 
 A later stage may depend on evidence from an earlier stage only when that evidence is still current under the stage's freshness and identity rules. Physical mutations additionally require current physical authority immediately before the mutation boundary.
 
+### Hash policy
+
+Cryptographic digests are used where byte identity is the actual property being protected: pinned external revisions, downloaded tools, container images, rendered deployment artifacts, immutable data products, and persisted provenance. They are not a substitute for current ownership or live state.
+
+A runtime stage must not repeatedly hash or propagate an unchanged artifact merely to authorize the next operation when exact run/resource identity and a fresh provider or direct observation already prove that boundary. Hash checks belong at artifact creation, transfer, loading, or provenance verification boundaries; live lease, allocation, radio, gNB, UE, PDU, route, and cleanup authority is established from current state.
+
 ## Ownership and cleanup
 
 Both backends use exact ownership. SynthRAN must not infer ownership from a broad name pattern when a run identifier, provider identifier, allocation identifier, process identifier, namespace label, or other exact binding is available.
@@ -52,7 +58,7 @@ If an operation fails after mutation and safe rollback cannot be proven, the res
 
 The supported operator executable is `synthran`. Public lifecycle commands select or resolve a backend and then invoke the same lifecycle semantics. Backend implementation modules are internal integration boundaries, not independent products.
 
-RFSIM is retained as the virtual reference backend. Physical support is conformant only when the same required stages are proven through R2Lab hardware. A backend may remain partially implemented without weakening the contract or reporting unsupported stages as accepted.
+RFSIM is retained as the virtual reference backend. Physical support is conformant only when the same required stages are proven through R2Lab hardware. Static implementation capability does not itself claim that a physical run is currently accepted; live acceptance still requires current evidence from the selected hardware and provider resources.
 
 ## Conformance tests
 
