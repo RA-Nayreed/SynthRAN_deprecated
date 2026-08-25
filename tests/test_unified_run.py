@@ -185,7 +185,7 @@ spec:
                 ru_pod_address="192.168.235.240",
             )
 
-    def test_foundation_requires_n3_and_ru_network_attachments(self) -> None:
+    def test_foundation_requires_only_open5gs_n3network(self) -> None:
         topology = _topology()
 
         def runner_with(names: tuple[str, ...]):
@@ -203,7 +203,7 @@ spec:
             timeout_seconds=30,
         )
         self.assertTrue(ready)
-        self.assertEqual(observed, ("n3network", "ru-network"))
+        self.assertEqual(observed, ("n3network",))
 
         ready, observed = _physical_networks_ready(
             topology=topology,
@@ -212,7 +212,7 @@ spec:
             timeout_seconds=30,
         )
         self.assertFalse(ready)
-        self.assertEqual(observed, ("ru-network",))
+        self.assertEqual(observed, ())
 
 
 if __name__ == "__main__":

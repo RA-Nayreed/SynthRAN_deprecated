@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -44,6 +45,18 @@ QHAT = PhysicalTopology(
     radio="n300",
     ue="qhat01",
 ).validate()
+
+UPSTREAM_MBIM_BLOCK = '''        - name: "MBIM: stop.sh + start.sh on {{ ue_item }} if wwan0 not reachable"
+          shell: >
+            ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no
+            root@{{ ue_item }}
+            'stop.sh; start.sh -F {{ current_dnn }}'
+          when:
+            - ue_mode == 'mbim'
+            - current_dnn is defined
+            - not wwan0_up
+          ignore_errors: "{{ ignore_task_errors | default(true) }}"
+'''
 
 
 class SelectedUeRoleRenderingTests(unittest.TestCase):
@@ -127,6 +140,10 @@ class SelectedUeRoleExecutionTests(unittest.TestCase):
                 / "all"
                 / "5g_profile_synthran.yaml"
             ).read_text(encoding="utf-8")
+            role_roots = environment["ANSIBLE_ROLES_PATH"].split(os.pathsep)
+            captured["connect_role"] = (
+                Path(role_roots[0]) / "r2lab" / "ue" / "connect" / "tasks" / "main.yml"
+            ).read_text(encoding="utf-8")
             return CommandResult(0, "ok", "")
 
         with tempfile.TemporaryDirectory() as directory:
@@ -144,10 +161,13 @@ class SelectedUeRoleExecutionTests(unittest.TestCase):
                 "    slice: slice1\n",
                 encoding="utf-8",
             )
-            for relative in (SETUP_ROLE, CONNECT_ROLE, STOP_ROLE):
+            for relative in (SETUP_ROLE, STOP_ROLE):
                 path = checkout / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("---\n", encoding="utf-8")
+            connect_path = checkout / CONNECT_ROLE
+            connect_path.parent.mkdir(parents=True, exist_ok=True)
+            connect_path.write_text("---\n" + UPSTREAM_MBIM_BLOCK, encoding="utf-8")
 
             with patch("synthran.r2lab.ue_ansible._configured_identity", return_value=None):
                 result = execute_selected_ue_role(
@@ -166,12 +186,17 @@ class SelectedUeRoleExecutionTests(unittest.TestCase):
 
         self.assertEqual("completed", result.status)
         self.assertEqual("ansible-playbook", captured["command"][0])
-        self.assertEqual(str(checkout / "roles"), captured["roles"])
+        role_roots = str(captured["roles"]).split(os.pathsep)
+        self.assertEqual(2, len(role_roots))
+        self.assertEqual(str(checkout / "roles"), role_roots[1])
         self.assertGreaterEqual(captured["timeout"], 300)
         self.assertIn("faraday.inria.fr ansible_user=oulu_user", captured["inventory"])
         self.assertIn("fit07 mode=mbim", captured["inventory"])
         self.assertIn("role: r2lab/ue/connect", captured["playbook"])
         self.assertNotIn("imsi", captured["profile"].lower())
+        self.assertNotIn("stop.sh; start.sh", captured["connect_role"])
+        self.assertIn("start.sh -F {{ current_dnn }} -q", captured["connect_role"])
+        self.assertIn("until: mbim_start.rc == 0", captured["connect_role"])
         self.assertEqual("completed", payload["status"])
         self.assertIn("inventory_sha256", payload)
         self.assertNotIn("oulu_user", json.dumps(payload))

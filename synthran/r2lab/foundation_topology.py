@@ -49,7 +49,7 @@ RELEASE = "srsran-gnb"
 GNB_SELECTOR = "app=srsran,component=gnb"
 RUN_LABEL = "synthran.run/id"
 REQUIRED_OPEN5GS_NFS = ("amf", "smf", "upf")
-REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS = ("n3network", "ru-network")
+REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS = ("n3network",)
 DEFAULT_TIMEOUT_SECONDS = 1800
 FOUNDATION_SCHEMA = "synthran/r2lab-foundation/v1alpha2"
 

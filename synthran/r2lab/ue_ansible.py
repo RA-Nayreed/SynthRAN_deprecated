@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 from typing import Callable, Literal, Mapping, Sequence, TextIO
 
@@ -22,6 +23,7 @@ from synthran.live_preflight import CommandResult
 from synthran.network.runtime import run_command
 from synthran.r2lab.controller import _configured_identity
 from synthran.r2lab.hardware import PhysicalTopology
+from synthran.r2lab.ue_overlay import R2LabUeOverlayError, apply_ue_connect_overlay
 
 
 UeRoleAction = Literal["setup", "connect", "stop"]
@@ -299,6 +301,18 @@ def execute_selected_ue_role(
             inventory_path.write_text(inventory_text, encoding="utf-8", newline="\n")
             profile_path.write_text(profile_text, encoding="utf-8", newline="\n")
             playbook_path.write_text(playbook_text, encoding="utf-8", newline="\n")
+
+            if action == "connect":
+                overlay_roles = root / "roles"
+                source_role = checkout / "roles" / "r2lab" / "ue" / "connect"
+                target_role = overlay_roles / "r2lab" / "ue" / "connect"
+                target_role.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source_role, target_role)
+                apply_ue_connect_overlay(overlay_roles)
+                environment["ANSIBLE_ROLES_PATH"] = os.pathsep.join(
+                    (str(overlay_roles), str(checkout / "roles"))
+                )
+
             command = ("ansible-playbook", "-i", str(inventory_path), str(playbook_path))
             if runner is run_command:
                 result = run_streaming_ansible_command(
@@ -315,7 +329,7 @@ def execute_selected_ue_role(
                         rendered = parse_ansible_line(line)
                         if rendered is not None:
                             report(rendered)
-    except Exception as exc:
+    except (R2LabUeOverlayError, Exception) as exc:
         failed = UeRoleResult(**{**payload.__dict__, "status": "failed"})
         _atomic_json(evidence_path, failed.to_dict())
         report("FAILED")
