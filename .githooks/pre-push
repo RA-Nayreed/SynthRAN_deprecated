@@ -17,4 +17,4 @@ else
 fi
 
 exec "$conda_command" run --no-capture-output -n "$environment_name" \
-  synthran privacy scan --outgoing --remote "$remote_name"
+  synthran dev privacy scan --outgoing --remote "$remote_name"
