@@ -30,6 +30,8 @@ CheckoutValidator = Callable[[DependencyLock, Path], Path]
 
 FIVEG_PROFILE = "synthran"
 UPSTREAM_PROFILE = "group_vars/all/5g_profile_default.yaml"
+CONNECT_ROLE = "roles/r2lab/ue/connect/tasks/main.yml"
+STOP_ROLE = "roles/r2lab/ue/stop/tasks/main.yml"
 OPEN5GS_SLICE_NAME = "slice1"
 OPEN5GS_DNN = "internet"
 OPEN5GS_UE_PREFIX = "12.1.1"
@@ -78,6 +80,9 @@ def _dependency_commit(lock: DependencyLock) -> str:
 def _validate_pinned_profile(checkout: Path, topology: PhysicalTopology) -> None:
     """Fail closed if the locked role/profile contract no longer matches R2Lab."""
 
+    required_interfaces = (UPSTREAM_PROFILE, CONNECT_ROLE, STOP_ROLE)
+    if any(not (checkout / relative).is_file() for relative in required_interfaces):
+        raise R2LabUeAnsibleError("pinned 5g-Ansible checkout is missing UE role interfaces")
     profile_path = checkout / UPSTREAM_PROFILE
     try:
         profile = profile_path.read_text(encoding="utf-8")
