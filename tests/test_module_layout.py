@@ -80,6 +80,8 @@ class ModuleLayoutTests(unittest.TestCase):
     def test_synthran_is_the_only_operator_entrypoint(self) -> None:
         self.assertTrue((SOURCE / "launcher.py").is_file())
         self.assertTrue((SOURCE / "cli.py").is_file())
+        self.assertTrue((SOURCE / "command_runtime.py").is_file())
+        self.assertFalse((SOURCE / "commands").exists())
         self.assertFalse((SOURCE / "__main__.py").exists())
         self.assertFalse((SOURCE / "terminal").exists())
         self.assertFalse((REPOSITORY_ROOT / "cli").exists())

@@ -5,8 +5,8 @@ from __future__ import annotations
 import sys
 from typing import Sequence
 
+from synthran import command_runtime
 from synthran.backends import BackendError, backend_for_argv
-from synthran.commands import runtime as command_runtime
 
 
 _parser = command_runtime._parser

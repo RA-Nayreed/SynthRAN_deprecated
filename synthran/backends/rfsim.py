@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import argparse
 
+from synthran import command_runtime
 from synthran.backends.base import (
     BackendContract,
     BackendError,
     LIFECYCLE_STAGES,
 )
-from synthran.commands import runtime as command_runtime
 from synthran.dependencies import DependencyError
 from synthran.fiveg_ansible import FiveGAnsibleError
 from synthran.live_preflight import LivePreflightError

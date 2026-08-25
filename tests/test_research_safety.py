@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from synthran.commands.runtime import _load_campaign
+from synthran.command_runtime import _load_campaign
 from synthran.experiment import ExperimentError
 from synthran.fiveg_ansible import InventoryHost, NetworkInventory
 from synthran.research import CampaignCondition, ResearchError, build_campaign, save_campaign
