@@ -88,6 +88,10 @@ class CliTests(unittest.TestCase):
                 "plan",
                 "--slice",
                 "oulu_user",
+                "--core-node",
+                "sopnode-f1",
+                "--ran-node",
+                "sopnode-f2",
                 "--radio",
                 "n300",
                 "--ue",
@@ -98,6 +102,8 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(args.command, "r2lab")
         self.assertEqual(args.r2lab_command, "plan")
+        self.assertEqual(args.core_node, "sopnode-f1")
+        self.assertEqual(args.ran_node, "sopnode-f2")
         self.assertEqual(args.radio, "n300")
         self.assertEqual(args.ue, "qhat01")
 
