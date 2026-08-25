@@ -634,7 +634,6 @@ def _same_authority(authority: PhysicalStartAuthority, evidence: PhysicalRunEvid
         authority.run_id == evidence.run_id
         and authority.radio == "n300"
         and authority.ue_kind == "qfit"
-        and authority.claim_sha256 == evidence.gnb_start.claim_sha256
         and authority.lease_verified is True
         and authority.radio_state == "on"
     )
@@ -794,7 +793,6 @@ def execute_authorized_qfit_activation(
             f"current next stage is {label}"
         )
 
-    # Mutation authority is refreshed immediately before the first modem write.
     authority = authorize_physical_start(
         run_id=state.run_id,
         slice_name=slice_name,
@@ -952,18 +950,12 @@ class PhysicalWorkloadContext:
     run_id: str
     qfit: str
     interface: str
-    claim_sha256: str
-    package_sha256: str
-    render_sha256: str
 
     def to_dict(self) -> dict[str, str]:
         return {
             "run_id": self.run_id,
             "qfit": self.qfit,
             "interface": self.interface,
-            "claim_sha256": self.claim_sha256,
-            "package_sha256": self.package_sha256,
-            "render_sha256": self.render_sha256,
             "backend": "r2lab",
         }
 
@@ -1102,9 +1094,6 @@ def execute_physical_workload_handoff(
         run_id=evidence.run_id,
         qfit=authority.ue,
         interface=_QFIT_INTERFACE,
-        claim_sha256=authority.claim_sha256,
-        package_sha256=evidence.staged.package_sha256,
-        render_sha256=evidence.staged.render_sha256,
     )
     try:
         result = executor(context).validate(context)
