@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from time import monotonic
 from typing import Callable, Mapping, Sequence, TextIO
 
