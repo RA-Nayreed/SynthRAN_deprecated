@@ -1,9 +1,4 @@
-"""High-level selected-topology R2Lab lifecycle composition.
-
-A prepared run resumes from persisted ordered acceptance, while the live R2Lab
-claim/lease, selected compute allocation, singleton gNB/N2 and UE state are
-re-observed at every mutation or traffic boundary.
-"""
+"""High-level selected-topology R2Lab lifecycle composition."""
 
 from __future__ import annotations
 
@@ -11,7 +6,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import tempfile
-from typing import Mapping
+from typing import Mapping, TextIO
 
 from synthran.dependencies import load_lock
 from synthran.experiment.r2lab import (
@@ -157,6 +152,7 @@ def continue_physical_path(
     timeout_seconds: int = 30,
     r2lab_runner=r2lab_subprocess_runner,
     cluster_runner=cluster_subprocess_runner,
+    progress: TextIO | None = None,
 ) -> PhysicalPathSummary:
     """Advance the selected physical UE through PDU and user-plane proof."""
 
@@ -190,6 +186,7 @@ def continue_physical_path(
                 evidence_path=evidence_path,
                 activation_evidence_path=activation_evidence_path,
                 timeout_seconds=timeout_seconds,
+                progress=progress,
             )
             activation_status = activation.status
 
@@ -198,6 +195,8 @@ def continue_physical_path(
             == "passed"
         )
         if evidence.acceptance.next_stage is PhysicalAcceptanceStage.USER_PLANE:
+            if progress is not None:
+                print("[synthran] physical-user-plane: running...", file=progress, flush=True)
             user_plane = prove_physical_user_plane(
                 evidence=evidence,
                 slice_name=slice_name,
@@ -217,6 +216,8 @@ def continue_physical_path(
                 physical_directory / "physical-user-plane.json",
                 user_plane.probe.to_dict(),
             )
+            if progress is not None:
+                print("[synthran] physical-user-plane: OK", file=progress, flush=True)
 
         if evidence.acceptance.next_stage not in {
             PhysicalAcceptanceStage.WORKLOAD,
@@ -263,6 +264,7 @@ def run_physical_workload(
     timeout_seconds: int = 30,
     r2lab_runner=r2lab_subprocess_runner,
     cluster_runner=cluster_subprocess_runner,
+    progress: TextIO | None = None,
 ) -> PhysicalWorkloadSummary:
     """Run the canonical deterministic IoT workload over the selected UE path."""
 
@@ -286,6 +288,7 @@ def run_physical_workload(
             physical_run_root=run_root,
             collection_seconds=collection_seconds,
             minimum_per_sensor=minimum_per_sensor,
+            progress=progress,
         ).validate()
         state, result = execute_physical_workload_handoff(
             evidence=evidence,
