@@ -30,9 +30,12 @@ from synthran.r2lab.acceptance import (
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
 from synthran.r2lab.ue import (
     R2LabPhysicalUeError,
-    activate_physical_ue,
     execute_physical_workload_handoff,
     prove_physical_user_plane,
+)
+from synthran.r2lab.ue_activation import (
+    activate_physical_ue,
+    recover_retryable_transport_failure,
 )
 
 
@@ -156,8 +159,13 @@ def continue_physical_path(
     """Advance the selected physical UE through PDU and user-plane proof."""
 
     evidence_path, physical_directory = _paths(run_root, run_id)
+    activation_evidence_path = physical_directory / "physical-ue-activation.json"
     try:
         evidence = PhysicalRunEvidence.read_json(evidence_path)
+        evidence = recover_retryable_transport_failure(
+            evidence=evidence,
+            activation_evidence_path=activation_evidence_path,
+        )
         activation_status: str | None = None
 
         if evidence.acceptance.next_stage in {
@@ -176,7 +184,7 @@ def continue_physical_path(
                 r2lab_runner=r2lab_runner,
                 cluster_runner=cluster_runner,
                 evidence_path=evidence_path,
-                activation_evidence_path=physical_directory / "physical-ue-activation.json",
+                activation_evidence_path=activation_evidence_path,
                 timeout_seconds=timeout_seconds,
             )
             activation_status = activation.status
