@@ -12,7 +12,8 @@ import json
 import os
 from pathlib import Path
 import shlex
-from typing import Mapping
+import sys
+from typing import Mapping, TextIO
 
 from synthran import command_runtime
 from synthran.backends.base import BackendError
@@ -46,6 +47,45 @@ _EXECUTABLE_DEVICES = tuple(sorted(name for name, profile in RADIOS.items() if p
 _EXECUTABLE_UES = tuple(sorted(name for name, profile in UES.items() if profile.executable))
 
 
+class _RunProgress:
+    """Terminal progress for long unified runs, isolated from result stdout."""
+
+    def __init__(self, *, enabled: bool = True, stream: TextIO | None = None) -> None:
+        self.enabled = enabled
+        self.stream = stream if stream is not None else sys.stderr
+        self.current_stage: str | None = None
+
+    def _emit(self, marker: str, stage: str, detail: str | None = None) -> None:
+        if not self.enabled:
+            return
+        suffix = f": {detail}" if detail else ""
+        print(f"{marker} {stage}{suffix}", file=self.stream, flush=True)
+
+    def start(self, stage: str, detail: str | None = None) -> None:
+        self.current_stage = stage
+        self._emit("→", stage, detail)
+
+    def done(self, stage: str, detail: str | None = None) -> None:
+        self._emit("✓", stage, detail)
+        if self.current_stage == stage:
+            self.current_stage = None
+
+    def resumed(self, stage: str, detail: str | None = None) -> None:
+        self._emit("↻", stage, detail)
+        if self.current_stage == stage:
+            self.current_stage = None
+
+    def skipped(self, stage: str, detail: str | None = None) -> None:
+        self._emit("–", stage, detail)
+        if self.current_stage == stage:
+            self.current_stage = None
+
+    def fail(self, detail: str) -> None:
+        stage = self.current_stage or "run"
+        self._emit("✗", stage, detail)
+        self.current_stage = None
+
+
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -67,6 +107,11 @@ def _add_common(run: argparse.ArgumentParser) -> None:
     run.add_argument("--minimum-per-sensor", type=int, default=DEFAULT_MINIMUM_PER_SENSOR)
     run.add_argument("--timeout", type=int, default=1800)
     run.add_argument("--json", action="store_true")
+    run.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress live progress messages; final output is unchanged",
+    )
 
 
 def _add_r2lab(run: argparse.ArgumentParser) -> None:
@@ -240,14 +285,25 @@ def _physical_context(args: argparse.Namespace) -> tuple[str, str, str | None, P
     return str(args.r2lab_slice), owner, args.allocation_id, known_hosts
 
 
-def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
+def _run_r2lab(
+    args: argparse.Namespace, progress: _RunProgress | None = None
+) -> dict[str, object]:
+    progress = progress or _RunProgress(enabled=False)
     topology = _physical_topology(args)
     slice_name, owner, allocation_id, known_hosts = _physical_context(args)
+
+    progress.start("provider", "select/create SLICES experiment and Post5G prefix")
     project, experiment, experiment_created, controller = _provider(args)
+    progress.done(
+        "provider",
+        f"{project}/{experiment} ({'created' if experiment_created else 'reused'})",
+    )
+
     run_root = args.r2lab_run_root.expanduser().resolve()
     run_directory = run_root / args.run_id
 
     if run_directory.exists():
+        progress.start("resources", f"verify existing {topology.radio} + {topology.ue} claim")
         stored = load_topology(run_root=run_root, run_id=args.run_id).validate()
         if stored != topology:
             raise BackendError("existing physical run topology does not match requested run")
@@ -258,7 +314,9 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
             timeout_seconds=min(args.timeout, 300),
         )
         resource_status = "resumed"
+        progress.resumed("resources", "existing physical authority verified")
     else:
+        progress.start("resources", f"prepare {topology.radio} + {topology.ue}")
         prepare_physical_resources(
             run_id=args.run_id,
             slice_name=slice_name,
@@ -267,12 +325,14 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
             timeout_seconds=min(args.timeout, 300),
         )
         resource_status = "prepared"
+        progress.done("resources", "physical claim held")
 
     evidence_path = run_directory / "physical-run.json"
     evidence = PhysicalRunEvidence.read_json(evidence_path) if evidence_path.is_file() else None
     if evidence is None or (
         evidence.acceptance.outcome_for(PhysicalAcceptanceStage.OPEN5GS).value != "passed"
     ):
+        progress.start("foundation", "prove Kubernetes, Open5GS, n3network and ru-network")
         previous = args.previous_run_id
         if previous is None:
             current_owner = _namespace_owner(
@@ -294,11 +354,17 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
             timeout_seconds=args.timeout,
         )
         foundation_status: Mapping[str, object] = foundation.to_dict()
+        progress.done("foundation", "physical foundation ready")
     else:
-        foundation_status = {"status": "resumed", "next_stage": evidence.acceptance.next_stage.value if evidence.acceptance.next_stage else None}
+        foundation_status = {
+            "status": "resumed",
+            "next_stage": evidence.acceptance.next_stage.value if evidence.acceptance.next_stage else None,
+        }
+        progress.resumed("foundation", "accepted foundation evidence present")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.staged is None:
+        progress.start("gNB staging", f"render and bind {topology.radio} at zero replicas")
         artifact = stage_n3xx_gnb(
             run_id=args.run_id,
             slice_name=slice_name,
@@ -311,11 +377,14 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
             timeout_seconds=args.timeout,
         )
         staging_status: Mapping[str, object] = artifact.to_dict()
+        progress.done("gNB staging", "artifact rendered and network attachments validated")
     else:
         staging_status = {"status": "resumed-staged"}
+        progress.resumed("gNB staging", "staged artifact already accepted")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.gnb_start is None:
+        progress.start("gNB/N2", "start singleton gNB and establish stable N2")
         started = start_n3xx_gnb(
             run_id=args.run_id,
             slice_name=slice_name,
@@ -329,12 +398,15 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
             poll_interval_seconds=args.n2_interval,
         )
         gnb_status: Mapping[str, object] = started.to_dict()
+        progress.done("gNB/N2", "stable N2 established")
     else:
         gnb_status = {"status": "resumed-gnb-n2"}
+        progress.resumed("gNB/N2", "accepted gNB/N2 evidence present")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     peer = SUPPORTED_NODES[topology.ran_node].ip
     if evidence.acceptance.next_stage not in {PhysicalAcceptanceStage.WORKLOAD, None}:
+        progress.start("UE path", f"cell → registration → PDU → user plane via {peer}")
         path = continue_physical_path(
             run_id=args.run_id,
             slice_name=slice_name,
@@ -348,11 +420,14 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
         if not path.ready_for_workload:
             raise BackendError(f"physical path stopped at {path.failed_stage or path.next_stage}")
         path_status: Mapping[str, object] = path.to_dict()
+        progress.done("UE path", "registration, PDU and user-plane proof accepted")
     else:
         path_status = {"status": "resumed", "measurement_peer": peer}
+        progress.resumed("UE path", "accepted path evidence present")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.acceptance.next_stage is PhysicalAcceptanceStage.WORKLOAD:
+        progress.start("workload", "run deterministic ten-sensor experiment and collect data")
         inventory = _physical_inventory(run_root, args.run_id, topology)
         workload = run_physical_workload(
             run_id=args.run_id,
@@ -373,16 +448,21 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
         if not workload.accepted:
             raise BackendError("physical deterministic workload was not accepted")
         workload_status: Mapping[str, object] = workload.to_dict()
+        progress.done("workload", "deterministic workload accepted")
     else:
         workload_status = {"status": "resumed-accepted"}
+        progress.resumed("workload", "accepted workload evidence present")
 
+    progress.start("acceptance", "verify complete physical lifecycle evidence")
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if not evidence.acceptance.accepted:
         raise BackendError("physical lifecycle did not reach acceptance")
+    progress.done("acceptance", str(evidence_path))
 
     released = False
     release_status: Mapping[str, object] | None = None
     if not args.keep_resources:
+        progress.start("cleanup", "stop run-owned gNB and release exact radio/UE resources")
         stop = lambda: stop_n3xx_gnb(
             run_id=args.run_id,
             slice_name=slice_name,
@@ -400,6 +480,9 @@ def _run_r2lab(args: argparse.Namespace) -> dict[str, object]:
             stop_gnb=stop,
         )
         released = True
+        progress.done("cleanup", "exact physical off-state proven")
+    else:
+        progress.skipped("cleanup", "resources retained by --keep-resources")
 
     assert controller.post5g_network is not None
     return {
@@ -446,14 +529,25 @@ def _authority(path: Path) -> dict[str, str]:
     return result
 
 
-def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
+def _run_rfsim(
+    args: argparse.Namespace, progress: _RunProgress | None = None
+) -> dict[str, object]:
+    progress = progress or _RunProgress(enabled=False)
     if args.device is not None or args.ue is not None:
         raise BackendError("--device/--ue are only valid with --radio r2lab")
     owner = _require_owner(args)
+
+    progress.start("provider", "select/create SLICES experiment and Post5G prefix")
     project, experiment, experiment_created, controller = _provider(args)
+    progress.done(
+        "provider",
+        f"{project}/{experiment} ({'created' if experiment_created else 'reused'})",
+    )
+
     preparation_root = args.preparation_root.expanduser().resolve()
     prep_dir = preparation_root / args.run_id
     if not prep_dir.exists():
+        progress.start("resources", "prepare RFSIM compute reservation and allocation")
         rc = command_runtime._network_prepare(
             argparse.Namespace(
                 lock=args.lock,
@@ -474,6 +568,9 @@ def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
         )
         if rc != 0:
             raise BackendError("RFSIM resource preparation failed")
+        progress.done("resources", "reservation/allocation prepared")
+    else:
+        progress.resumed("resources", "existing preparation present")
     inventory = prep_dir / "hosts.ini"
     authority = _authority(prep_dir / "authority.env")
     reservation_id = authority.get("SYNTHRAN_RESERVATION_ID")
@@ -483,6 +580,7 @@ def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
 
     preflight = prep_dir / "live-preflight.json"
     if not preflight.is_file():
+        progress.start("preflight", "verify live provider and compute authority")
         rc = command_runtime._doctor(
             argparse.Namespace(
                 inventory=inventory,
@@ -500,9 +598,13 @@ def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
         )
         if rc != 0:
             raise BackendError("RFSIM live preflight failed")
+        progress.done("preflight", "live authority verified")
+    else:
+        progress.resumed("preflight", "existing preflight evidence present")
 
     network_dir = args.network_run_root.expanduser().resolve() / args.run_id
     if not (network_dir / "manifest.json").is_file():
+        progress.start("network", "deploy RFSIM 5G network")
         rc = command_runtime._network_deploy(
             argparse.Namespace(
                 inventory=inventory,
@@ -524,9 +626,13 @@ def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
         )
         if rc != 0:
             raise BackendError("RFSIM network deployment failed")
+        progress.done("network", "RFSIM network deployed")
+    else:
+        progress.resumed("network", "existing network manifest present")
 
     network_evidence = network_dir / "network-evidence.json"
     if not network_evidence.is_file():
+        progress.start("path", "prove RFSIM network path")
         rc = command_runtime._network_verify(
             argparse.Namespace(
                 inventory=inventory,
@@ -541,10 +647,14 @@ def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
         )
         if rc != 0:
             raise BackendError("RFSIM network path was not proven")
+        progress.done("path", "network path accepted")
+    else:
+        progress.resumed("path", "existing network evidence present")
 
     experiment_dir = args.experiment_root.expanduser().resolve() / args.run_id
     experiment_evidence = experiment_dir / "experiment-evidence.json"
     if not experiment_evidence.is_file():
+        progress.start("workload", "run deterministic experiment and collect data")
         rc = command_runtime._experiment_run(
             argparse.Namespace(
                 inventory=inventory,
@@ -560,7 +670,11 @@ def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
         )
         if rc != 0:
             raise BackendError("RFSIM deterministic workload was not accepted")
+        progress.done("workload", "deterministic workload completed")
+    else:
+        progress.resumed("workload", "existing experiment evidence present")
 
+    progress.start("acceptance", "verify experiment evidence")
     try:
         accepted_payload = json.loads(experiment_evidence.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -568,6 +682,8 @@ def _run_rfsim(args: argparse.Namespace) -> dict[str, object]:
     accepted = accepted_payload.get("ready") is True
     if not accepted:
         raise BackendError("RFSIM experiment evidence is not accepted")
+    progress.done("acceptance", str(experiment_evidence))
+
     assert controller.post5g_network is not None
     return {
         "schema": "synthran/run/v1alpha1",
@@ -594,11 +710,16 @@ class RunCommandAdapter:
     def dispatch(self, args: argparse.Namespace) -> int:
         if args.command != "run":
             raise BackendError("unsupported unified run command")
+        progress = _RunProgress(enabled=not args.quiet)
         try:
             validate_run_id(args.run_id)
             if args.core_node == args.ran_node:
                 raise BackendError("core and RAN nodes must differ")
-            payload = _run_r2lab(args) if args.radio == "r2lab" else _run_rfsim(args)
+            payload = (
+                _run_r2lab(args, progress)
+                if args.radio == "r2lab"
+                else _run_rfsim(args, progress)
+            )
             if args.json:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
@@ -607,7 +728,8 @@ class RunCommandAdapter:
                 if payload.get("released") is True:
                     print("Physical resources: released")
             return 0
-        except BackendError:
+        except BackendError as exc:
+            progress.fail(str(exc))
             raise
         except (
             DependencyError,
@@ -629,4 +751,5 @@ class RunCommandAdapter:
             OSError,
             ValueError,
         ) as exc:
+            progress.fail(str(exc))
             raise BackendError(str(exc)) from exc
