@@ -1,17 +1,11 @@
-"""Physical UE activation composed from pinned 5g-Ansible mechanics.
-
-The upstream roles perform modem actuation.  SynthRAN independently verifies a
-functional postcondition over ``wwan0`` and records ordered acceptance.  A
-convergence timeout is not a terminal acceptance failure; the run remains at the
-same stage and can be resumed safely.
-"""
+"""Physical UE activation composed from pinned 5g-Ansible mechanics."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import time
-from typing import Callable, Sequence
+from typing import Callable, Sequence, TextIO
 
 from synthran.live_preflight import CommandResult, subprocess_runner
 from synthran.r2lab.acceptance import (
@@ -179,7 +173,7 @@ def _pass_functional_path(
 def recover_retryable_transport_failure(
     *, evidence: PhysicalRunEvidence, activation_evidence_path: Path
 ) -> PhysicalRunEvidence:
-    """Migrate the pre-Ansible terminal transport failure from an older run."""
+    """Migrate a retryable transport failure from an older run record."""
 
     if evidence.acceptance.failed_stage not in {
         PhysicalAcceptanceStage.CELL_ACQUISITION,
@@ -214,6 +208,7 @@ def _best_effort_stop(
     lock_path: Path,
     deps_root: Path,
     timeout_seconds: int,
+    progress: TextIO | None = None,
 ) -> None:
     try:
         execute_selected_ue_role(
@@ -225,6 +220,7 @@ def _best_effort_stop(
             deps_root=deps_root,
             run_root=run_root,
             timeout_seconds=min(timeout_seconds, 180),
+            progress=progress,
         )
     except R2LabUeAnsibleError:
         return
@@ -247,6 +243,7 @@ def activate_physical_ue(
     sleeper: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     timeout_seconds: int = 180,
+    progress: TextIO | None = None,
 ) -> tuple[PhysicalRunEvidence, PhysicalUeActivationSummary]:
     if evidence.gnb_start is None:
         raise R2LabPhysicalUeError("physical UE activation requires a started gNB")
@@ -321,6 +318,7 @@ def activate_physical_ue(
             deps_root=deps_root,
             run_root=run_root,
             timeout_seconds=min(timeout_seconds, 180),
+            progress=progress,
         )
     except R2LabUeAnsibleError as exc:
         _best_effort_stop(
@@ -331,6 +329,7 @@ def activate_physical_ue(
             lock_path=lock_path,
             deps_root=deps_root,
             timeout_seconds=timeout_seconds,
+            progress=progress,
         )
         raise R2LabPhysicalUeError(str(exc)) from exc
 
@@ -369,5 +368,6 @@ def activate_physical_ue(
             lock_path=lock_path,
             deps_root=deps_root,
             timeout_seconds=timeout_seconds,
+            progress=progress,
         )
     return state, summary
