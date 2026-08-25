@@ -271,6 +271,7 @@ def run_physical_workload(
             repository_root=repository_root(),
             workload_id=workload_id,
             run_root=experiment_root,
+            physical_run_root=run_root,
             collection_seconds=collection_seconds,
             minimum_per_sensor=minimum_per_sensor,
         ).validate()
