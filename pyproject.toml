@@ -12,9 +12,7 @@ license = "Apache-2.0"
 authors = [
   { name = "SynthRAN contributors" }
 ]
-dependencies = [
-  "prompt-toolkit==3.0.52",
-]
+dependencies = []
 
 [project.scripts]
 synthran = "synthran.launcher:main"

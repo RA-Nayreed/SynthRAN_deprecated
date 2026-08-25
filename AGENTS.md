@@ -2,7 +2,7 @@
 
 ## Purpose
 
-SynthRAN is a reproducible experiment-control platform joining deterministic IoT emulation, an open 5G user plane, and research-grade evidence.
+SynthRAN is a reproducible experiment-control platform joining deterministic IoT emulation, open 5G networking, physical testbed integration, and research-grade evidence.
 
 The accepted virtual golden path is:
 
@@ -22,77 +22,42 @@ The accepted virtual golden path is:
 -> deterministic Parquet
 ```
 
-SynthRAN owns orchestration, contracts, integration adapters, validation, evidence, cleanup, and reproducibility reporting. It does **not** reimplement Open5GS, srsRAN, Contiki-NG, Cooja, Mosquitto, iperf3, or SLICES provider services.
+SynthRAN owns orchestration, contracts, integration adapters, validation, evidence, cleanup, and reproducibility reporting. It does not reimplement Open5GS, srsRAN, Contiki-NG, Cooja, Mosquitto, iperf3, SLICES, or R2Lab provider services.
 
-For current live evidence, use [`docs/results.md`](docs/results.md). Do not duplicate a competing list of “latest” run IDs across documentation.
+For current live evidence, use [`docs/results.md`](docs/results.md). Do not duplicate a competing list of latest run IDs across documentation.
 
 ## Integration truth
 
-`main` is the integration truth. Before substantial work, inspect current code, tests, and current documentation rather than relying on an older PR, chat transcript, or historical result note.
+Before substantial work, inspect the current target integration branch, code, tests, and documentation rather than relying on an older PR, chat transcript, or historical result note.
 
-Development history is not product architecture. Public commands, schemas, filenames, and statuses must describe durable concepts, not temporary implementation milestones.
+Development history is not product architecture. Public commands, schemas, filenames, and statuses must describe durable concepts rather than temporary implementation milestones.
 
-There is one product executable:
+There is one supported product executable:
 
 ```text
 synthran
 ```
 
-- no arguments: `prompt_toolkit` interactive terminal;
-- explicit arguments: scriptable CLI.
+There is no interactive frontend or external workbench protocol. Explicit CLI arguments are the public operator surface. Internal modules may expose Python APIs for composition and testing, but they are not separate products.
 
-The interfaces are not yet identical execution paths. The terminal goes through the persistent application/operation control plane. The scripted CLI still invokes established network, experiment, research, and R2Lab executors directly. Never make the terminal secretly invoke the CLI just to make a command appear implemented.
+## Backend invariant
 
-## Terminal contract
+RFSIM remains the accepted virtual reference backend. R2Lab implements the corresponding physical path. Physical integration must satisfy the same experiment-level semantics rather than becoming a separate product workflow.
 
-The terminal registry is authoritative:
+Backend-specific mechanics may differ below the network and user-plane boundary, including radio selection, UE implementation, registration observation, PDU interface, and physical authority. Above that boundary, experiment identity, deterministic workload inputs, telemetry meaning, research validity, evidence, provenance, and cleanup semantics remain common.
 
-```text
-/status
-/inspect resources|network
-/reserve
-/up
-/verify
-/recover
-/down
-/run baseline|congestion
-/stop
-/collect
-/logs network|open5gs|ue
-/config resources|experiment
-/mode observe|operate
-/help
-/clear
-/quit
-```
-
-A session starts in OBSERVE mode. OPERATE permits mutating requests to reach policy; it is not approval. Normal plan, approval, freshness, ownership, concurrency, and executor checks still apply.
-
-Current provider-facing terminal workflows are planning-first:
-
-```text
-slash command
--> TerminalSession
--> ApplicationController
--> reconciliation/workflow policy
--> immutable OperationPlan
--> approval / authorization
--> ExecutionPermit
--> provider/domain executor   # not yet connected for terminal workflows
-```
-
-A rendered `Execution: not started` means exactly that. Do not describe it as a reservation, deployment, experiment execution, collection, log read, or teardown.
+Never weaken an accepted RFSIM invariant merely to make the physical path fit. Never describe an R2Lab stage as accepted without current physical evidence for that stage.
 
 ## State and reconciliation invariants
 
 Requested intent and discovered facts remain separate:
 
 - `ExperimentDesiredState`: declared intent and stable constraints;
-- `ObservedState`: discovered provider/runtime facts.
+- observed state: discovered provider or runtime facts.
 
-PDU addresses, pod names, reservation/allocation identifiers, current lease state, and similar dynamic values are observed facts, never desired state.
+PDU addresses, pod names, reservation/allocation identifiers, current lease state, registration state, routes, and similar dynamic values are observations, never desired state.
 
-Observed-state truth ranking is:
+Truth ranking is:
 
 ```text
 provider
@@ -102,58 +67,40 @@ provider
 > cache
 ```
 
-Only fresh provider/direct observations may authorize current provider mutation. Historical evidence proves what happened; it does not become current authority.
+Only fresh provider or direct observations may authorize current provider mutation. Historical evidence proves what happened; it does not become current authority.
 
-`plan_reconciliation()` is pure and emits only the next safe boundary. Unknown, stale, foreign, expired, failed, or ambiguous ownership fails closed.
-
-Current lifecycle values include:
-
-```text
-CONFIGURED
-RESERVED
-ALLOCATED
-PREPARED
-NETWORK_READY
-PATH_PROVEN
-EXPERIMENT_RUNNING
-RECOVERY_REQUIRED
-BLOCKED
-```
-
-Experiment/evidence/log/teardown workflows remain separate from network reconciliation and still pass through `OperationController` after policy evaluation.
+Unknown, stale, foreign, expired, failed, or ambiguous ownership fails closed.
 
 ## Operation control
 
-Operation plans bind current desired state, observed state, policy/reconciliation state, exact targets, and relevant input digests.
+Controlled operations bind current desired state, observed state, exact targets, ownership, and relevant input digests.
 
 Risk classes are:
 
 ```text
 R0  local/read-only
 R1  live/read-only verification or evidence access
-R2  controlled mutation requiring approval
-R3  destructive mutation requiring destructive approval
+R2  controlled mutation requiring approval or explicit invocation
+R3  destructive mutation requiring explicit destructive authority
 ```
 
-Authorization rechecks policy and state before issuing an `ExecutionPermit`. Only one mutation may hold the workspace mutation claim. If a mutation fails or is interrupted and clean rollback cannot be proven, preserve the claim and enter recovery-required state.
+Only one mutation may hold a workspace mutation claim. If a mutation fails or is interrupted and clean rollback cannot be proven, preserve recovery state rather than guessing success.
 
-Structured `OperationEvent` records are the trusted progress surface. Never infer operation state by parsing terminal prose or arbitrary provider stdout.
+Structured evidence and events are trusted progress surfaces. Never infer accepted operation state by parsing arbitrary provider prose alone.
 
 ## Resource and provider safety
 
 Resource selection must be deterministic and based on reviewed descriptors plus fresh complete provider inventory.
 
-Generic rollback authority comes only from exact resources proven to have been created by the current operation. Roll back in reverse acquisition order. Never guess provider ownership from naming conventions.
+Generic rollback authority comes only from exact resources proven to have been created or owned by the current operation. Roll back in reverse acquisition order when required. Never guess provider ownership from naming conventions.
 
-Never use broad cleanup such as `pkill`, `killall`, wildcard resource deletion, or guessed reservation/allocation IDs when an exact run-owned target is required.
+Never use broad cleanup such as `pkill`, `killall`, wildcard resource deletion, global radio power-off, or guessed reservation/allocation IDs when an exact run-owned target is required.
 
 Provider experiment creation remains an explicit operator action. SynthRAN may bind to an existing SLICES experiment but does not silently log in, switch projects, create projects, create provider experiments, or allocate a Post5G prefix on the operator's behalf.
 
-The complete provider setup and live execution order belong in `README.md` (compact quick start) and `docs/operator-guide.md` (full procedure). They must agree on the required SLICES project, provider experiment, active Post5G prefix, resource preparation, path proof, calibration, campaign, analysis, preservation, and final prefix release.
-
 ## Live-accepted research boundary
 
-The supported virtual configuration is deliberately narrow:
+The accepted virtual configuration is deliberately narrow:
 
 - core: Open5GS;
 - RAN: srsRAN;
@@ -164,15 +111,13 @@ The supported virtual configuration is deliberately narrow:
 - UDP for controlled research load;
 - JSONL as append-only audit data and deterministic Parquet as its derivative.
 
-Current accepted research evidence is summarized in [`docs/results.md`](docs/results.md). As of the accepted campaign there is a complete 12-run blocked dataset across baseline, 50%, 80%, and 95% background-load conditions. Do not restore stale claims that valid loaded evidence is still pending.
-
-Physical RF, multiple UEs/slices, TCP research load, formal A1/E2/RIC integration, generative models, synthetic telemetry, and automated RAN-policy synthesis remain unproven unless later accepted evidence explicitly changes that status.
+Current accepted research evidence is summarized in [`docs/results.md`](docs/results.md). Physical RF, multiple UEs or slices, formal A1/E2/RIC integration, generative models, synthetic telemetry, and automated RAN-policy synthesis remain unproven unless accepted evidence explicitly changes that status.
 
 ## Research measurement peer invariant
 
-Capacity calibration and controlled background load must terminate **outside the 5G core host**.
+Capacity calibration and controlled background load must terminate outside the 5G core host.
 
-For the supported two-node virtual inventory:
+For the supported virtual inventory:
 
 ```text
 UE PDU
@@ -180,19 +125,12 @@ UE PDU
 -> 5G user plane
 -> Open5GS UPF
 -> core egress / NAT
--> prepared RAN node (measurement peer)
+-> prepared external measurement peer
 ```
 
-The core node is explicitly rejected as the iperf3 measurement server because a same-host target can collapse into a Kubernetes/hairpin path.
+The core node is rejected as the iperf3 measurement server when a same-host path can collapse into a Kubernetes or hairpin route.
 
-The run-owned iperf lifecycle must preserve all of these properties:
-
-- server startup, ownership proof, stale recovery, and cleanup occur on the selected external peer;
-- the supplied target is proven assigned to that peer;
-- the UE client binds its live PDU and uses the exact route through `tun_srsue1`;
-- loaded readiness requires an actual `ESTABLISHED` iperf3 TCP control connection while UDP data is active;
-- `CLOSE-WAIT` is never accepted as readiness;
-- same-host/core-target calibrations remain diagnostic evidence only.
+Run-owned iperf lifecycle must preserve server ownership, exact target assignment, UE PDU binding, exact routing, live control-connection readiness, load evidence, and cleanup.
 
 See [`docs/research-measurement-peer.md`](docs/research-measurement-peer.md).
 
@@ -200,21 +138,13 @@ See [`docs/research-measurement-peer.md`](docs/research-measurement-peer.md).
 
 Do not confuse observation-window occupancy with packet loss.
 
-The v1alpha1 telemetry summary contains a fixed nominal expected count computed from `duration / sensor_period`. A periodic sensor can legitimately contribute one fewer record when the exact measurement-window boundaries fall between transmissions. Therefore:
+A periodic sensor can legitimately contribute one fewer record when exact measurement-window boundaries fall between transmissions. Existing `delivery_ratio` values are nominal window-coverage metrics; observed sequence gaps and duplicates are the primary continuity evidence.
 
-- `delivery_ratio` in existing v1alpha1 summaries is a **nominal window-coverage metric**;
-- observed sequence gaps and duplicates are the primary integrity evidence for packet/event continuity;
-- never describe a shorter but contiguous sequence range as observed packet loss merely because it contains fewer records than the nominal count.
-
-Campaign-06 contained zero sequence gaps and zero duplicates across all accepted runs. The detailed evidence and interpretation boundary are in `docs/results.md`.
-
-Network sampling has a separate timing contract. A requested interval is not proof that the sampler achieved that cadence. Persisted `sample_duration_seconds` and `schedule_lag_seconds` are measurement evidence. The current sampler collects independent ingress/UE/UPF observations concurrently and research runs fail closed when achieved counter-sampling cadence falls materially below the requested rate.
-
-Campaign-06 predates that correction and achieved approximately one sample every three seconds despite a one-second request; this limitation is public evidence and must not be rewritten as 1 Hz sampling. The run-level counter deltas remain valid for their measured interval.
+Network sampling has a separate timing contract. A requested interval is not proof that the sampler achieved that cadence. Persisted sample duration and schedule lag are measurement evidence.
 
 ## Experiment validity
 
-A research result may enter campaign analysis only when its own persisted validity gates pass. Keep these concepts distinct:
+Keep these concepts distinct:
 
 - base-network path acceptance;
 - integrated IoT-path acceptance;
@@ -222,37 +152,26 @@ A research result may enter campaign analysis only when its own persisted validi
 - current measurement-path validity;
 - load-target validity;
 - instrumentation validity;
-- cleanup/base-network reproof;
+- cleanup and base-network reproof;
 - scientific interpretation.
 
-Zero telemetry is not automatically a network result. Conversely, a telemetry sequence loss may be a legitimate scientific outcome if independent path/load/instrumentation validity remains healthy. Do not encode the desired scientific result into infrastructure validity gates.
+Zero telemetry is not automatically a network result. A telemetry sequence loss may be a legitimate scientific outcome when independent path, load, and instrumentation validity remains healthy. Do not encode the desired scientific result into infrastructure validity gates.
 
 Failed and invalid runs remain immutable diagnostic evidence and must never be silently reclassified or reused under the same run ID.
 
 ## Reproducibility and preservation
 
-Pinned upstream checkouts live below ignored `.deps/` storage. Do not vendor or partially copy upstream projects merely for convenience. Keep selected runtime images digest-pinned and preserve third-party license/provenance records.
+Pinned upstream checkouts live below ignored `.deps/` storage. Do not vendor or partially copy upstream projects for convenience. Keep selected runtime images digest-pinned and preserve third-party license and provenance records.
 
-Research artifacts should preserve the immutable run specification, measurement window, telemetry, RTT probes, network counters, load records, validity summary, and artifact digests. The complete raw campaign bundle belongs in durable research/object storage. The unrounded campaign-level analysis JSON may be tracked under `results/` when the repository privacy scan passes; do not round or rewrite valid research measurements merely to avoid a scanner false positive.
+Research artifacts should preserve immutable run specification, measurement window, telemetry, RTT probes, network counters, load records, validity summary, and artifact digests. Complete raw campaign bundles belong in durable research or object storage.
 
-The privacy scanner must distinguish structured numeric JSON measurements from subscriber identifiers without exempting an entire results path. IMSI-like values in JSON strings remain sensitive; bare JSON numeric measurements are not subscriber identities solely because they contain 14–16 digits.
-
-Checksum manifests must never include an entry for the manifest file itself. The historical campaign-06 preservation archive contains that known self-reference bug; the archive-level S3 SHA-256 remains the canonical frozen integrity check and the object must not be rewritten.
+Checksum manifests must never include an entry for the manifest file itself.
 
 ## Credentials and privacy
 
-Never commit:
+Never commit subscriber credentials, SLICES tokens, S3 secrets, private SSH keys, kubeconfigs, private authority or environment files, unsanitized secret-bearing captures or logs, generated live run directories, or dependency worktrees.
 
-- subscriber credentials;
-- SLICES tokens or S3 secrets;
-- private SSH keys;
-- kubeconfigs;
-- private authority/environment files;
-- unsanitized packet captures or secret-bearing logs;
-- generated live run directories;
-- dependency worktrees.
-
-Privacy protections are layered through ignore rules, repository scanning, pre-push checks, CI, and GitHub controls. Do not weaken a privacy rule merely to make a check pass; correct false positives narrowly while preserving detection of the actual sensitive type.
+Privacy protections are layered through ignore rules, repository scanning, pre-push checks, CI, and GitHub controls. Do not weaken a privacy rule merely to make a check pass; correct false positives narrowly while preserving detection of the sensitive type.
 
 Prefer route proof, counters, broker receipt, and message-integrity evidence over packet capture when they prove the required boundary with lower privacy risk.
 
@@ -260,14 +179,14 @@ Prefer route proof, counters, broker receipt, and message-integrity evidence ove
 
 Public documentation has distinct jobs:
 
-- `README.md`: explain SynthRAN to a new reader and provide the compact end-to-end quick start;
+- `README.md`: new-reader overview and compact runnable path;
 - `docs/results.md`: canonical current live evidence and scientific interpretation boundary;
-- `docs/experiment.md`: experiment/research protocol and validity rules;
+- `docs/experiment.md`: experiment and research protocol;
 - `docs/architecture.md`: durable system boundaries;
 - `docs/operator-guide.md`: full live procedure, provider prerequisites, recovery, and preservation;
 - historical result files: immutable engineering history, not current capability truth.
 
-Keep the README understandable and concise even though it contains the runnable golden-path skeleton. Put provider edge cases, failure recovery, preservation details, and scientific semantics in the focused docs instead of duplicating them everywhere.
+Keep public commands consistent with the installed `synthran` executable. Current and historical evidence must not be mixed.
 
 ## Validation before completion
 
@@ -275,19 +194,9 @@ From the repository root in the `synthran` environment, run applicable checks:
 
 ```bash
 python -m unittest discover -s tests -v
-python -m synthran privacy scan --worktree
+synthran privacy scan --worktree
 git diff --check
 git status --short
 ```
 
-When history secret scanning is available, run it as well.
-
-Before merging, inspect the complete intended diff and confirm:
-
-- docs describe current code and accepted evidence, not desired future behavior;
-- planning is not described as provider execution;
-- current and historical evidence are not mixed;
-- no private credentials/evidence were added;
-- measurement limitations are stated rather than hidden;
-- scientific observations are not promoted into causal claims without sufficient replication;
-- new mutation or cleanup behavior remains exact, ownership-bound, and fail-closed.
+When history secret scanning is available, run it as well. Inspect the complete intended diff before merging and confirm that documentation matches current code, no private evidence was added, planning is not presented as execution, accepted and unproven capabilities remain distinct, and new mutation or cleanup behavior is exact, ownership-bound, and fail-closed.

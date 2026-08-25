@@ -1,4 +1,4 @@
-"""Local configuration discovery and updates for the SynthRAN workbench."""
+"""Local SynthRAN workspace configuration discovery and updates."""
 
 from __future__ import annotations
 
@@ -85,7 +85,7 @@ def resolve_ssh_identity_reference(
     reference: str,
     environment: Mapping[str, str] | None = None,
 ) -> Path:
-    """Resolve one workbench identity reference against the configured home directory."""
+    """Resolve one SSH identity reference against the configured home directory."""
 
     if not reference.startswith(SSH_IDENTITY_PREFIX):
         raise WorkspaceError("SSH identity must use a discovered ~/.ssh reference")
@@ -128,7 +128,7 @@ def discover_ssh_identity_references(
 def available_profiles(
     environment: Mapping[str, str] | None = None,
 ) -> tuple[ProfileSummary, ...]:
-    """Return sanitized existing profile metadata suitable for workbench selection."""
+    """Return sanitized existing profile metadata suitable for operator selection."""
 
     env = dict(os.environ if environment is None else environment)
     directory = config_home(env) / PROFILE_DIRECTORY
@@ -236,7 +236,6 @@ def switch_workspace_profile(root: Path, *, profile_name: str) -> WorkspaceConfi
                     raise WorkspaceError(
                         "cannot switch profile while the active configuration is bound to SLICES"
                     )
-                # Remove only the active pointer. The experiment directory remains durable history.
                 active_path(root).unlink(missing_ok=True)
 
             updated = replace(current, profile=profile_name)

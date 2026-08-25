@@ -1,4 +1,4 @@
-"""Safe workbench access to immutable operation plans, approvals, and execution."""
+"""Safe access to immutable operation plans, approvals, and execution."""
 
 from __future__ import annotations
 
@@ -23,19 +23,19 @@ from synthran.workspace.observed_store import load_observed_state, observed_stat
 from synthran.workspace.reconciliation import ReconciliationStep, plan_reconciliation
 
 
-WORKBENCH_ACTIONS = frozenset({"reserve", "up", "verify", "recover", "down"})
+SUPPORTED_ACTIONS = frozenset({"reserve", "up", "verify", "recover", "down"})
 RESOURCE_ACTIONS = RESOURCE_BOUND_MUTATIONS | frozenset({"recover-allocation"})
 
 
 class OperationInputError(ValueError):
-    """Validated workbench operation input that cannot be applied."""
+    """Validated operation input that cannot be applied."""
 
 
 def _action(params: Mapping[str, object]) -> str:
     if set(params) != {"action"}:
         raise OperationInputError("operation action requires only action")
     value = params.get("action")
-    if not isinstance(value, str) or value not in WORKBENCH_ACTIONS:
+    if not isinstance(value, str) or value not in SUPPORTED_ACTIONS:
         raise OperationInputError("operation action is unsupported")
     return value
 

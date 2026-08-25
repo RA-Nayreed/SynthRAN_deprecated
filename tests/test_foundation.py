@@ -39,7 +39,7 @@ class FoundationTests(unittest.TestCase):
         source_scan = (
             "      - name: Scan tracked source for private context\n"
             "        run: conda run --no-capture-output -n synthran "
-            "python -m synthran privacy scan --worktree\n"
+            "synthran privacy scan --worktree\n"
             "        if: ${{ !cancelled() }}\n"
         )
         history_scan = (

@@ -15,7 +15,7 @@ from synthran.fiveg_ansible import InventoryHost, NetworkInventory
 from synthran.workspace.access import ProbeResult
 
 
-class WorkbenchLiveOperationGuardrailTests(unittest.TestCase):
+class LiveOperationGuardrailTests(unittest.TestCase):
     def test_prepare_runner_refuses_hidden_reservation_or_allocation_creation(self) -> None:
         with patch("synthran.control.live_operations.run_command") as delegate:
             with self.assertRaises(RuntimeError):

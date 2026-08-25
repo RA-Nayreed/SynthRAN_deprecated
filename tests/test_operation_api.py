@@ -40,7 +40,7 @@ def observation(
     )
 
 
-class WorkbenchOperationTests(unittest.TestCase):
+class OperationApiTests(unittest.TestCase):
     def _controller(self, base: Path) -> tuple[Path, dict[str, str], ApplicationController]:
         root = base / "repo"
         root.mkdir()

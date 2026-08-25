@@ -21,16 +21,18 @@ class CliTests(unittest.TestCase):
             project["project"]["scripts"],
             {"synthran": "synthran.launcher:main"},
         )
+        self.assertNotIn("prompt-toolkit", project["project"]["dependencies"])
 
-    def test_empty_argv_opens_interactive_terminal(self) -> None:
-        with patch("synthran.terminal.shell.run_terminal", return_value=0) as terminal:
-            self.assertEqual(launch([]), 0)
-        terminal.assert_called_once_with()
+    def test_empty_argv_uses_scripted_cli(self) -> None:
+        with patch("synthran.cli.main", return_value=2) as cli_main:
+            self.assertEqual(launch([]), 2)
+        cli_main.assert_called_once_with([])
 
-    def test_explicit_argv_preserves_scripted_cli(self) -> None:
+    def test_explicit_argv_uses_scripted_cli(self) -> None:
+        arguments = ["privacy", "scan", "--worktree"]
         with patch("synthran.cli.main", return_value=7) as cli_main:
-            self.assertEqual(launch(["privacy", "scan", "--worktree"]), 7)
-        cli_main.assert_called_once_with(["privacy", "scan", "--worktree"])
+            self.assertEqual(launch(arguments), 7)
+        cli_main.assert_called_once_with(arguments)
 
     def test_parser_contains_experiment_commands(self) -> None:
         parser = _parser()

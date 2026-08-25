@@ -4,8 +4,6 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from synthran.control import ControlService
-from synthran.workspace.access import ProbeResult
 from synthran.workspace.configuration import (
     discover_ssh_identity_references,
     first_use_snapshot,
@@ -22,7 +20,7 @@ from synthran.workspace.store import (
 )
 
 
-class WorkbenchConfigurationTests(unittest.TestCase):
+class WorkspaceConfigurationTests(unittest.TestCase):
     def test_identity_discovery_returns_private_references_with_r2lab_first(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -143,102 +141,6 @@ class WorkbenchConfigurationTests(unittest.TestCase):
                 )
 
             self.assertEqual(workspace_file(root).read_text(encoding="utf-8"), before)
-
-    def test_control_service_initializes_only_after_read_only_provider_verification(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
-            root = base / "repo"
-            root.mkdir()
-            (root / ".git").mkdir()
-            environment = {
-                "HOME": str(base / "home"),
-                "SYNTHRAN_CONFIG_HOME": str(base / "config"),
-            }
-            calls: list[tuple[str, ...]] = []
-
-            def provider_runner(command: tuple[str, ...], timeout: int) -> ProbeResult:
-                calls.append(tuple(command))
-                if tuple(command) == ("slices", "auth", "show"):
-                    return ProbeResult(0, "authenticated")
-                if tuple(command) == ("slices", "project", "show"):
-                    return ProbeResult(
-                        0,
-                        "Current project research-project; operator is a member.",
-                    )
-                raise AssertionError(f"unexpected provider command: {command}")
-
-            service = ControlService(
-                start=root,
-                environment=environment,
-                provider_runner=provider_runner,
-            )
-            response = service.handle(
-                {
-                    "v": 7,
-                    "id": "initialize",
-                    "method": "workspace.initialize",
-                    "params": {
-                        "profile_name": "default",
-                        "project": "research-project",
-                        "reuse_profile": False,
-                        "slices_username": "operator",
-                        "r2lab_slice": None,
-                        "r2lab_identity": None,
-                        "reservation_minutes": 180,
-                        "placement": "automatic",
-                    },
-                }
-            )
-
-            self.assertTrue(response["ok"])
-            self.assertTrue(workspace_file(root).is_file())
-            self.assertEqual(
-                calls,
-                [("slices", "auth", "show"), ("slices", "project", "show")],
-            )
-            workspace = load_workspace(root)
-            self.assertEqual(workspace.reservation_minutes, 180)
-            self.assertEqual(workspace.project, "research-project")
-
-    def test_control_service_updates_defaults_without_provider_calls(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            environment = {"SYNTHRAN_CONFIG_HOME": str(root / "config")}
-            now = utc_now()
-            save_profile(
-                Profile(
-                    name="default",
-                    created_at_utc=format_utc(now),
-                    updated_at_utc=format_utc(now),
-                    slices_username="operator",
-                ),
-                environment=environment,
-            )
-            initialize_workspace(root=root, profile="default", project="research-project")
-
-            def forbidden_runner(command: tuple[str, ...], timeout: int) -> ProbeResult:
-                raise AssertionError(f"defaults update contacted provider: {command}")
-
-            service = ControlService(
-                start=root,
-                environment=environment,
-                provider_runner=forbidden_runner,
-            )
-            response = service.handle(
-                {
-                    "v": 7,
-                    "id": "defaults",
-                    "method": "workspace.update_defaults",
-                    "params": {
-                        "reservation_minutes": 240,
-                        "placement": "manual",
-                    },
-                }
-            )
-
-            self.assertTrue(response["ok"])
-            self.assertEqual(load_workspace(root).reservation_minutes, 240)
-            self.assertEqual(load_workspace(root).placement, "manual")
 
 
 if __name__ == "__main__":
