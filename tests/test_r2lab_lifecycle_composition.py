@@ -109,12 +109,14 @@ class PhysicalWorkloadCompositionTests(unittest.TestCase):
     @patch("synthran.r2lab.lifecycle.build_physical_workload_executor")
     @patch("synthran.r2lab.lifecycle.repository_root", return_value=Path("."))
     @patch("synthran.r2lab.lifecycle.load_lock", return_value=object())
-    @patch("synthran.r2lab.lifecycle.load_inventory", return_value=object())
+    @patch("synthran.r2lab.lifecycle.load_physical_inventory", return_value=object())
+    @patch("synthran.r2lab.lifecycle.load_topology")
     @patch("synthran.r2lab.lifecycle.PhysicalRunEvidence.read_json")
     def test_workload_reuses_physical_executor_and_common_result_semantics(
         self,
         read_evidence,
-        load_inventory,
+        load_topology,
+        load_physical_inventory,
         load_lock,
         repo_root,
         build_executor,
@@ -123,6 +125,9 @@ class PhysicalWorkloadCompositionTests(unittest.TestCase):
         evidence = Mock()
         evidence.acceptance.next_stage = PhysicalAcceptanceStage.WORKLOAD
         read_evidence.return_value = evidence
+        topology = Mock()
+        topology.validate.return_value = topology
+        load_topology.return_value = topology
         executor = Mock()
         build_executor.return_value = executor
 
@@ -158,6 +163,10 @@ class PhysicalWorkloadCompositionTests(unittest.TestCase):
             payload["stages"],
         )
         self.assertNotIn("sha256", str(payload).lower())
+        load_topology.assert_called_once_with(
+            run_root=Path(".synthran/r2lab"), run_id="r2lab-run-001"
+        )
+        load_physical_inventory.assert_called_once_with(Path("hosts.ini"), topology=topology)
         build_executor.assert_called_once()
         handoff.assert_called_once()
 
