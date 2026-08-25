@@ -3,15 +3,16 @@
   hosts: localhost
   gather_facts: false
   tasks:
-    - name: Require the reviewed R2Lab core inputs
+    - name: Require the selected R2Lab core inputs
       ansible.builtin.assert:
         that:
           - core == "open5gs"
           - ran == "srsRAN"
-          - core_node_name == "sopnode-f2"
-          - ran_node_name == "sopnode-f3"
-          - rru == "n300"
-          - synthran_subscriber == "qfit07"
+          - core_node_name in ["sopnode-f1", "sopnode-f2", "sopnode-f3", "sopnode-w3"]
+          - ran_node_name in ["sopnode-f1", "sopnode-f2", "sopnode-f3", "sopnode-w3"]
+          - core_node_name != ran_node_name
+          - rru in ["n300", "n320"]
+          - synthran_subscriber in ["qfit07", "qfit09", "qfit18", "qfit29", "qfit32", "qfit34", "qhat01", "qhat02", "qhat03", "qhat10", "qhat11", "qhat20", "qhat21", "qhat22", "qhat23"]
           - not monitoring_enabled | bool
           - synthran_run_id is match("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
         fail_msg: "unsupported physical Open5GS inputs"

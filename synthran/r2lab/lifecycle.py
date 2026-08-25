@@ -1,9 +1,8 @@
-"""High-level R2Lab lifecycle composition behind the common backend boundary.
+"""High-level selected-topology R2Lab lifecycle composition.
 
-This module resumes an already prepared physical run from persisted acceptance
-state, but live authority and path state are re-observed at each mutation or
-traffic boundary. Digests from lower-level deployment evidence remain
-provenance; they are not re-checked here as runtime authorization.
+A prepared run resumes from persisted ordered acceptance, while the live R2Lab
+claim/lease, selected compute allocation, singleton gNB/N2 and UE state are
+re-observed at every mutation or traffic boundary.
 """
 
 from __future__ import annotations
@@ -30,10 +29,10 @@ from synthran.r2lab.acceptance import (
 )
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
 from synthran.r2lab.ue import (
-    R2LabQfitActivationError,
-    execute_authorized_qfit_activation,
-    execute_authorized_qfit_user_plane,
+    R2LabPhysicalUeError,
+    activate_physical_ue,
     execute_physical_workload_handoff,
+    prove_physical_user_plane,
 )
 
 
@@ -95,11 +94,14 @@ class PhysicalPathSummary:
 
     @property
     def ready_for_workload(self) -> bool:
-        return self.failed_stage is None and self.next_stage == PhysicalAcceptanceStage.WORKLOAD.value
+        return (
+            self.failed_stage is None
+            and self.next_stage == PhysicalAcceptanceStage.WORKLOAD.value
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema": "synthran/r2lab-path/v1alpha1",
+            "schema": "synthran/r2lab-path/v1alpha2",
             "run_id": self.run_id,
             "next_stage": self.next_stage,
             "failed_stage": self.failed_stage,
@@ -121,7 +123,7 @@ class PhysicalWorkloadSummary:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema": "synthran/r2lab-workload/v1alpha1",
+            "schema": "synthran/r2lab-workload/v1alpha2",
             "run_id": self.run_id,
             "workload_id": self.workload_id,
             "backend": "r2lab",
@@ -129,7 +131,7 @@ class PhysicalWorkloadSummary:
                 "workload": self.accepted,
                 "data": self.accepted,
                 "acceptance": self.accepted,
-                "cleanup": self.cleanup_proven,
+                "workload_cleanup": self.cleanup_proven,
             },
             "accepted": self.accepted,
             "cleanup_proven": self.cleanup_proven,
@@ -142,6 +144,8 @@ def continue_physical_path(
     *,
     run_id: str,
     slice_name: str,
+    owner: str,
+    allocation_id: str | None,
     known_hosts: Path,
     peer: str,
     run_root: Path = DEFAULT_R2LAB_RUN_ROOT,
@@ -149,7 +153,7 @@ def continue_physical_path(
     r2lab_runner=r2lab_subprocess_runner,
     cluster_runner=cluster_subprocess_runner,
 ) -> PhysicalPathSummary:
-    """Advance a proven physical gNB from UE management through user plane."""
+    """Advance the selected physical UE through PDU and user-plane proof."""
 
     evidence_path, physical_directory = _paths(run_root, run_id)
     try:
@@ -157,37 +161,39 @@ def continue_physical_path(
         activation_status: str | None = None
 
         if evidence.acceptance.next_stage in {
-            PhysicalAcceptanceStage.GNB_N2,
             PhysicalAcceptanceStage.UE_MANAGEMENT,
             PhysicalAcceptanceStage.CELL_ACQUISITION,
+            PhysicalAcceptanceStage.REGISTRATION,
             PhysicalAcceptanceStage.PDU_SESSION,
         }:
-            activation = execute_authorized_qfit_activation(
+            evidence, activation = activate_physical_ue(
                 evidence=evidence,
                 slice_name=slice_name,
-                run_root=run_root,
+                owner=owner,
+                allocation_id=allocation_id,
                 known_hosts=known_hosts,
+                run_root=run_root,
                 r2lab_runner=r2lab_runner,
                 cluster_runner=cluster_runner,
                 evidence_path=evidence_path,
-                activation_evidence_path=physical_directory / "qfit-activation.json",
+                activation_evidence_path=physical_directory / "physical-ue-activation.json",
                 timeout_seconds=timeout_seconds,
             )
-            evidence = activation.evidence
-            if activation.activation is not None:
-                activation_status = activation.activation.status
+            activation_status = activation.status
 
         user_plane_proven = (
             evidence.acceptance.outcome_for(PhysicalAcceptanceStage.USER_PLANE).value
             == "passed"
         )
         if evidence.acceptance.next_stage is PhysicalAcceptanceStage.USER_PLANE:
-            user_plane = execute_authorized_qfit_user_plane(
+            user_plane = prove_physical_user_plane(
                 evidence=evidence,
                 slice_name=slice_name,
-                run_root=run_root,
+                owner=owner,
+                allocation_id=allocation_id,
                 known_hosts=known_hosts,
                 peer=peer,
+                run_root=run_root,
                 r2lab_runner=r2lab_runner,
                 cluster_runner=cluster_runner,
                 evidence_path=evidence_path,
@@ -196,15 +202,14 @@ def continue_physical_path(
             evidence = user_plane.evidence
             user_plane_proven = user_plane.probe.proven
             _write_json(
-                physical_directory / "qfit-user-plane.json",
+                physical_directory / "physical-user-plane.json",
                 user_plane.probe.to_dict(),
             )
 
-        allowed_terminal = {
+        if evidence.acceptance.next_stage not in {
             PhysicalAcceptanceStage.WORKLOAD,
             None,
-        }
-        if evidence.acceptance.next_stage not in allowed_terminal:
+        }:
             raise R2LabPhysicalLifecycleError(
                 "physical path did not reach the workload boundary"
             )
@@ -219,7 +224,7 @@ def continue_physical_path(
         )
     except (
         R2LabAcceptanceError,
-        R2LabQfitActivationError,
+        R2LabPhysicalUeError,
         OSError,
         ValueError,
     ) as exc:
@@ -233,6 +238,8 @@ def run_physical_workload(
     run_id: str,
     workload_id: str,
     slice_name: str,
+    owner: str,
+    allocation_id: str | None,
     known_hosts: Path,
     inventory_path: Path,
     lock_path: Path = Path("dependencies.lock.yml"),
@@ -245,7 +252,7 @@ def run_physical_workload(
     r2lab_runner=r2lab_subprocess_runner,
     cluster_runner=cluster_subprocess_runner,
 ) -> PhysicalWorkloadSummary:
-    """Run the canonical deterministic IoT workload over an accepted physical path."""
+    """Run the canonical deterministic IoT workload over the selected UE path."""
 
     evidence_path, physical_directory = _paths(run_root, run_id)
     workload_result_path = physical_directory / "physical-workload-result.json"
@@ -264,12 +271,15 @@ def run_physical_workload(
             repository_root=repository_root(),
             workload_id=workload_id,
             run_root=experiment_root,
+            physical_run_root=run_root,
             collection_seconds=collection_seconds,
             minimum_per_sensor=minimum_per_sensor,
         ).validate()
-        outcome = execute_physical_workload_handoff(
+        state, result = execute_physical_workload_handoff(
             evidence=evidence,
             slice_name=slice_name,
+            owner=owner,
+            allocation_id=allocation_id,
             run_root=run_root,
             known_hosts=known_hosts,
             r2lab_runner=r2lab_runner,
@@ -279,12 +289,11 @@ def run_physical_workload(
             workload_evidence_path=workload_result_path,
             timeout_seconds=timeout_seconds,
         )
-        result = outcome.result
         accepted = (
             result is not None
             and result.accepted
             and result.cleanup_proven
-            and outcome.evidence.acceptance.accepted
+            and state.acceptance.accepted
         )
         return PhysicalWorkloadSummary(
             run_id=run_id,
@@ -296,7 +305,7 @@ def run_physical_workload(
         )
     except (
         R2LabAcceptanceError,
-        R2LabQfitActivationError,
+        R2LabPhysicalUeError,
         OSError,
         ValueError,
     ) as exc:

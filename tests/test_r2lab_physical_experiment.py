@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 from synthran.r2lab.ue import PhysicalWorkloadContext, PhysicalWorkloadResult
 from synthran.experiment.r2lab import (
-    ManagedQfitRelay,
+    ManagedPhysicalUeRelay,
     PhysicalExperimentConfig,
     PhysicalExperimentScenario,
+    build_physical_ue_stdio_relay_command,
     build_physical_workload_executor,
-    build_qfit_stdio_relay_command,
     physical_central_name,
     render_physical_central_objects,
     route_uses_wwan0,
@@ -53,14 +53,14 @@ class R2LabPhysicalScenarioTests(unittest.TestCase):
         config, deployment = render_physical_central_objects(
             scenario,
             lock=FakeLock(),  # type: ignore[arg-type]
-            core_node="sopnode-f2",
+            core_node="sopnode-f1",
         )
         expected_name = physical_central_name(scenario.run_id)
         self.assertEqual(expected_name, config["metadata"]["name"])
         self.assertEqual(expected_name, deployment["metadata"]["name"])
         pod = deployment["spec"]["template"]["spec"]
         self.assertTrue(pod["hostNetwork"])
-        self.assertEqual("sopnode-f2", pod["nodeSelector"]["kubernetes.io/hostname"])
+        self.assertEqual("sopnode-f1", pod["nodeSelector"]["kubernetes.io/hostname"])
         image = pod["containers"][0]["image"]
         self.assertIn("@sha256:", image)
         self.assertEqual(18884, pod["containers"][0]["ports"][0]["hostPort"])
@@ -68,9 +68,9 @@ class R2LabPhysicalScenarioTests(unittest.TestCase):
 
 class R2LabPhysicalRelayTests(unittest.TestCase):
     def test_qfit_relay_command_is_strict_and_binds_outbound_socket_to_wwan0(self) -> None:
-        command = build_qfit_stdio_relay_command(
+        command = build_physical_ue_stdio_relay_command(
             slice_name="oulu_user",
-            qfit="qfit07",
+            ue="qfit07",
             run_id="physical-iot-001",
             central_address="198.51.100.10",
         )
@@ -80,8 +80,21 @@ class R2LabPhysicalRelayTests(unittest.TestCase):
         self.assertNotIn("accept-new", rendered)
         self.assertIn("SO_BINDTODEVICE", rendered)
         self.assertIn("wwan0", rendered)
+        self.assertIn("fit07", rendered)
         self.assertIn("physical-iot-001", rendered)
         self.assertIn("198.51.100.10", rendered)
+
+    def test_qmi_qhat_uses_the_same_interface_bound_relay_contract(self) -> None:
+        command = build_physical_ue_stdio_relay_command(
+            slice_name="oulu_user",
+            ue="qhat23",
+            run_id="physical-iot-002",
+            central_address="198.51.100.11",
+        )
+        rendered = " ".join(command)
+        self.assertIn("qhat23", rendered)
+        self.assertIn("SO_BINDTODEVICE", rendered)
+        self.assertIn("wwan0", rendered)
 
     def test_route_parser_requires_exact_wwan0_observation(self) -> None:
         destination = "198.51.100.10"
@@ -99,8 +112,8 @@ class R2LabPhysicalRelayTests(unittest.TestCase):
         )
         self.assertFalse(route_uses_wwan0("not-json", destination))
 
-    def test_local_relay_bridges_binary_stdio_without_qfit_or_network_dependencies(self) -> None:
-        relay = ManagedQfitRelay(
+    def test_local_relay_bridges_binary_stdio_without_hardware_dependencies(self) -> None:
+        relay = ManagedPhysicalUeRelay(
             port=0,
             command=(
                 sys.executable,
@@ -149,7 +162,7 @@ class R2LabPhysicalExecutorFactoryTests(unittest.TestCase):
         executor = build_physical_workload_executor(config)
         context = PhysicalWorkloadContext(
             run_id="r2lab-run-001",
-            qfit="qfit07",
+            ue="qhat23",
             interface="wwan0",
         )
         self.assertNotIn("sha256", str(context.to_dict()).lower())

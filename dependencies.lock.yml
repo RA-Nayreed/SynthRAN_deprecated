@@ -1,6 +1,6 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-08-22T01:40:00Z",
+  "resolved_at_utc": "2026-08-25T03:43:36Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/sopnode/5g_ansible.git",
@@ -93,6 +93,14 @@
       "digest": "sha256:7c3bd04fca5e241e9e245c52cc5882bb47c522a55c32b5ed1b9a1ed8fc56a7f2",
       "platform": "linux/amd64",
       "role": "Physical R2Lab N300 srsRAN gNB",
+      "license": "NOASSERTION"
+    },
+    "srsran_gnb_physical_n320": {
+      "image": "docker.io/r2labuser/srsran-gnb-uhd",
+      "tag": "v1.0",
+      "digest": "sha256:f22e391ff19bb4d838e24962f6429a64abae0bd6abd812f4be8c10f8af8fe690",
+      "platform": "linux/amd64",
+      "role": "Physical R2Lab N320 srsRAN gNB",
       "license": "NOASSERTION"
     },
     "srsran_ue": {
