@@ -1,184 +1,252 @@
 # Operator guide
 
-This is the supported path from a SLICES user context to a reproducible SynthRAN experiment and research campaign. Current evidence is in [`results.md`](results.md); experiment validity rules are in [`experiment.md`](experiment.md); durable boundaries are in [`architecture.md`](architecture.md).
+This is the supported procedure for running SynthRAN on SLICES with either the virtual RFSIM backend or the physical R2Lab backend.
 
-## Execution boundary
+## 1. Install and verify
 
-The supported product interface is the installed command:
-
-```text
-synthran <arguments>
-```
-
-There is no interactive frontend or external workbench service. Provider mutations are performed only by explicit CLI commands and remain subject to authority, ownership, freshness, evidence, and cleanup rules.
-
-## 1. Prepare the controller
-
-Create and activate the reviewed environment, then install the repository command:
-
-```bash
+```zsh
 cd ~/SynthRAN
-conda env create -f environment.yml
 conda activate synthran
 python -m pip install --no-deps -e .
-python -c "import os; assert os.environ.get('CONDA_DEFAULT_ENV') == 'synthran'"
-python -m unittest discover -s tests -v
-synthran privacy scan --worktree
-```
-
-Synchronize pinned dependencies and verify the command:
-
-```bash
 synthran deps sync
 synthran --help
 ```
 
-## 2. Establish the SLICES provider context
+For repository validation:
 
-A SLICES project is required. SynthRAN does not create or approve projects and does not silently change the active project.
+```zsh
+python -m unittest discover -s tests -v
+synthran dev privacy scan --worktree
+```
 
-```bash
+There is one installed executable. Do not operate the network by calling internal Python helpers or historical backend command names.
+
+## 2. Authenticate provider tools
+
+Provider authentication and project creation remain outside SynthRAN.
+
+```zsh
 slices auth login
 slices project list
-slices project use PROJECT_NAME
-slices auth show
-slices project show
 ```
 
-Create the provider experiment explicitly and acquire its Post5G network prefix:
+Select a SLICES project that already exists and export the identity SynthRAN should use:
 
-```bash
-export PROJECT_NAME=PROJECT_NAME
-export PROVIDER_EXPERIMENT=EXPERIMENT_NAME
-
-slices project use "$PROJECT_NAME"
-slices experiment create "$PROVIDER_EXPERIMENT" --duration 4h
-post5g experiment prefix "$PROVIDER_EXPERIMENT"
-
-export SYNTHRAN_SLICES_PROJECT="$PROJECT_NAME"
-export SYNTHRAN_SLICES_EXPERIMENT="$PROVIDER_EXPERIMENT"
+```zsh
+export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
+export SYNTHRAN_OWNER='YOUR_SLICES_USERNAME'
 ```
 
-Keep the prefix active while live work depends on it.
+A run selects that project, creates or reuses the provider experiment associated with its run ID, acquires the Post5G prefix, and verifies the resulting provider network.
 
-## 3. Verify provider context
+You may override the provider experiment with `--slices-experiment`, but the normal path is to let it match the run ID.
 
-```bash
-synthran slices doctor
-```
+## 3. Read-only readiness
 
-This is read-only. Resolve controller, project, provider-experiment, prefix, dependency, or provider-tool failures before starting mutations.
+### RFSIM
 
-## 4. Reserve and prepare virtual resources
-
-For the accepted RFSIM topology, use a unique preparation ID and exact owner identity:
-
-```bash
-export SYNTHRAN_OWNER=YOUR_SLICES_USERNAME
-export PREPARATION_RUN=prepare-001
-
-synthran network prepare \
-  --dry-run \
-  --owner "$SYNTHRAN_OWNER" \
-  --duration-minutes 120 \
-  --run-id "$PREPARATION_RUN"
-
-synthran network prepare \
-  --owner "$SYNTHRAN_OWNER" \
-  --duration-minutes 120 \
-  --run-id "$PREPARATION_RUN"
-
-source ".synthran/preparations/$PREPARATION_RUN/authority.env"
-export INVENTORY=".synthran/preparations/$PREPARATION_RUN/hosts.ini"
-```
-
-`authority.env` contains live provider identifiers and must remain private and untracked.
-
-## 5. Preflight, deploy, and prove the virtual 5G path
-
-```bash
+```zsh
 synthran doctor \
-  --inventory "$INVENTORY" \
-  --evidence-out .synthran/preflight.json
-
-export NETWORK_RUN=network-001
-
-synthran network deploy \
-  --inventory "$INVENTORY" \
-  --preflight-evidence .synthran/preflight.json \
-  --run-id "$NETWORK_RUN"
-
-synthran network verify \
-  --inventory "$INVENTORY" \
-  --run-id "$NETWORK_RUN" \
-  --timeout 120
+  --radio rfsim \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3
 ```
 
-Successful deployment is weaker than path proof. Do not start a research campaign until verification accepts the current path. Never reuse a historical PDU address as current authority.
+The virtual doctor validates the selected node topology, pinned dependencies, and local deployment prerequisites. If an existing provider experiment is supplied with `--slices-experiment`, it also verifies that context.
 
-## 6. Run deterministic IoT acceptance
+### R2Lab
 
-```bash
-export IOT_RUN=iot-001
+An active R2Lab lease is required before physical mutation.
 
-synthran experiment plan \
-  --network-run-id "$NETWORK_RUN" \
-  --run-id "$IOT_RUN"
+```zsh
+export SYNTHRAN_R2LAB_SLICE='YOUR_R2LAB_SLICE'
 
-synthran experiment run \
-  --inventory "$INVENTORY" \
-  --network-run-id "$NETWORK_RUN" \
-  --run-id "$IOT_RUN"
-
-synthran experiment verify --run-id "$IOT_RUN"
+synthran doctor \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --slice "$SYNTHRAN_R2LAB_SLICE"
 ```
 
-An experiment failure does not automatically justify base-network redeployment. Preserve its evidence, recover only exact SynthRAN-owned resources, and reverify the base path.
+The physical doctor is read-only. It validates the selected executable topology, strict public-key access to Faraday, and the active lease.
 
-## 7. Choose the external research peer
+To inspect the physical hardware catalogue:
 
-Capacity calibration and controlled load must terminate outside the 5G core host. In the reviewed two-node virtual topology the prepared RAN node is the external peer.
-
-```bash
-ansible -i "$INVENTORY" ran_node -m shell -a 'ip -4 -o addr show; ip -4 route show default'
-export MEASUREMENT_PEER_IP=PEER_IPV4
+```zsh
+synthran inspect --radio r2lab
 ```
 
-Do not substitute the core-node address or a same-host target that can collapse into a Kubernetes or hairpin path.
+## 4. Run the virtual backend
 
-## 8. Calibrate the user plane
+Use a new immutable run ID:
 
-```bash
-export CALIBRATION=.synthran/research/capacity.json
+```zsh
+export RUN_ID='virtual-001'
 
-synthran experiment research calibrate \
+synthran run \
+  --radio rfsim \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --run-id "$RUN_ID" \
+  --owner "$SYNTHRAN_OWNER" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
+```
+
+The command owns the complete sequence:
+
+```text
+provider context
+-> SLICES reservation/allocation
+-> live authority preflight
+-> Open5GS + srsRAN/RFSIM deployment
+-> srsUE/PDU path proof
+-> deterministic ten-sensor workload
+-> acceptance evidence
+```
+
+There is no supported need to call resource preparation, network deployment, network verification, or workload execution as separate CLI commands.
+
+## 5. Run the physical backend
+
+The physical path requires a strict known-hosts file for the selected SLICES compute nodes. Use a reviewed existing file or create it through the provider access workflow; do not disable host-key checking.
+
+```zsh
+export SYNTHRAN_SLICES_KNOWN_HOSTS='/absolute/path/to/sopnodes_known_hosts'
+export RUN_ID='physical-001'
+
+synthran run \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --run-id "$RUN_ID" \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --owner "$SYNTHRAN_OWNER" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
+```
+
+The physical command owns:
+
+```text
+provider context
+-> exact radio/UE claim under the active lease
+-> selected compute-node/Open5GS foundation
+-> pinned N3xx gNB staging
+-> singleton gNB + stable N2
+-> selected UE setup/connect through pinned 5g_ansible roles
+-> registration + PDU proof
+-> route-bound user-plane proof
+-> deterministic ten-sensor workload
+-> acceptance evidence
+-> exact physical cleanup
+```
+
+By default accepted physical resources are released at the end. `--keep-resources` is available only when the operator intentionally needs the run-owned hardware to remain active for immediate follow-up work.
+
+If a previous run owns the current Open5GS namespace and automatic ownership handoff cannot be resolved safely, use `--previous-run-id` with the exact prior run ID. Never guess it.
+
+## 6. Watch progress
+
+Every run records a sanitized JSONL event stream:
+
+```text
+.synthran/events/<run-id>.jsonl
+```
+
+Live output and persisted logs use the same messages. Follow a run from another shell with:
+
+```zsh
+synthran logs --run-id "$RUN_ID" --follow
+```
+
+or inspect the latest persisted messages later:
+
+```zsh
+synthran logs --run-id "$RUN_ID" --tail 200
+```
+
+Long Ansible work uses one shared formatter across virtual deployment, physical Open5GS work, and physical UE setup/connect/stop. Routine Ansible chatter is suppressed; meaningful tasks, failures, and heartbeats remain visible.
+
+`--quiet` suppresses terminal progress but does not disable event persistence.
+
+## 7. Inspect evidence
+
+```zsh
+synthran inspect --run-id "$RUN_ID"
+```
+
+The command discovers the persisted evidence associated with the run and reports the available schemas/statuses. Use `--json` when another tool needs machine-readable output.
+
+Do not use a historical PDU address, pod name, reservation ID, allocation ID, or lease observation as current mutation authority. Persisted evidence proves the historical run; live control always refreshes current state.
+
+## 8. Stop or recover exact physical resources
+
+If a physical run fails before its normal cleanup or was intentionally left active:
+
+```zsh
+synthran stop \
+  --run-id "$RUN_ID" \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --owner "$SYNTHRAN_OWNER" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+```
+
+Cleanup is run-scoped. It may stop the run-owned gNB and release only the radio/UE resources bound to that run. If ownership cannot be proven, cleanup fails rather than broadening its target.
+
+Never substitute wildcard Kubernetes deletion, global radio power-off, guessed allocation IDs, `pkill`, or `killall` for exact cleanup.
+
+For RFSIM, workload cleanup is normally part of run execution and there is no persistent physical claim to release.
+
+## 9. Research measurements
+
+The current controlled measurement implementation is validated on accepted RFSIM network evidence.
+
+After an accepted virtual run, the generated inventory is normally:
+
+```text
+.synthran/preparations/<run-id>/hosts.ini
+```
+
+and the accepted virtual network evidence uses the same run ID under `.synthran/runs/`.
+
+### Calibrate the external peer
+
+Choose a prepared peer outside the 5G core host. See `research-measurement-peer.md`.
+
+```zsh
+export NETWORK_RUN='virtual-001'
+export INVENTORY=".synthran/preparations/$NETWORK_RUN/hosts.ini"
+export MEASUREMENT_PEER_IP='PEER_IPV4'
+export CALIBRATION='.synthran/research/capacity.json'
+
+synthran research calibrate \
   --inventory "$INVENTORY" \
   --network-run-id "$NETWORK_RUN" \
   --target "$MEASUREMENT_PEER_IP" \
   --duration-seconds 10 \
   --out "$CALIBRATION"
-
-export REFERENCE_BPS=$(jq -r '.reference_capacity_bps' "$CALIBRATION")
 ```
 
-Calibration belongs to the current network epoch; it is not a universal capacity claim.
+### Build and execute a campaign
 
-## 9. Plan and run a controlled campaign
-
-```bash
-export CAMPAIGN_ID=campaign-001
+```zsh
+export REFERENCE_BPS=$(jq -r '.reference_capacity_bps' "$CALIBRATION")
+export CAMPAIGN_ID='campaign-001'
 export CAMPAIGN_FILE=".synthran/campaigns/$CAMPAIGN_ID.json"
-export RUN_ROOT=.synthran/experiments
 
-synthran experiment research campaign-plan \
+synthran research campaign-plan \
   --campaign-id "$CAMPAIGN_ID" \
   --network-run-id "$NETWORK_RUN" \
   --seeds 424242,424243,424244 \
-  --conditions baseline,load50:0.5,load80:0.8,load95:0.95 \
+  --conditions 'baseline,load50=0.5,load80=0.8,load95=0.95' \
   --campaign-seed 12345 \
   --out "$CAMPAIGN_FILE"
 
-synthran experiment research campaign-run \
+synthran research campaign-run \
   --campaign "$CAMPAIGN_FILE" \
   --inventory "$INVENTORY" \
   --target "$MEASUREMENT_PEER_IP" \
@@ -189,51 +257,50 @@ synthran experiment research campaign-run \
   --sample-interval 1 \
   --probe-interval 1 \
   --parallel-flows 2 \
-  --load-port 5220 \
-  --run-root "$RUN_ROOT"
+  --load-port 5220
 ```
 
-A requested sampling interval is not proof of achieved cadence. Persisted timing evidence and current path validity determine whether a run is usable.
+Analyze persisted valid runs:
 
-## 10. Analyze persisted valid runs
-
-```bash
+```zsh
 mkdir -p .synthran/reports
 
-synthran experiment research analyze \
+synthran research analyze \
   --campaign "$CAMPAIGN_FILE" \
-  --run-root "$RUN_ROOT" \
   --out ".synthran/reports/$CAMPAIGN_ID-analysis.json"
 ```
 
-The analyzer uses persisted validity gates and pairs loaded treatments with the matching seed-block baseline. Failed or invalid runs remain diagnostic evidence and are not silently reclassified.
+Physical deterministic workload support does not yet imply physical controlled-load campaign acceptance. Do not point the current research campaign commands at a physical run and claim parity without a reviewed physical measurement implementation and accepted evidence.
 
-## 11. R2Lab physical operation
+## 10. Preserve evidence
 
-Physical operation uses the same installed `synthran` command but has additional authority and hardware boundaries. Use the focused procedure in [`r2lab-integration.md`](r2lab-integration.md).
+Keep complete raw run or campaign bundles outside normal Git history. Preserve:
 
-Physical acceptance is progressive. Resource preparation or gNB/N2 success does not imply UE registration, PDU, user plane, workload, or experiment acceptance. Every physical mutation must bind current R2Lab authority and exact selected resources.
+- run and campaign specifications;
+- provider/resource provenance;
+- measurement windows;
+- telemetry and sequence evidence;
+- RTT probes;
+- network-counter samples and timing evidence;
+- load records;
+- validity summaries;
+- dependency identities;
+- artifact hashes;
+- unified run event logs.
 
-## 12. Preserve evidence
+JSONL is the audit source. Parquet is a deterministic analysis derivative. Checksum manifests must exclude the checksum file itself.
 
-Preserve raw experiment or campaign bundles outside ordinary Git history. Include run specifications, measurement windows, telemetry, probes, network samples, load records, validity summaries, dependency provenance, and artifact digests. When building `SHA256SUMS`, exclude the checksum file itself.
+## 11. Provider release
 
-Repository-tracked results must remain sanitized. Private credentials, authority files, kubeconfigs, dependency worktrees, generated live run directories, and unsanitized packet captures or logs do not belong in Git.
+Do not release a Post5G prefix while any active work still depends on it. Provider-level teardown outside a run remains an explicit provider action where required.
 
-## 13. Finish provider use
+## Failure rules
 
-Release the Post5G prefix only when no active experiment depends on it:
-
-```bash
-post5g experiment prefix "$PROVIDER_EXPERIMENT" --release
-```
-
-## Failure and recovery rules
-
-- Never reuse preparation, deployment, experiment, campaign-run, or operation IDs.
-- Never infer ownership from a resource name alone.
-- Never use broad wildcard or process cleanup when an exact run-owned target is available.
-- A measurement failure does not by itself justify redeploying a path-proven base network.
-- Preserve partial evidence and diagnose the smallest failing boundary first.
-- If clean rollback cannot be proven, fail closed and retain recovery-required state.
-- Do not release provider network identity while active work still depends on it.
+- never reuse a run ID for different intent or topology;
+- preserve partial evidence after failure;
+- diagnose the smallest failing boundary first;
+- refresh current authority before retrying live mutation;
+- never infer later acceptance from an earlier successful boundary;
+- fail closed when exact rollback/cleanup cannot be proven;
+- do not convert an infrastructure failure into a scientific result;
+- do not convert a legitimate scientific outcome into an infrastructure failure merely because it was unexpected.

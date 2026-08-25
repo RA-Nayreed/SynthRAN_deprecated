@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-import tomllib
+import argparse
 from pathlib import Path
+import tomllib
 import unittest
-from unittest.mock import patch
 
 from synthran.cli import _parser
-from synthran.launcher import main as launch
+from synthran.operator import PUBLIC_COMMANDS
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _top_level_choices(parser: argparse.ArgumentParser) -> set[str]:
+    action = next(
+        item for item in parser._actions if isinstance(item, argparse._SubParsersAction)
+    )
+    return set(action.choices)
 
 
 class CliTests(unittest.TestCase):
@@ -21,167 +28,88 @@ class CliTests(unittest.TestCase):
             project["project"]["scripts"],
             {"synthran": "synthran.launcher:main"},
         )
-        self.assertNotIn("prompt-toolkit", project["project"]["dependencies"])
 
-    def test_empty_argv_uses_scripted_cli(self) -> None:
-        with patch("synthran.cli.main", return_value=2) as cli_main:
-            self.assertEqual(launch([]), 2)
-        cli_main.assert_called_once_with([])
-
-    def test_explicit_argv_uses_scripted_cli(self) -> None:
-        arguments = ["privacy", "scan", "--worktree"]
-        with patch("synthran.cli.main", return_value=7) as cli_main:
-            self.assertEqual(launch(arguments), 7)
-        cli_main.assert_called_once_with(arguments)
-
-    def test_parser_contains_experiment_commands(self) -> None:
-        parser = _parser()
-        args = parser.parse_args(
-            [
-                "experiment",
-                "plan",
-                "--network-run-id",
-                "network-accepted-01",
-                "--run-id",
-                "experiment-01",
-            ]
+    def test_public_surface_is_intentionally_small(self) -> None:
+        self.assertEqual(set(PUBLIC_COMMANDS), _top_level_choices(_parser()))
+        self.assertEqual(
+            {"run", "doctor", "inspect", "logs", "stop", "research", "deps", "dev"},
+            set(PUBLIC_COMMANDS),
         )
-        self.assertEqual(args.command, "experiment")
-        self.assertEqual(args.experiment_command, "plan")
 
-    def test_parser_keeps_network_commands(self) -> None:
+    def test_removed_command_groups_do_not_parse(self) -> None:
         parser = _parser()
-        args = parser.parse_args(
-            [
-                "network",
-                "verify",
-                "--inventory",
-                "hosts.ini",
-                "--run-id",
-                "network-accepted-01",
-            ]
-        )
-        self.assertEqual(args.command, "network")
-        self.assertEqual(args.network_command, "verify")
+        for command in ("r2lab", "network", "experiment", "slices", "privacy", "hooks"):
+            with self.subTest(command=command), self.assertRaises(SystemExit):
+                parser.parse_args([command])
 
-    def test_parser_selects_exact_dependencies(self) -> None:
+    def test_run_selects_rfsim(self) -> None:
         args = _parser().parse_args(
             [
-                "deps",
-                "sync",
-                "--name",
-                "fiveg_ansible",
-                "--name",
-                "srsran_helm",
+                "run",
+                "--radio",
+                "rfsim",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "virtual-001",
             ]
         )
+        self.assertEqual("run", args.command)
+        self.assertEqual("rfsim", args.radio)
+        self.assertIsNone(args.device)
+        self.assertIsNone(args.ue)
 
-        self.assertEqual("sync", args.deps_command)
-        self.assertEqual(["fiveg_ansible", "srsran_helm"], args.dependency_names)
-        self.assertFalse(args.all)
-
-    def test_parser_contains_r2lab_commands(self) -> None:
-        parser = _parser()
-        args = parser.parse_args(
+    def test_run_selects_physical_backend(self) -> None:
+        args = _parser().parse_args(
             [
-                "r2lab",
-                "plan",
-                "--slice",
-                "oulu_user",
-                "--core-node",
-                "sopnode-f1",
-                "--ran-node",
-                "sopnode-f2",
+                "run",
                 "--radio",
+                "r2lab",
+                "--device",
                 "n300",
                 "--ue",
-                "qhat01",
+                "qfit07",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
                 "--run-id",
-                "r2lab-test-01",
+                "physical-001",
             ]
         )
-        self.assertEqual(args.command, "r2lab")
-        self.assertEqual(args.r2lab_command, "plan")
-        self.assertEqual(args.core_node, "sopnode-f1")
-        self.assertEqual(args.ran_node, "sopnode-f2")
-        self.assertEqual(args.radio, "n300")
-        self.assertEqual(args.ue, "qhat01")
+        self.assertEqual("r2lab", args.radio)
+        self.assertEqual("n300", args.device)
+        self.assertEqual("qfit07", args.ue)
 
-    def test_parser_contains_physical_foundation_command(self) -> None:
+    def test_research_is_top_level(self) -> None:
         args = _parser().parse_args(
             [
-                "r2lab",
-                "foundation",
-                "--slice",
-                "test_slice",
-                "--run-id",
-                "r2lab-current-run",
-                "--previous-run-id",
-                "r2lab-previous-run",
-                "--owner",
-                "test-owner",
-                "--allocation-id",
-                "allocation-1",
-                "--known-hosts",
-                "known_hosts",
+                "research",
+                "campaign-plan",
+                "--campaign-id",
+                "campaign-001",
+                "--network-run-id",
+                "virtual-001",
+                "--seeds",
+                "1,2,3",
+                "--conditions",
+                "baseline,load50=0.5",
+                "--campaign-seed",
+                "123",
+                "--out",
+                "campaign.json",
             ]
         )
+        self.assertEqual("research", args.command)
+        self.assertEqual("campaign-plan", args.research_command)
 
-        self.assertEqual("foundation", args.r2lab_command)
-        self.assertEqual(Path("known_hosts"), args.known_hosts)
-        self.assertEqual(Path("dependencies.lock.yml"), args.lock)
-        self.assertEqual(Path(".deps"), args.deps_root)
-        self.assertEqual(1800, args.timeout)
-
-    def test_parser_contains_stopped_gnb_and_n2_commands(self) -> None:
-        stage = _parser().parse_args(
-            [
-                "r2lab",
-                "gnb-stage",
-                "--slice",
-                "test_slice",
-                "--run-id",
-                "r2lab-current-run",
-                "--owner",
-                "test-owner",
-                "--allocation-id",
-                "allocation-1",
-                "--known-hosts",
-                "known_hosts",
-                "--amf-n2-address",
-                "198.51.100.200",
-                "--gnb-n2-address",
-                "198.51.100.234",
-                "--n300-address",
-                "192.0.2.203",
-                "--ru-pod-address",
-                "192.0.2.234",
-                "--ru-subnet",
-                "192.0.2.0/24",
-            ]
-        )
-        start = _parser().parse_args(
-            [
-                "r2lab",
-                "gnb-start",
-                "--slice",
-                "test_slice",
-                "--run-id",
-                "r2lab-current-run",
-                "--owner",
-                "test-owner",
-                "--allocation-id",
-                "allocation-1",
-                "--known-hosts",
-                "known_hosts",
-            ]
-        )
-
-        self.assertEqual("gnb-stage", stage.r2lab_command)
-        self.assertEqual("198.51.100.234", stage.gnb_n2_address)
-        self.assertEqual("gnb-start", start.r2lab_command)
-        self.assertEqual(12, start.n2_attempts)
-        self.assertEqual(12, start.n2_convergence_attempts)
+    def test_repository_maintenance_is_namespaced(self) -> None:
+        args = _parser().parse_args(["dev", "privacy", "scan", "--worktree"])
+        self.assertEqual("dev", args.command)
+        self.assertEqual("privacy", args.dev_command)
+        self.assertEqual("scan", args.privacy_command)
 
 
 if __name__ == "__main__":

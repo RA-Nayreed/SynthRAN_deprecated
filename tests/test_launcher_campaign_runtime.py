@@ -26,7 +26,6 @@ class LauncherCampaignRuntimeTests(unittest.TestCase):
     def test_campaign_run_is_wrapped_in_runtime_session(self) -> None:
         session = _Session()
         arguments = [
-            "experiment",
             "research",
             "campaign-run",
             "--campaign",
@@ -55,7 +54,6 @@ class LauncherCampaignRuntimeTests(unittest.TestCase):
     def test_campaign_cleanup_failure_forces_nonzero_exit(self) -> None:
         session = _Session(cleanup_error="restore failed")
         arguments = [
-            "experiment",
             "research",
             "campaign-run",
             "--campaign",
@@ -76,8 +74,8 @@ class LauncherCampaignRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result, 2)
 
-    def test_non_campaign_scripted_cli_is_unchanged(self) -> None:
-        arguments = ["network", "verify", "--inventory", "hosts.ini", "--run-id", "net-01"]
+    def test_non_campaign_cli_is_unchanged(self) -> None:
+        arguments = ["inspect", "--run-id", "run-01"]
         with patch("synthran.cli.main", return_value=0) as cli_main:
             result = main(arguments)
         self.assertEqual(result, 0)

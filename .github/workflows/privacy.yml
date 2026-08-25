@@ -49,7 +49,7 @@ jobs:
         run: conda run --no-capture-output -n synthran python -m unittest discover -s tests -v
 
       - name: Scan tracked source for private context
-        run: conda run --no-capture-output -n synthran synthran privacy scan --worktree
+        run: conda run --no-capture-output -n synthran synthran dev privacy scan --worktree
         if: ${{ !cancelled() }}
 
       - name: Scan Git history for secrets

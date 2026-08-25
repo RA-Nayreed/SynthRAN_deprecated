@@ -1,95 +1,140 @@
-# Development Guide
+# Development
+
+SynthRAN development should preserve a small public interface and push backend-specific complexity into tested internal modules.
 
 ## Environment
 
-SynthRAN supports Linux for the reviewed development, CI, and live-control path. Repository hooks, CI, and live operation use the named Conda environment `synthran`. `environment.yml` is the supported Linux environment definition and `pyproject.toml` defines the installed `synthran` command.
-
-Create or reconcile the environment, then install the repository command without resolving a second dependency graph:
-
-```sh
-conda env create --file environment.yml
+```zsh
+cd ~/SynthRAN
 conda activate synthran
 python -m pip install --no-deps -e .
+synthran deps sync
 ```
 
-After a direct dependency update:
+Run the complete unit suite before submitting changes:
 
-```sh
-conda env update --file environment.yml --prune
-python -m pip install --no-deps -e .
-```
-
-Verify the environment and run tests:
-
-```sh
-python -c "import os; assert os.environ.get('CONDA_DEFAULT_ENV') == 'synthran'"
+```zsh
 python -m unittest discover -s tests -v
 ```
 
-Direct package versions are exact. Conda still selects platform-specific transitive builds during solving, so the current environment is not an artifact-level lock. A reviewed platform artifact lock is required before making that stronger claim.
+Run repository privacy checks through the maintenance namespace:
 
-When adding or changing a direct dependency, keep `environment.yml` and the authoritative direct dependency metadata in `dependencies.lock.yml` synchronized. Do not weaken dependency-consistency tests to accommodate drift.
+```zsh
+synthran dev privacy scan --worktree
+```
 
-## Product command
+## Public interface invariant
 
-The supported operator executable is:
+The allowed top-level commands are:
 
 ```text
-synthran
+run
+doctor
+inspect
+logs
+stop
+research
+deps
+dev
 ```
 
-There is no interactive frontend or external workbench protocol. Product behavior is reached through explicit CLI arguments. Internal Python modules remain implementation details and are tested directly where appropriate.
+Tests intentionally assert this exact set. Do not add a backend-specific command group to expose an internal function. If new functionality belongs to the lifecycle, compose it inside `synthran run`; if it is read-only/run-oriented, consider `doctor`, `inspect`, or `logs`; if it is cleanup, use `stop`.
 
-## Git hooks
+## Main code boundaries
 
-Activate the tracked hook once per clone:
-
-```sh
-synthran hooks install --dry-run
-synthran hooks install
+```text
+synthran/cli.py                 parser entry
+synthran/operator.py            public commands and dispatch
+synthran/provider.py            shared provider context
+synthran/backends/run.py        complete run orchestration
+synthran/ansible_streaming.py   shared Ansible streaming
+synthran/network/               virtual implementation
+synthran/r2lab/                 physical implementation
+synthran/experiment/            deterministic workload
+synthran/research/              controlled measurements/analysis
+synthran/command_runtime.py     internal virtual/research support
 ```
 
-The pre-push hook runs the outgoing-commit privacy scan inside the configured `synthran` Conda environment. Do not bypass a true privacy or secret finding. Remove sensitive content from every affected outgoing commit and rotate an exposed credential when applicable.
+`command_runtime.py` deliberately has no public parser or top-level dispatch tree.
 
-## Architecture-sensitive test expectations
+## Ansible
 
-Offline tests protect the accepted experiment path and reusable control primitives.
+Use the existing sanitized streamer for every long Ansible operation:
 
-Important areas include:
+```python
+run_streaming_ansible_command(...)
+```
 
-- **Workspace identity and reconstruction:** initialization, legacy `.synthran` adoption, non-reusable IDs, registry reconstruction, authority conflicts, and safe rollback.
-- **Desired/observed separation:** desired-state validation, source truth ordering, freshness, ownership, lifecycle derivation, and fail-closed reconciliation.
-- **Operation control:** immutable plan hashes, approval binding, drift rejection, mutation claims, interruption/recovery semantics, and structured operation events.
-- **Resource selection/transactions:** deterministic capability placement, fresh and complete inventory requirements, exact resource binding, provider ordering, exact rollback scope, and recovery-required behavior on unknown partial failure.
-- **CLI:** parser coverage, stable command routing, campaign runtime cleanup, and a single installed product command.
-- **Research schemas and validity:** experiment specifications, campaigns, summaries, measurement windows, probes, network samples, load results, artifact digests, and invalid-run classification.
-- **RFSIM resilience:** reconciled UE/PDU handoff, delayed tunnel readiness, dead-process distinction, repeated zero-sample stall detection, complete retry attempts, and route/ownership restoration.
-- **R2Lab safety:** lease and allocation authority, exact radio/UE ownership, gNB/N2 evidence, modem readiness, user-plane proof, and bounded cleanup.
-- **Research load safety:** temporary target-route ownership, owned iperf3 lifecycle, control-connection readiness, load-target achievement, synchronized sampling, path reproof, and cleanup.
-- **Campaign analysis:** deterministic blocked randomization, run immutability, paired differences, and bootstrap confidence intervals.
+It already handles output capture, useful-task filtering, failure rendering, and heartbeats. New raw `ansible-playbook` subprocess wrappers should be treated as duplication unless there is a demonstrated requirement the shared wrapper cannot satisfy.
 
-An offline unit test is not live SLICES or R2Lab acceptance. Live-accepted claims require evidence from the real environment.
+## Run progress
 
-## Documentation rule
+A run writes terminal progress and `.synthran/events/<run-id>.jsonl` through the same stream. New long-running work should report through the run-provided `TextIO` progress handle rather than inventing a new logger format.
 
-Documentation is part of the correctness surface. Before completion, compare docs against current code rather than PR intent.
+Sanitized child output may be written to the handle directly. Do not emit subscriber credentials, private keys, kubeconfig material, or raw secret-bearing provider output.
 
-- product commands must exist in the installed `synthran` parser;
-- planning must not be described as provider execution;
-- source-truth order must match implementation;
-- operation risks and gates must match policy;
-- live-accepted, offline-tested, and unproven capabilities must remain distinct;
-- current evidence belongs in `docs/results.md`, not duplicated across architecture documents.
+## Backend changes
 
-## Validation
+Backend mechanics may differ below the 5G user-plane boundary, but changes must preserve common run semantics and evidence meaning. Check `backend-contract.md` before changing physical or virtual acceptance behavior.
 
-Before considering a change complete:
+A physical change requires particular care around:
 
-```sh
-python -m unittest discover -s tests -v
-synthran privacy scan --worktree
+- current lease/allocation verification;
+- exact run ownership;
+- singleton radio/gNB behavior;
+- UE role scoping;
+- independent postcondition proof;
+- exact cleanup.
+
+## Tests
+
+Prefer tests around contracts and boundaries instead of implementation call counts when possible.
+
+Required coverage for public-interface changes includes:
+
+- exact top-level parser choices;
+- rejection of removed legacy command groups;
+- backend selection through `run --radio`;
+- unified progress persistence;
+- `--quiet` retaining persisted events;
+- provider context create/reuse behavior;
+- physical safety checks relevant to the change.
+
+Live testbed acceptance is additional evidence; it does not replace unit tests.
+
+## Documentation
+
+Keep documentation synchronized in the same change as CLI/runtime behavior. Do not add dated engineering diaries to `docs/`. Current accepted live evidence belongs in `results.md`; detailed raw evidence belongs in ignored/preserved run storage.
+
+Avoid introducing temporary implementation terminology into public docs. Describe durable concepts: run, backend, provider, resource authority, path proof, workload, measurement, evidence, cleanup.
+
+## Privacy
+
+Before pushing:
+
+```zsh
+synthran dev privacy scan --worktree
 git diff --check
 git status --short
 ```
 
-When available, also run the repository and Git-history secret scan used by CI. Inspect the complete intended diff manually. Offline tests must not require live SLICES credentials.
+The pre-push hook can be activated with:
+
+```zsh
+synthran dev hooks install
+```
+
+Do not weaken privacy checks to accommodate generated private evidence. Keep generated authority, dependency worktrees, run directories, private captures, and credentials out of Git.
+
+## Pull requests
+
+A substantial pull request should state:
+
+- what durable behavior changed;
+- which public commands changed, if any;
+- which evidence/contracts are affected;
+- test results;
+- whether live acceptance was performed;
+- any capability that remains intentionally unproven.
+
+Do not describe planning or unit-test success as live experiment acceptance.

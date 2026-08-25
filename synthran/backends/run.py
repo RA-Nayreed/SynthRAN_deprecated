@@ -1,13 +1,10 @@
-"""One sequential operator command across SynthRAN radio backends.
-
-The public ``synthran run`` command owns orchestration. Existing step commands
-remain recovery/debug primitives; this adapter composes them without duplicating
-their implementation contracts.
-"""
+"""One sequential run command across SynthRAN radio backends."""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -17,7 +14,6 @@ from typing import Mapping, TextIO
 
 from synthran import command_runtime
 from synthran.backends.base import BackendError
-from synthran.backends.r2lab import _ensure_slices_provider_context
 from synthran.dependencies import DependencyError
 from synthran.experiment import ExperimentError
 from synthran.experiment.runtime import DEFAULT_COLLECTION_SECONDS, DEFAULT_MINIMUM_PER_SENSOR
@@ -26,6 +22,7 @@ from synthran.live_preflight import LivePreflightError, subprocess_runner as clu
 from synthran.network.resources import SUPPORTED_NODES, ResourcePreparationError, build_preparation_inventory
 from synthran.network.runtime import NetworkRuntimeError, validate_run_id
 from synthran.privacy import PrivacyError
+from synthran.provider import ensure_slices_provider_context
 from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence, R2LabAcceptanceError
 from synthran.r2lab.foundation_topology import R2LabTopologyFoundationError, accept_topology_foundation
 from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology, R2LabHardwareError
@@ -47,18 +44,92 @@ _EXECUTABLE_DEVICES = tuple(sorted(name for name, profile in RADIOS.items() if p
 _EXECUTABLE_UES = tuple(sorted(name for name, profile in UES.items() if profile.executable))
 
 
-class _RunProgress:
-    """Terminal progress for long unified runs, isolated from result stdout."""
+class _RunEventStream:
+    """Write sanitized run output to the terminal and one JSONL event file."""
 
-    def __init__(self, *, enabled: bool = True, stream: TextIO | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        radio: str,
+        terminal: TextIO,
+        terminal_enabled: bool,
+        root: Path = Path(".synthran/events"),
+    ) -> None:
+        self.run_id = run_id
+        self.radio = radio
+        self.terminal = terminal
+        self.terminal_enabled = terminal_enabled
+        self.path = root.expanduser().resolve() / f"{run_id}.jsonl"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._buffer = ""
+
+    def writable(self) -> bool:
+        return True
+
+    def _record(self, message: str) -> None:
+        message = message.rstrip("\r")
+        if not message:
+            return
+        if self.terminal_enabled:
+            print(message, file=self.terminal, flush=True)
+        payload = {
+            "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "run_id": self.run_id,
+            "radio": self.radio,
+            "message": message,
+        }
+        with self.path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(payload, sort_keys=True) + "\n")
+
+    def write(self, text: str) -> int:
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._record(line)
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._record(self._buffer)
+            self._buffer = ""
+        self.terminal.flush()
+
+
+class _RunProgress:
+    """Common live and persisted progress for every run backend."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        stream: TextIO | None = None,
+        run_id: str | None = None,
+        radio: str | None = None,
+    ) -> None:
+        terminal = stream if stream is not None else sys.stderr
+        if run_id is not None and radio is not None:
+            self.stream: TextIO = _RunEventStream(
+                run_id=run_id,
+                radio=radio,
+                terminal=terminal,
+                terminal_enabled=enabled,
+            )
+            self.event_path: Path | None = self.stream.path
+        else:
+            self.stream = terminal
+            self.event_path = None
         self.enabled = enabled
-        self.stream = stream if stream is not None else sys.stderr
         self.current_stage: str | None = None
 
+    @property
+    def child_stream(self) -> TextIO:
+        return self.stream
+
     def _emit(self, marker: str, stage: str, detail: str | None = None) -> None:
-        if not self.enabled:
-            return
         suffix = f": {detail}" if detail else ""
+        if self.event_path is None and not self.enabled:
+            return
         print(f"{marker} {stage}{suffix}", file=self.stream, flush=True)
 
     def start(self, stage: str, detail: str | None = None) -> None:
@@ -85,6 +156,9 @@ class _RunProgress:
         self._emit("✗", stage, detail)
         self.current_stage = None
 
+    def close(self) -> None:
+        self.stream.flush()
+
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     for action in parser._actions:
@@ -93,13 +167,26 @@ def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     raise BackendError("SynthRAN parser does not expose top-level commands")
 
 
+def _add_slices_context(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--slices-project",
+        default=os.environ.get("SYNTHRAN_SLICES_PROJECT"),
+        help="SLICES project (or SYNTHRAN_SLICES_PROJECT)",
+    )
+    parser.add_argument(
+        "--slices-experiment",
+        default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"),
+        help="provider experiment override; defaults to the run ID",
+    )
+
+
 def _add_common(run: argparse.ArgumentParser) -> None:
     run.add_argument("--radio", required=True, choices=("rfsim", "r2lab"), help="radio backend")
     run.add_argument("--run-id", required=True)
     run.add_argument("--core-node", required=True, choices=tuple(sorted(SUPPORTED_NODES)))
     run.add_argument("--ran-node", required=True, choices=tuple(sorted(SUPPORTED_NODES)))
     run.add_argument("--owner", default=os.environ.get("SYNTHRAN_OWNER"))
-    command_runtime._add_slices_context(run)
+    _add_slices_context(run)
     run.add_argument("--slices-duration", default="4h")
     run.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
     run.add_argument("--deps-root", type=Path, default=Path(".deps"))
@@ -110,7 +197,7 @@ def _add_common(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--quiet",
         action="store_true",
-        help="suppress live progress messages; final output is unchanged",
+        help="suppress terminal progress while still persisting the event stream",
     )
 
 
@@ -141,7 +228,7 @@ def _add_r2lab(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--keep-resources",
         action="store_true",
-        help="leave the exact run-owned gNB/radio/UE up after accepted workload",
+        help="leave the exact run-owned physical resources active after acceptance",
     )
     run.add_argument(
         "--r2lab-run-root",
@@ -185,10 +272,10 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         return
     run = root.add_parser(
         "run",
-        help="execute one complete SynthRAN lifecycle sequentially",
+        help="execute one complete SynthRAN run",
         description=(
-            "Create/reuse provider context, prepare resources, prove the network path, "
-            "run the deterministic workload, and persist acceptance evidence."
+            "Create or reuse provider context, prepare resources, prove the data path, "
+            "run the deterministic workload, persist evidence, and clean up exact owned resources."
         ),
     )
     _add_common(run)
@@ -203,7 +290,7 @@ def _require_owner(args: argparse.Namespace) -> str:
 
 
 def _provider(args: argparse.Namespace) -> tuple[str, str, bool, object]:
-    return _ensure_slices_provider_context(args)
+    return ensure_slices_provider_context(args)
 
 
 def _namespace_owner(
@@ -325,6 +412,7 @@ def _run_r2lab(
             deps_root=args.deps_root,
             run_root=run_root,
             timeout_seconds=min(args.timeout, 300),
+            progress=progress.child_stream,
         )
         resource_status = "prepared"
         progress.done("resources", "physical claim held")
@@ -334,7 +422,7 @@ def _run_r2lab(
     if evidence is None or (
         evidence.acceptance.outcome_for(PhysicalAcceptanceStage.OPEN5GS).value != "passed"
     ):
-        progress.start("foundation", "prove Kubernetes, Open5GS, n3network and ru-network")
+        progress.start("foundation", "prove Kubernetes, Open5GS and physical networks")
         previous = args.previous_run_id
         if previous is None:
             current_owner = _namespace_owner(
@@ -354,6 +442,7 @@ def _run_r2lab(
             lock_path=args.lock,
             dependency_root=args.deps_root,
             timeout_seconds=args.timeout,
+            progress=progress.child_stream,
         )
         foundation_status: Mapping[str, object] = foundation.to_dict()
         progress.done("foundation", "physical foundation ready")
@@ -431,6 +520,7 @@ def _run_r2lab(
             deps_root=args.deps_root,
             run_root=run_root,
             timeout_seconds=min(args.timeout, 300),
+            progress=progress.child_stream,
         )
         if not path.ready_for_workload:
             raise BackendError(f"physical path stopped at {path.failed_stage or path.next_stage}")
@@ -459,6 +549,7 @@ def _run_r2lab(
             collection_seconds=args.collection_seconds,
             minimum_per_sensor=args.minimum_per_sensor,
             timeout_seconds=min(args.timeout, 300),
+            progress=progress.child_stream,
         )
         if not workload.accepted:
             raise BackendError("physical deterministic workload was not accepted")
@@ -468,10 +559,10 @@ def _run_r2lab(
         workload_status = {"status": "resumed-accepted"}
         progress.resumed("workload", "accepted workload evidence present")
 
-    progress.start("acceptance", "verify complete physical lifecycle evidence")
+    progress.start("acceptance", "verify complete physical run evidence")
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if not evidence.acceptance.accepted:
-        raise BackendError("physical lifecycle did not reach acceptance")
+        raise BackendError("physical run did not reach acceptance")
     progress.done("acceptance", str(evidence_path))
 
     released = False
@@ -501,7 +592,7 @@ def _run_r2lab(
 
     assert controller.post5g_network is not None
     return {
-        "schema": "synthran/run/v1alpha1",
+        "schema": "synthran/run/v1alpha2",
         "run_id": args.run_id,
         "radio": "r2lab",
         "device": topology.radio,
@@ -526,6 +617,7 @@ def _run_r2lab(
         "released": released,
         "release": dict(release_status) if release_status is not None else None,
         "evidence_path": str(evidence_path),
+        "event_path": str(progress.event_path) if progress.event_path is not None else None,
     }
 
 
@@ -563,24 +655,25 @@ def _run_rfsim(
     prep_dir = preparation_root / args.run_id
     if not prep_dir.exists():
         progress.start("resources", "prepare RFSIM compute reservation and allocation")
-        rc = command_runtime._network_prepare(
-            argparse.Namespace(
-                lock=args.lock,
-                core_node=args.core_node,
-                ran_node=args.ran_node,
-                duration_minutes=args.duration_minutes,
-                run_id=args.run_id,
-                reservation_id=None,
-                dry_run=False,
-                json=False,
-                slices_project=project,
-                slices_experiment=experiment,
-                owner=owner,
-                deps_root=args.deps_root,
-                run_root=preparation_root,
-                timeout=args.timeout,
+        with redirect_stdout(progress.child_stream):
+            rc = command_runtime._network_prepare(
+                argparse.Namespace(
+                    lock=args.lock,
+                    core_node=args.core_node,
+                    ran_node=args.ran_node,
+                    duration_minutes=args.duration_minutes,
+                    run_id=args.run_id,
+                    reservation_id=None,
+                    dry_run=False,
+                    json=False,
+                    slices_project=project,
+                    slices_experiment=experiment,
+                    owner=owner,
+                    deps_root=args.deps_root,
+                    run_root=preparation_root,
+                    timeout=args.timeout,
+                )
             )
-        )
         if rc != 0:
             raise BackendError("RFSIM resource preparation failed")
         progress.done("resources", "reservation/allocation prepared")
@@ -596,21 +689,22 @@ def _run_rfsim(
     preflight = prep_dir / "live-preflight.json"
     if not preflight.is_file():
         progress.start("preflight", "verify live provider and compute authority")
-        rc = command_runtime._doctor(
-            argparse.Namespace(
-                inventory=inventory,
-                lock=args.lock,
-                deps_root=args.deps_root,
-                offline=False,
-                slices_project=project,
-                slices_experiment=experiment,
-                owner=owner,
-                reservation_id=reservation_id,
-                allocation_id=allocation_id,
-                evidence_out=preflight,
-                timeout=min(args.timeout, 300),
+        with redirect_stdout(progress.child_stream):
+            rc = command_runtime._doctor(
+                argparse.Namespace(
+                    inventory=inventory,
+                    lock=args.lock,
+                    deps_root=args.deps_root,
+                    offline=False,
+                    slices_project=project,
+                    slices_experiment=experiment,
+                    owner=owner,
+                    reservation_id=reservation_id,
+                    allocation_id=allocation_id,
+                    evidence_out=preflight,
+                    timeout=min(args.timeout, 300),
+                )
             )
-        )
         if rc != 0:
             raise BackendError("RFSIM live preflight failed")
         progress.done("preflight", "live authority verified")
@@ -620,25 +714,26 @@ def _run_rfsim(
     network_dir = args.network_run_root.expanduser().resolve() / args.run_id
     if not (network_dir / "manifest.json").is_file():
         progress.start("network", "deploy RFSIM 5G network")
-        rc = command_runtime._network_deploy(
-            argparse.Namespace(
-                inventory=inventory,
-                lock=args.lock,
-                deps_root=args.deps_root,
-                profile="default",
-                dry_run=False,
-                json=False,
-                slices_project=project,
-                slices_experiment=experiment,
-                owner=owner,
-                reservation_id=reservation_id,
-                allocation_id=allocation_id,
-                preflight_evidence=preflight,
-                run_id=args.run_id,
-                run_root=args.network_run_root,
-                timeout=args.timeout,
+        with redirect_stdout(progress.child_stream):
+            rc = command_runtime._network_deploy(
+                argparse.Namespace(
+                    inventory=inventory,
+                    lock=args.lock,
+                    deps_root=args.deps_root,
+                    profile="default",
+                    dry_run=False,
+                    json=False,
+                    slices_project=project,
+                    slices_experiment=experiment,
+                    owner=owner,
+                    reservation_id=reservation_id,
+                    allocation_id=allocation_id,
+                    preflight_evidence=preflight,
+                    run_id=args.run_id,
+                    run_root=args.network_run_root,
+                    timeout=args.timeout,
+                )
             )
-        )
         if rc != 0:
             raise BackendError("RFSIM network deployment failed")
         progress.done("network", "RFSIM network deployed")
@@ -648,18 +743,19 @@ def _run_rfsim(
     network_evidence = network_dir / "network-evidence.json"
     if not network_evidence.is_file():
         progress.start("path", "prove RFSIM network path")
-        rc = command_runtime._network_verify(
-            argparse.Namespace(
-                inventory=inventory,
-                lock=args.lock,
-                deps_root=args.deps_root,
-                slices_project=project,
-                slices_experiment=experiment,
-                run_id=args.run_id,
-                run_root=args.network_run_root,
-                timeout=min(args.timeout, 300),
+        with redirect_stdout(progress.child_stream):
+            rc = command_runtime._network_verify(
+                argparse.Namespace(
+                    inventory=inventory,
+                    lock=args.lock,
+                    deps_root=args.deps_root,
+                    slices_project=project,
+                    slices_experiment=experiment,
+                    run_id=args.run_id,
+                    run_root=args.network_run_root,
+                    timeout=min(args.timeout, 300),
+                )
             )
-        )
         if rc != 0:
             raise BackendError("RFSIM network path was not proven")
         progress.done("path", "network path accepted")
@@ -670,19 +766,20 @@ def _run_rfsim(
     experiment_evidence = experiment_dir / "experiment-evidence.json"
     if not experiment_evidence.is_file():
         progress.start("workload", "run deterministic experiment and collect data")
-        rc = command_runtime._experiment_run(
-            argparse.Namespace(
-                inventory=inventory,
-                lock=args.lock,
-                deps_root=args.deps_root,
-                network_run_id=args.run_id,
-                run_id=args.run_id,
-                network_run_root=args.network_run_root,
-                run_root=args.experiment_root,
-                collection_seconds=args.collection_seconds,
-                minimum_per_sensor=args.minimum_per_sensor,
+        with redirect_stdout(progress.child_stream):
+            rc = command_runtime._experiment_run(
+                argparse.Namespace(
+                    inventory=inventory,
+                    lock=args.lock,
+                    deps_root=args.deps_root,
+                    network_run_id=args.run_id,
+                    run_id=args.run_id,
+                    network_run_root=args.network_run_root,
+                    run_root=args.experiment_root,
+                    collection_seconds=args.collection_seconds,
+                    minimum_per_sensor=args.minimum_per_sensor,
+                )
             )
-        )
         if rc != 0:
             raise BackendError("RFSIM deterministic workload was not accepted")
         progress.done("workload", "deterministic workload completed")
@@ -701,7 +798,7 @@ def _run_rfsim(
 
     assert controller.post5g_network is not None
     return {
-        "schema": "synthran/run/v1alpha1",
+        "schema": "synthran/run/v1alpha2",
         "run_id": args.run_id,
         "radio": "rfsim",
         "topology": {"core_node": args.core_node, "ran_node": args.ran_node},
@@ -713,19 +810,24 @@ def _run_rfsim(
         },
         "accepted": True,
         "evidence_path": str(experiment_evidence),
+        "event_path": str(progress.event_path) if progress.event_path is not None else None,
     }
 
 
 class RunCommandAdapter:
-    """Backend-selecting adapter for the single sequential run command."""
+    """Dispatch the backend selected by ``--radio``."""
 
     def configure_parser(self, parser: argparse.ArgumentParser) -> None:
         configure_run_parser(parser)
 
     def dispatch(self, args: argparse.Namespace) -> int:
         if args.command != "run":
-            raise BackendError("unsupported unified run command")
-        progress = _RunProgress(enabled=not args.quiet)
+            raise BackendError("unsupported run command")
+        progress = _RunProgress(
+            enabled=not args.quiet,
+            run_id=args.run_id,
+            radio=args.radio,
+        )
         try:
             validate_run_id(args.run_id)
             if args.core_node == args.ran_node:
@@ -740,6 +842,8 @@ class RunCommandAdapter:
             else:
                 print(f"SynthRAN run accepted: {payload['run_id']} ({payload['radio']})")
                 print(f"Evidence: {payload['evidence_path']}")
+                if payload.get("event_path"):
+                    print(f"Events: {payload['event_path']}")
                 if payload.get("released") is True:
                     print("Physical resources: released")
             return 0
@@ -768,3 +872,5 @@ class RunCommandAdapter:
         ) as exc:
             progress.fail(str(exc))
             raise BackendError(str(exc)) from exc
+        finally:
+            progress.close()

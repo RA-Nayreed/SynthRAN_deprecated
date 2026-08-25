@@ -7,6 +7,7 @@ import unittest
 from synthran.cli import _parser
 from synthran.dependencies import load_lock
 from synthran.slices_controller import (
+    DEFAULT_CONTROLLER_TIMEOUT_SECONDS,
     ControllerCommandResult,
     SlicesControllerError,
     verify_slices_controller,
@@ -107,16 +108,21 @@ class SlicesControllerTests(unittest.TestCase):
             ("post5g", "experiment", "prefix", "experiment-test"),
             runner.calls,
         )
-        self.assertEqual({60}, set(runner.timeouts))
+        self.assertEqual({DEFAULT_CONTROLLER_TIMEOUT_SECONDS}, set(runner.timeouts))
 
-    def test_cli_uses_controller_timeout_default(self) -> None:
+    def test_unified_doctor_uses_controller_timeout_default(self) -> None:
         args = _parser().parse_args(
             [
-                "slices", "doctor", "--slices-project", "project-test",
-                "--slices-experiment", "experiment-test",
+                "doctor",
+                "--radio",
+                "rfsim",
+                "--slices-project",
+                "project-test",
+                "--slices-experiment",
+                "experiment-test",
             ]
         )
-        self.assertEqual(60, args.timeout)
+        self.assertEqual(DEFAULT_CONTROLLER_TIMEOUT_SECONDS, args.timeout)
 
     def test_rejects_non_linux_controller(self) -> None:
         with self.assertRaisesRegex(SlicesControllerError, "Linux"):

@@ -1,73 +1,150 @@
-# Security, Privacy and Artifact Handling
+# Security and privacy
 
-## Repository boundary
+SynthRAN performs live provider and radio mutations, so safety depends on exact authority, strict transport identity, bounded cleanup, and disciplined evidence handling.
+
+## Authority model
+
+Current live state authorizes current mutation. The trust order is:
+
+```text
+current provider state
+> current direct runtime observation
+> persisted evidence
+> manifests
+> cached information
+```
+
+Historical evidence is useful for audit and resume decisions, but it never substitutes for a current lease, allocation, resource state, pod, registration, route, or PDU observation.
+
+Unknown, stale, foreign, expired, malformed, or ambiguous ownership fails closed.
+
+## Exact resource ownership
+
+A run may mutate or clean up only resources it can prove are selected and owned by that run.
+
+Prohibited shortcuts include:
+
+- wildcard Kubernetes deletion;
+- global radio/UE power-off;
+- guessed reservation/allocation identifiers;
+- broad `pkill`/`killall` cleanup;
+- adopting a provider resource based only on a convenient name;
+- disabling authority checks because a previous run succeeded.
+
+Physical cleanup releases a claim only after exact off/clean state is proven.
+
+## SSH and host identity
+
+Live control uses public-key SSH with strict host-key verification. R2Lab/SLICES physical operations require an explicit known-hosts file. Do not use `StrictHostKeyChecking=no` as a recovery shortcut.
+
+Private SSH keys and known-host authority files are local runtime material and must not be committed.
+
+## Provider credentials
 
 Never commit:
 
-- generated inventories or subscriber profiles;
-- IMSIs, authentication keys, OPC values, or subscriber credentials;
-- SLICES credentials, reservation tokens, kubeconfigs, or private keys;
-- `.env` files containing secrets;
-- unsanitized packet captures or testbed logs;
-- dependency worktrees, run directories, or firmware build output.
+- SLICES/provider tokens;
+- object-store credentials;
+- private SSH keys;
+- kubeconfigs containing credentials;
+- private authority/environment files;
+- subscriber authentication material;
+- private modem/subscriber identifiers when they are not required in public evidence.
 
-Ignore rules reduce accidental staging but are not a security boundary by themselves.
+Authentication is performed through the reviewed provider tools. SynthRAN does not store provider passwords.
 
-## Layered publication protection
+## Subscriber and modem data
 
-SynthRAN uses complementary controls:
+Physical UE work may expose subscriber identifiers or modem output. Public evidence should retain only the minimum sanitized state required to prove the boundary: selected UE, mode, interface state, registration/PDU outcome, route/probe result, dependency provenance, and hashes where appropriate.
 
-1. tracked ignore rules for known local and generated paths;
-2. a local pre-push hook that scans every outgoing commit;
-3. GitHub push protection for supported provider credentials;
-4. a read-only CI workflow whose source and Gitleaks scans still run when unrelated unit tests fail;
-5. explicit sanitization for generated public text.
+Raw secret-bearing modem output is not a public evidence format.
 
-Scanners report a rule and location, not the detected value. Source findings block publication rather than silently rewriting code.
+## Ansible output
 
-## Manual scanning
+All long Ansible operations use the shared sanitized streamer. Routine task chatter is suppressed and only reviewed task labels/failures/heartbeats are emitted to the public run stream.
 
-With `synthran` activated:
+The complete upstream command result may be used internally to determine success or to write an already-sanitized run log, but it must not bypass privacy filtering simply because it came from Ansible.
 
-```sh
-python -m synthran privacy scan --worktree
-python -m synthran privacy scan --history
+## Unified event stream
+
+Every run writes:
+
+```text
+.synthran/events/<run-id>.jsonl
 ```
 
-## Generated text redaction
+The event stream is intended to be safe enough for normal diagnostics, but it still belongs to generated run state rather than Git. New progress messages must avoid local credentials, secret values, private keys, and unnecessary raw provider payloads.
 
-Write a separate sanitized derivative:
+## Research evidence
 
-```sh
-python -m synthran privacy redact \
-  input.txt sanitized.txt --dry-run
-python -m synthran privacy redact \
-  input.txt sanitized.txt
+Prefer the least sensitive evidence that proves the required scientific boundary:
+
+- route/interface proof;
+- byte/drop counters;
+- broker receipt;
+- sequence continuity;
+- bounded RTT/load records;
+- artifact hashes.
+
+Packet capture is not the default evidence mechanism when counters or application-level proof are sufficient. If a capture is required, treat it as private raw evidence unless it has been explicitly reviewed and sanitized.
+
+## Repository privacy controls
+
+Run the worktree scanner with:
+
+```zsh
+synthran dev privacy scan --worktree
 ```
 
-The redactor replaces local user homes, usernames, network-share prefixes, and private IP addresses with stable placeholders. It never rewrites the input in place.
+The repository also includes pre-push/CI privacy protection. Activate tracked hooks with:
 
-Do not use text redaction for packet captures, kubeconfigs, private keys, databases, or binary credential stores. Keep raw artifacts local and create purpose-built sanitized evidence.
+```zsh
+synthran dev hooks install
+```
 
-## Experiment artifacts
+The scanner checks for classes including private keys, provider tokens, kubeconfig secret material, subscriber secrets/identifiers, local home paths, private network context, and credential-like assignments.
 
-Run manifests retain dependency and overlay hashes, image digests, inventory hashes, node roles, selected non-secret route facts, timestamps, and validation results. Sensitive raw evidence remains untracked by default. Cleanup may target only resources proven to carry the requested run ID.
+False positives should be corrected narrowly. Do not weaken a whole rule just to allow one generated file into Git.
 
-## Privileged Boundary and SSH Tunnel Isolation
+## Generated state
 
-The controller host runs unprivileged without requiring `sudo`. Privileged TUN network setup (`tunslip6` and `tun0` at `fd00::1/64`) and TCP ingress run exclusively on the root core node (`inventory.core_node`).
+The following belong in ignored/private runtime storage rather than source control:
 
-To ensure strict network isolation:
-1. The reverse SSH tunnel connecting Cooja's serial socket on the controller to the core node explicitly binds to loopback (`-R 127.0.0.1:60001:127.0.0.1:60001`). Remote ports are never exposed to public or wildcard interfaces (`0.0.0.0` or `[::]`), and `GatewayPorts=yes` is never required or enabled.
-2. All SSH commands employ strict host-key checking against the run's verified known hosts file (`StrictHostKeyChecking=yes`).
-3. An early read-only SSH forwarding capability probe inspects effective sshd configuration (`sshd -T`) and requires `allowtcpforwarding` to permit both local and remote forwarding (`yes` or `all`), failing closed otherwise.
-4. Remote core node prerequisites fail closed if `tun0` exists prior to the run, preventing unauthorized adoption, mutation, or deletion of existing host interfaces.
-5. Experiment cleanup removes only the run-created/partially-created `tun0` interface and the isolated run workspace `/tmp/synthran/<run-id>/`, verifying postconditions that both are absent afterward. Cleanup failures fail closed and prevent experiment acceptance.
+```text
+.deps/
+.synthran/runs/
+.synthran/preparations/
+.synthran/experiments/
+.synthran/experiments-r2lab/
+.synthran/r2lab/
+.synthran/events/
+private authority files
+private captures/logs
+```
 
-## Controlled Research Isolation and Safety
+Public documentation should use placeholders or already-sanitized values when examples require addresses or identities.
 
-Controlled research experiments enforce additional runtime isolation boundaries:
+## Dependency integrity
 
-1. **Owned iperf3 Server Isolation:** Background load servers run with an isolated workspace `/tmp/synthran-research/<run-id>/` and exact pidfile (`iperf3-<port>.pid`) in single-connection mode (`-1`). Startup automatically reclaims only provably orphaned (PPID 1) matching processes. Stop explicitly terminates the local wrapper, reaps the remote process, removes the pidfile, and verifies absence of the workspace directory.
-2. **Temporary Research Route Safety:** When background load or RTT probing targets a core IP outside the default subnet, the runtime inspects the routing table. If already resolving via `tun_srsue1`, it is reused without claiming ownership. Otherwise, an exact `/32` route is added (`ip route add`). Upon cleanup, only the SynthRAN-created route is removed, and restoration of the prior routing table state is verified. Conflicting routing state fails closed.
-3. **Artifact Integrity and Auditability:** Research artifacts (`telemetry.jsonl`, `probe.jsonl`, `network-samples.jsonl`, `load.jsonl`, `measurement-window.json`, `experiment-spec.json`) are hashed via SHA-256 and recorded in `research-summary.json` (`synthran/research-summary/v1alpha1`). Rejection logs and probe records exclude private packet payloads and retain only sequence, latency, and throughput facts.
+Upstream repositories and runtime images are pinned through `dependencies.lock.yml`. Live code should verify the expected commit/image/profile before applying run-local overlays or mutations.
+
+An unexpected upstream tree is an integrity failure; do not silently adapt a live deployment to whatever happens to be checked out.
+
+## Preservation
+
+Raw campaign/run bundles belong in durable research/object storage with explicit hashes and access controls. Public Git should contain only reviewed summaries, schemas, code, tests, and intentionally tracked analysis derivatives.
+
+Checksum manifests must exclude themselves.
+
+## Incident handling
+
+If a live command fails and exact rollback cannot be proven:
+
+1. preserve the existing evidence;
+2. avoid broad cleanup;
+3. inspect current provider/runtime state;
+4. use `synthran inspect` and `synthran logs` for run evidence;
+5. use `synthran stop` only when exact run authority can be supplied/proven;
+6. escalate to provider-native read-only inspection when authority remains ambiguous.
+
+Do not erase evidence simply to make a later retry appear clean.

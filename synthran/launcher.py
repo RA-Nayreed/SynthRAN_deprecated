@@ -7,13 +7,13 @@ from typing import Sequence
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the scriptable SynthRAN command interface."""
+    """Run the installed SynthRAN command interface."""
 
     arguments = list(sys.argv[1:] if argv is None else argv)
 
     from synthran.cli import main as cli_main
 
-    if arguments[:3] == ["experiment", "research", "campaign-run"]:
+    if arguments[:2] == ["research", "campaign-run"]:
         from synthran.research.campaign_runtime import campaign_runtime_session
 
         session = campaign_runtime_session(arguments)

@@ -39,7 +39,7 @@ class FoundationTests(unittest.TestCase):
         source_scan = (
             "      - name: Scan tracked source for private context\n"
             "        run: conda run --no-capture-output -n synthran "
-            "synthran privacy scan --worktree\n"
+            "synthran dev privacy scan --worktree\n"
             "        if: ${{ !cancelled() }}\n"
         )
         history_scan = (
@@ -97,6 +97,7 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("SYNTHRAN_CONDA_EXE", hook)
         self.assertIn("SYNTHRAN_CONDA_ENV", hook)
         self.assertIn("command -v conda", hook)
+        self.assertIn("synthran dev privacy scan --outgoing", hook)
         self.assertNotIn("conda.exe", hook)
         self.assertNotIn("SYNTHRAN_PYTHON", hook)
         self.assertNotIn("command -v python", hook)
@@ -112,13 +113,24 @@ class FoundationTests(unittest.TestCase):
 
     def test_readme_is_a_project_landing_page_with_focused_docs(self) -> None:
         readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("Why SynthRAN exists", readme)
-        self.assertIn("```mermaid", readme)
-        self.assertIn("Current status", readme)
-        self.assertIn("Planned experiment output", readme)
+        for heading in (
+            "One command surface",
+            "Virtual run",
+            "Physical R2Lab run",
+            "Live progress and logs",
+            "Research",
+            "Documentation",
+            "Capability boundary",
+        ):
+            self.assertIn(heading, readme)
+        self.assertIn("synthran run --radio rfsim", readme)
+        self.assertIn("synthran run --radio r2lab", readme)
         for name in (
             "architecture.md",
+            "backend-contract.md",
             "experiment.md",
+            "r2lab-integration.md",
+            "results.md",
             "operator-guide.md",
             "development.md",
             "dependencies.md",
@@ -150,7 +162,6 @@ class FoundationTests(unittest.TestCase):
                 relative = path.relative_to(REPOSITORY_ROOT).as_posix()
                 self.assertNotIn(forbidden, relative.lower(), relative)
                 if path.suffix.lower() in text_suffixes or path.name in {
-                    "AGENTS.md",
                     "LICENSE",
                     "README.md",
                     "THIRD_PARTY.md",
@@ -173,9 +184,13 @@ class FoundationTests(unittest.TestCase):
         for path in paths:
             content = path.read_text(encoding="utf-8")
             self.assertNotIn("conda run", content, str(path))
-        self.assertIn("conda activate synthran", paths[0].read_text(encoding="utf-8"))
-        self.assertIn("conda activate synthran", paths[2].read_text(encoding="utf-8"))
-        self.assertIn("conda activate synthran", paths[3].read_text(encoding="utf-8"))
+        for path in (paths[0], paths[2], paths[4]):
+            self.assertIn("conda activate synthran", path.read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "conda activate synthran",
+            paths[3].read_text(encoding="utf-8"),
+            "the scientific protocol should not repeat environment setup",
+        )
 
     def test_open5gs_runtime_image_matches_configuration_schema(self) -> None:
         lock = json.loads(
