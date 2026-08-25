@@ -1,67 +1,195 @@
-# R2Lab integration
+# R2Lab physical backend
 
-R2Lab is SynthRAN's physical-radio backend. It is not a separate product interface: physical operations use the same installed `synthran` command as the accepted RFSIM path, with additional lease, radio, modem, and hardware-safety boundaries.
+R2Lab is SynthRAN’s physical-radio backend. It is selected through `synthran run --radio r2lab`; there is no separate R2Lab command family.
 
-The virtual Open5GS, srsRAN, srsUE, and RFSIM path remains the accepted reference implementation. Physical acceptance is progressive and evidence-gated; a proven resource, gNB, or N2 stage does not imply that UE registration, PDU, user plane, workload, or cleanup is accepted.
+## Supported physical topology
 
-## Current physical boundary
-
-Historical R2Lab runs established exact-resource authority, the SLICES/POS and Kubernetes foundation, Open5GS, N300-backed gNB operation, N2/SCTP, qfit provisioning, UHD/IQ transport, and exact cleanup. Current live work has also observed NR5G-SA registration and an IPv4 PDU address on qfit. Those observations do not replace one immutable end-to-end acceptance record.
-
-The physical gNB consumes the exact N300 values selected by the pinned R2Lab adapter:
-
-| Setting | Value |
-| --- | ---: |
-| Band | 78 |
-| Adapter commit | `a0149fc0dde39e2872945a0f3c91e804ece52d4f` |
-| Chart commit | `8dfb9890d127734cdcd6eee9df8c5d09b1a8076a` |
-| Values source | `charts/srsran-gnb/values-n300-n78-20MHz.yaml` |
-| DL ARFCN | 640000 |
-| SCS | 30 kHz |
-| Channel bandwidth | 20 MHz |
-| Sample rate | 61.44 MHz |
-| TX/RX gain | 35/60 dB |
-| PDCCH | SS0 0, CORESET0 12 |
-| PRACH index | 1 |
-
-The source file is copied, hashed, rendered, transferred, and verified without radio-field overlays. A rendered value that differs from the pinned source is rejected before cluster mutation.
-
-## Physical package
-
-The physical implementation is contained in `synthran/r2lab/`:
+The current executable radio profiles are:
 
 ```text
-controller.py   resource authority, provider commands, prepare and release
-provider.py     provider-state parsing and verified transitions
-radio.py        sanitized modem and user-plane state
-runtime.py      read-only physical observation
-deployment.py   physical chart, staging, start, and render validation
-gnb.py          stopped staging and gNB/N2 acceptance
-n2.py           N2 evidence parsing
-readiness.py    FIT/qfit readiness
-ue.py           modem activation, rollback, user-plane proof, workload handoff
-acceptance.py   ordered immutable physical evidence
-guards.py       physical mutation preconditions
-handoff.py      exact namespace ownership handoff
-foundation.py   SLICES, Kubernetes, and Open5GS reconciliation/proof
+n300
+n320
 ```
 
-There is no second user-facing R2Lab executable and no duplicate R2Lab surface under `synthran.network`.
+The current executable UEs are FR1 Quectel qfit/qhat profiles exposed by `synthran inspect --radio r2lab`.
 
-## Safety rules
+Compute nodes come from the same reviewed SLICES node catalogue used by the virtual backend. Core and RAN nodes must differ. Hardware profiles that exist in R2Lab but do not satisfy the pinned SynthRAN path remain visible in capabilities with `executable=false` and a reason.
 
-- Exact provider observation is state truth; return codes are diagnostic.
-- Every mutation is bound to the active run, current authority, and selected resources.
-- Broad cleanup, guessed identifiers, and global radio or UE cleanup are prohibited.
-- A claim is removed only after every selected resource is proven clean.
-- The N300 is a singleton owner: zero matching gNB pods must be proven before release or reconfiguration, and exactly one ready pod must be proven at start.
-- Physical staging is immutable, digest-bound, and stopped at zero replicas.
-- FIT image loading is scoped to the selected physical UE and a freshly verified lease.
-- Raw modem output and subscriber identifiers are not persisted.
+## Required authority
 
-## Acceptance order
+A physical run requires all of the following before mutation:
 
-Mutation order may differ from evidence order, but accepted physical evidence advances only through the following sequence:
+- an existing accessible SLICES project;
+- an authenticated SLICES CLI session;
+- an active R2Lab lease;
+- the exact R2Lab slice identity;
+- strict public-key access to Faraday;
+- a strict known-hosts file for selected SLICES compute nodes;
+- exact selected radio and UE resources;
+- current selected-node allocation authority.
+
+No historical run record substitutes for those current checks.
+
+## Read-only check
+
+```zsh
+synthran doctor \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --slice "$SYNTHRAN_R2LAB_SLICE"
+```
+
+The doctor verifies only selection, Faraday access, and the active lease. The complete run performs deeper authority checks before each relevant mutation.
+
+## Physical run
+
+```zsh
+synthran run \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --run-id "$RUN_ID" \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --owner "$SYNTHRAN_OWNER" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
+```
+
+The public command composes every physical boundary internally.
+
+## Resource authority
+
+The selected radio and UE are bound to the immutable run ID. Preparation:
+
+1. proves the active R2Lab lease;
+2. creates the exact run claim;
+3. powers only the selected radio when required;
+4. prepares only the selected UE management path;
+5. rechecks the lease before accepting the resource boundary.
+
+For qhat setup, SynthRAN delegates to the pinned `5g_ansible` R2Lab UE setup role. qfit management is prepared through its reviewed provider image/management boundary and later connection mechanics are delegated to the pinned connect role.
+
+Broad power operations are prohibited.
+
+## SLICES and Open5GS foundation
+
+The run verifies the selected compute nodes, current allocation, Kubernetes state, required physical network attachments, and Open5GS ownership.
+
+When an exact prior run owns recoverable Open5GS state, the run may perform a bounded ownership handoff. The prior run ID must be observed or supplied exactly; foreign/ambiguous state is not adopted.
+
+Open5GS reconciliation uses the reviewed SynthRAN Ansible wrapper and shared sanitized Ansible streamer.
+
+## N3xx gNB
+
+The physical gNB uses pinned srsRAN Helm source and reviewed N3xx values. For the accepted N300 profile, the radio settings include band 78, 30 kHz SCS, and the pinned 20 MHz profile from the locked `srsran_helm` checkout.
+
+The staging boundary:
+
+- loads the selected hardware profile from the locked dependency;
+- renders locally;
+- validates the selected node, image identity, N3/RU attachments, and zero replicas;
+- packages and hashes the chart inputs/render;
+- transfers the exact artifacts to the selected core node;
+- rechecks hashes remotely;
+- verifies current authority again;
+- applies the gNB at zero replicas;
+- binds run/artifact identity to the deployment.
+
+A physical radio is then started only after zero matching gNB pods are proven. The start boundary requires exactly one ready run-owned gNB and stable current N2 evidence.
+
+## UE activation
+
+UE setup/connect/stop mechanics use the pinned `fiveg_ansible` roles rather than custom duplicate modem scripts.
+
+All role execution uses the same `run_streaming_ansible_command` implementation as virtual deployment and physical Open5GS work. This gives both backends the same sanitized task output, failure rendering, and heartbeats.
+
+After connect, SynthRAN independently observes functional postconditions. For the current Quectel path this includes:
+
+```text
+management access
+-> selected data interface
+-> packet-service/runtime state
+-> IPv4 PDU state
+-> route-bound UPF reachability
+```
+
+Successful functional evidence advances the physical acceptance record through cell acquisition, registration, and PDU boundaries. If the expected postconditions are not proven, the selected UE receives bounded run-scoped stop/recovery rather than a broad host cleanup.
+
+## User-plane proof
+
+The physical user-plane boundary requires traffic through the selected UE data interface, normally `wwan0`, to the current measurement peer. Generic host reachability does not satisfy this boundary.
+
+Before proof, SynthRAN refreshes:
+
+- active lease;
+- exact resource claim;
+- selected radio state;
+- UE management availability;
+- selected compute allocation;
+- current gNB/N2 evidence.
+
+## Deterministic workload
+
+Once the physical user plane is accepted, SynthRAN runs the same deterministic ten-sensor IoT workload used by the virtual reference path. Backend-specific radio/modem identifiers do not change the scientific telemetry contract.
+
+Physical workload results are written under the physical experiment root and are linked back to the physical acceptance record.
+
+## Cleanup
+
+Unless `--keep-resources` is explicitly requested, an accepted physical run performs reverse cleanup:
+
+```text
+workload cleanup
+-> stop run-owned gNB
+-> selected UE cleanup
+-> selected radio cleanup
+-> prove exact off/clean state
+-> release the run claim
+```
+
+If cleanup cannot prove exact ownership/state, the run fails closed instead of expanding the target set.
+
+An interrupted or retained run can be cleaned with:
+
+```zsh
+synthran stop \
+  --run-id "$RUN_ID" \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --owner "$SYNTHRAN_OWNER" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+```
+
+## Logs and evidence
+
+The physical backend writes the same public run event stream as RFSIM:
+
+```text
+.synthran/events/<run-id>.jsonl
+```
+
+Use:
+
+```zsh
+synthran logs --run-id "$RUN_ID" --follow
+synthran inspect --run-id "$RUN_ID"
+```
+
+Detailed physical acceptance is stored in:
+
+```text
+.synthran/r2lab/<run-id>/physical-run.json
+```
+
+with additional sanitized physical artifacts below the run directory.
+
+## Evidence order
+
+Physical acceptance is conservative and ordered:
 
 ```text
 resource authority
@@ -77,119 +205,21 @@ resource authority
 -> workload
 ```
 
-A failed stage blocks every later stage. User-plane and workload acceptance refresh current authority and reprove the physical path rather than trusting stale evidence.
+A failed boundary blocks later acceptance. Resume is allowed only after current authority is refreshed and persisted topology/evidence match the requested run.
 
-## Resource preparation
+## Research boundary
 
-The R2Lab resource controller binds one selected radio and one selected UE to a run. Preparation reuses the active lease, verifies current provider state, mutates only exact selected resources, and records sanitized evidence.
+The physical backend now reaches the deterministic workload boundary. The currently published controlled-load campaign implementation remains validated on RFSIM. Physical campaign parity requires a separately reviewed external-peer/load path, measurement timing contract, and accepted physical campaign evidence before it can be claimed.
 
-Preview the resource plan:
+## Safety invariants
 
-```bash
-synthran r2lab plan \
-  --radio n300 \
-  --ue qfit07 \
-  --run-id "$R2LAB_RUN"
-```
-
-Run the read-only environment doctor before physical mutation:
-
-```bash
-synthran r2lab doctor \
-  --radio n300 \
-  --ue qfit07 \
-  --run-id "$R2LAB_RUN"
-```
-
-Preparation and release remain exact-resource operations. Use the selected slice, identity, and known-hosts inputs required by the active environment; never substitute a broad power or cleanup command.
-
-## Foundation acceptance
-
-After the selected radio and UE are prepared, foundation acceptance verifies both authority domains, both selected Kubernetes nodes, a stopped physical gNB, and Open5GS namespace ownership. Unknown, malformed, split, expired, or foreign ownership fails before mutation.
-
-```bash
-synthran r2lab foundation \
-  --slice "$SYNTHRAN_R2LAB_SLICE" \
-  --run-id "$R2LAB_RUN" \
-  --previous-run-id "$PREVIOUS_R2LAB_RUN" \
-  --owner "$SYNTHRAN_OWNER" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
-```
-
-The namespace handoff can recover only exact unowned legacy state that satisfies its bounded safety checks. Open5GS reconciliation uses pinned source and image identities and is limited to the selected core functions. It does not execute radio, UE, POS, or reservation roles.
-
-Success writes `physical-run.json` beside the R2Lab run manifest and advances the immutable acceptance record through Open5GS.
-
-## Stopped gNB staging
-
-Synchronize only the physical configuration dependencies when unrelated managed checkouts must remain untouched:
-
-```bash
-synthran deps sync \
-  --name fiveg_ansible \
-  --name srsran_helm
-```
-
-The staging boundary reuses current physical network bindings, renders the pinned chart in an isolated workspace, validates the locked Helm artifact and source values, and stages the exact Deployment at zero replicas.
-
-```bash
-synthran r2lab gnb-stage \
-  --slice "$SYNTHRAN_R2LAB_SLICE" \
-  --run-id "$R2LAB_RUN" \
-  --owner "$SYNTHRAN_OWNER" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
-  --json
-```
-
-Success binds package, values, and render digests into the physical evidence before any singleton start.
-
-## gNB and N2 acceptance
-
-The start boundary refreshes current authority, proves zero existing gNB pods, starts exactly one ready pod, and requires a current N2 association. Initial convergence and consecutive stability use separate bounded poll budgets.
-
-```bash
-synthran r2lab gnb-start \
-  --slice "$SYNTHRAN_R2LAB_SLICE" \
-  --run-id "$R2LAB_RUN" \
-  --owner "$SYNTHRAN_OWNER" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
-  --json
-```
-
-AMF fallback evidence is accepted only while the current run-owned gNB pod is ready and within the current pod lifetime. Failure diagnostics are sanitized before persistence, and unsuccessful acceptance requests exact scale-to-zero recovery.
-
-## UE and user plane
-
-The physical UE path separates management readiness from software-radio state, packet attachment, PDU configuration, and user-plane proof. For qfit, the expected progression is:
-
-```text
-current authority and gNB/N2 proof
--> physical UE management proof
--> sanitized current modem observation
--> software radio on
--> packet attach request
--> MBIM connection and IPv4 configuration
--> current registration and PDU observation
--> route-bound user-plane proof
-```
-
-The accepted physical data path must prove traffic through the selected data interface, normally `wwan0` for qfit, rather than accepting generic host reachability.
-
-## Workload parity
-
-The physical backend is complete only when the canonical deterministic IoT workload crosses the accepted physical user plane and produces the same experiment-level evidence semantics as RFSIM. Backend-specific interface names and hardware identifiers must not leak into the scientific data contract.
-
-## Completion criteria
-
-One immutable authorized physical run must prove:
-
-1. exact current resource authority and selected N300/qfit ownership;
-2. pinned foundation and Open5GS state;
-3. singleton gNB and stable current N2;
-4. UE readiness, cell acquisition, registration, and PDU state;
-5. bounded route-specific physical user-plane traffic;
-6. the deterministic IoT workload through the physical handoff;
-7. canonical experiment data and provenance;
-8. exact reverse-order cleanup for every selected resource.
-
-Current accepted evidence and measured limitations belong in `docs/results.md`. Focused implementation contracts are documented in `docs/r2lab-code-architecture.md`, `docs/r2lab-physical-adapter.md`, `docs/r2lab-runtime-verification.md`, and `docs/r2lab-ue-activation.md`.
+- exact current observation authorizes mutation;
+- run evidence does not become current authority;
+- one selected hardware topology belongs to one immutable run ID;
+- no global radio/UE power-off;
+- no wildcard Kubernetes cleanup;
+- no guessed prior-run or allocation identity;
+- one run-owned physical gNB for the selected radio;
+- UE modem mechanics stay in pinned upstream roles;
+- functional postconditions are independently verified by SynthRAN;
+- cleanup releases a claim only after exact off/clean state is proven.
