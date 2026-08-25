@@ -321,6 +321,8 @@ def _run_r2lab(
             run_id=args.run_id,
             slice_name=slice_name,
             topology=topology,
+            lock_path=args.lock,
+            deps_root=args.deps_root,
             run_root=run_root,
             timeout_seconds=min(args.timeout, 300),
         )
@@ -405,8 +407,19 @@ def _run_r2lab(
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     peer = SUPPORTED_NODES[topology.ran_node].ip
-    if evidence.acceptance.next_stage not in {PhysicalAcceptanceStage.WORKLOAD, None}:
-        progress.start("UE path", f"cell → registration → PDU → user plane via {peer}")
+    retryable_ue_failure = evidence.acceptance.failed_stage in {
+        PhysicalAcceptanceStage.CELL_ACQUISITION,
+        PhysicalAcceptanceStage.REGISTRATION,
+        PhysicalAcceptanceStage.PDU_SESSION,
+    }
+    if (
+        evidence.acceptance.next_stage not in {PhysicalAcceptanceStage.WORKLOAD, None}
+        or retryable_ue_failure
+    ):
+        detail = f"cell → registration → PDU → user plane via {peer}"
+        if retryable_ue_failure:
+            detail = f"retry transport-derived UE proof; {detail}"
+        progress.start("UE path", detail)
         path = continue_physical_path(
             run_id=args.run_id,
             slice_name=slice_name,
@@ -414,6 +427,8 @@ def _run_r2lab(
             allocation_id=allocation_id,
             known_hosts=known_hosts,
             peer=peer,
+            lock_path=args.lock,
+            deps_root=args.deps_root,
             run_root=run_root,
             timeout_seconds=min(args.timeout, 300),
         )
