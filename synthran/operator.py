@@ -6,11 +6,10 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shutil
 import sys
 import tempfile
 import time
-from typing import Iterable, Sequence
+from typing import Iterable
 
 from synthran import command_runtime
 from synthran.backends.base import BackendError
@@ -23,10 +22,7 @@ from synthran.r2lab.acceptance import PhysicalRunEvidence
 from synthran.r2lab.controller import gateway_command, subprocess_runner as r2lab_runner
 from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology, capabilities
 from synthran.r2lab.n3xx import stop_n3xx_gnb
-from synthran.r2lab.resources import (
-    load_topology,
-    release_physical_resources,
-)
+from synthran.r2lab.resources import load_topology, release_physical_resources
 from synthran.slices_controller import SlicesControllerError, verify_slices_controller
 
 
@@ -330,7 +326,6 @@ def stop_command(args: argparse.Namespace) -> int:
     run_root = Path(".synthran/r2lab")
     run_directory = run_root / args.run_id
     if not run_directory.exists():
-        # RFSIM has no persistent radio/UE claim; workload cleanup is run-scoped.
         payload = {
             "schema": "synthran/stop/v1",
             "run_id": args.run_id,
@@ -400,11 +395,12 @@ def dispatch(args: argparse.Namespace) -> int:
             if args.privacy_command == "scan":
                 return command_runtime._privacy_scan(args)
             if args.privacy_command == "redact":
-                if args.dry_run:
-                    print(f"[dry-run] redact {args.source} -> {args.destination}")
-                    return 0
-                redact_file(args.source, args.destination)
-                print(f"sanitized file: {args.destination}")
+                redact_file(
+                    args.source,
+                    args.destination,
+                    dry_run=args.dry_run,
+                    output=sys.stdout,
+                )
                 return 0
         if args.command == "dev" and args.dev_command == "hooks" and args.hooks_command == "install":
             return command_runtime._hooks_install(args)
