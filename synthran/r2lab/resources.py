@@ -119,8 +119,17 @@ def ue_host(profile: UeProfile) -> str:
 
 
 def _nested_ssh(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str, ...]:
+    import shlex
+
     if not remote:
         raise R2LabTopologyResourceError("UE command requires an explicit remote argv")
+
+    # OpenSSH does not preserve argv boundaries for a remote command: it joins
+    # all post-host arguments into shell text.  The R2Lab path has two SSH
+    # hops (operator -> Faraday -> UE), so the UE argv must be shell-quoted
+    # before it becomes the single remote-command argument of the second hop.
+    remote_command = shlex.join(remote)
+
     return (
         "ssh",
         "-o",
@@ -135,7 +144,7 @@ def _nested_ssh(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str,
         "GlobalKnownHostsFile=/dev/null",
         "--",
         f"root@{ue_host(profile)}",
-        *remote,
+        remote_command,
     )
 
 
