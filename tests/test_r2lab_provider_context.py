@@ -9,6 +9,7 @@ from synthran.backends.base import BackendError
 from synthran.backends.r2lab import R2LabBackend, _ensure_slices_provider_context
 from synthran.cli import _parser
 from synthran.slices_controller import ControllerCommandResult
+from synthran.workspace.model import WorkspaceError
 
 
 class R2LabProviderContextTests(unittest.TestCase):
@@ -111,9 +112,38 @@ class R2LabProviderContextTests(unittest.TestCase):
             [tuple(call.args[0]) for call in runner.call_args_list],
         )
 
+    @patch("synthran.backends.r2lab.verify_slices_controller")
+    @patch("synthran.backends.r2lab.load_lock")
+    @patch("synthran.backends.r2lab.load_workspace")
+    @patch("synthran.backends.r2lab.find_workspace_root")
     @patch("synthran.backends.r2lab.slices_runner")
-    def test_missing_project_fails_before_provider_mutation(self, runner) -> None:
-        with self.assertRaisesRegex(BackendError, "slices-project"):
+    def test_project_defaults_from_persisted_workspace(
+        self, runner, find_root, load_workspace, load_lock, verify
+    ) -> None:
+        runner.return_value = ControllerCommandResult(0, "ok")
+        find_root.return_value = Path("/repo")
+        load_workspace.return_value = Mock(project="post5g-beta")
+        load_lock.return_value = Mock()
+        verify.return_value = Mock(ready=True, post5g_network=Mock())
+
+        project, _, _, _ = _ensure_slices_provider_context(
+            self.args(slices_project=None)
+        )
+
+        self.assertEqual("post5g-beta", project)
+        load_workspace.assert_called_once_with(Path("/repo"))
+        self.assertEqual(
+            ("slices", "project", "use", "post5g-beta"),
+            tuple(runner.call_args_list[0].args[0]),
+        )
+
+    @patch("synthran.backends.r2lab.find_workspace_root")
+    @patch("synthran.backends.r2lab.slices_runner")
+    def test_missing_project_and_workspace_fail_before_provider_mutation(
+        self, runner, find_root
+    ) -> None:
+        find_root.side_effect = WorkspaceError("no workspace")
+        with self.assertRaisesRegex(BackendError, "workspace project"):
             _ensure_slices_provider_context(self.args(slices_project=None))
         runner.assert_not_called()
 
