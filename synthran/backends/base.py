@@ -58,6 +58,10 @@ class BackendError(RuntimeError):
 class Backend(Protocol):
     contract: BackendContract
 
+    def configure_parser(self, parser: argparse.ArgumentParser) -> None:
+        """Add backend-owned commands to the single SynthRAN parser."""
+        ...
+
     def dispatch(self, args: argparse.Namespace) -> int:
         """Execute one already-parsed backend command."""
         ...

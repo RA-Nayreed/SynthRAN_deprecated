@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Sequence
 
 from synthran.backends.base import (
@@ -39,6 +40,13 @@ def backend_for_argv(argv: Sequence[str]) -> Backend | None:
     return None if name is None else get_backend(name)
 
 
+def configure_backend_parser(parser: argparse.ArgumentParser) -> None:
+    """Let each backend extend the one operator parser in place."""
+
+    for backend in _BACKENDS.values():
+        backend.configure_parser(parser)
+
+
 __all__ = [
     "Backend",
     "BackendContract",
@@ -50,5 +58,6 @@ __all__ = [
     "RadioMode",
     "RfsimBackend",
     "backend_for_argv",
+    "configure_backend_parser",
     "get_backend",
 ]

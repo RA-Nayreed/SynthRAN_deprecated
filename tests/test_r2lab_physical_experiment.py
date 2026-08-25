@@ -151,10 +151,8 @@ class R2LabPhysicalExecutorFactoryTests(unittest.TestCase):
             run_id="r2lab-run-001",
             qfit="qfit07",
             interface="wwan0",
-            claim_sha256="d" * 64,
-            package_sha256="a" * 64,
-            render_sha256="c" * 64,
         )
+        self.assertNotIn("sha256", str(context.to_dict()).lower())
         self.assertEqual(expected, executor(context))
         execute.assert_called_once_with(context, config=config)
 
