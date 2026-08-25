@@ -410,6 +410,7 @@ def _ue_read(
     slice_name: str,
     profile: UeProfile,
     command: Sequence[str],
+    label: str = "physical UE workload precondition",
     timeout_seconds: int = 30,
 ) -> CommandResult:
     result = _run(
@@ -417,9 +418,7 @@ def _ue_read(
         timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
-        raise R2LabPhysicalExperimentError(
-            "physical UE workload precondition could not be observed"
-        )
+        raise R2LabPhysicalExperimentError(f"{label} returned nonzero")
     return result
 
 
@@ -430,6 +429,7 @@ def _ue_counter(slice_name: str, profile: UeProfile, counter: str) -> int:
         slice_name=slice_name,
         profile=profile,
         command=("cat", f"/sys/class/net/{_UE_INTERFACE}/statistics/{counter}"),
+        label=f"physical UE {counter} counter probe",
     )
     value = result.stdout.strip()
     if not value.isdigit():
@@ -441,11 +441,20 @@ def _prove_ue_route(slice_name: str, profile: UeProfile, central_address: str) -
     route = _ue_read(
         slice_name=slice_name,
         profile=profile,
-        command=("ip", "-j", "route", "get", central_address),
+        command=(
+            "ip",
+            "-j",
+            "route",
+            "get",
+            central_address,
+            "oif",
+            _UE_INTERFACE,
+        ),
+        label="physical UE interface-bound route probe",
     )
     if not route_uses_wwan0(route.stdout, central_address):
         raise R2LabPhysicalExperimentError(
-            "central MQTT destination is not currently routed through wwan0"
+            "central MQTT destination is not selectable through wwan0"
         )
 
 
@@ -454,6 +463,7 @@ def _prove_ue_python(slice_name: str, profile: UeProfile) -> None:
         slice_name=slice_name,
         profile=profile,
         command=("python3", "-c", "import socket; print('ok')"),
+        label="physical UE python3 capability probe",
     )
     if result.stdout.strip() != "ok":
         raise R2LabPhysicalExperimentError("physical UE python3 relay capability is unavailable")
@@ -484,6 +494,7 @@ print(count)
         slice_name=slice_name,
         profile=profile,
         command=("python3", "-c", probe, _RELAY_MARKER, run_id),
+        label="physical UE relay cleanup probe",
     )
     value = result.stdout.strip()
     if not value.isdigit():
@@ -757,8 +768,8 @@ def execute_physical_iot_workload(
         if config.progress is not None:
             print(f"[synthran] {message}", file=config.progress, flush=True)
 
-    # Fail before run-scoped mutation if the selected cellular route cannot host
-    # the relay or the destination is not currently routed through wwan0.
+    # Fail before run-scoped mutation unless the UE can select the same
+    # interface-bound route that the relay enforces with SO_BINDTODEVICE.
     _prove_ue_python(config.slice_name, profile)
     _prove_ue_route(config.slice_name, profile, core_address)
     if _ue_relay_process_count(config.slice_name, profile, scenario.run_id) != 0:
@@ -1108,7 +1119,7 @@ def execute_physical_iot_workload(
             ExperimentCheck(
                 "physical-route",
                 True,
-                "central MQTT destination remained routed through wwan0",
+                "central MQTT destination remained selectable through wwan0",
             )
         )
 
