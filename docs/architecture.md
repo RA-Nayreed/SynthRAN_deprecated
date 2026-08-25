@@ -1,183 +1,216 @@
-# SynthRAN architecture
+# Architecture
 
-SynthRAN is the experiment-control and evidence layer above existing IoT, 5G, messaging, load-generation, and testbed systems. It composes those systems; it does not fork or reimplement them.
-
-Current live evidence is kept out of this architecture document. See [`results.md`](results.md) for accepted runs and measured results.
+SynthRAN is an experiment-control and evidence layer around external provider, radio, 5G, IoT, and measurement systems. The public interface is backend-neutral; hardware-specific mechanics stay below the run boundary.
 
 ## System boundary
 
-```mermaid
-flowchart TB
-    O[Operator] --> C[synthran CLI]
-    C --> B[Backend registry]
-    C --> X[Common experiment and research commands]
-
-    B --> V[RfsimBackend]
-    B --> P[R2LabBackend]
-
-    V --> S[SLICES / POS virtual network runtime]
-    P --> R[SLICES / POS + R2Lab physical runtime]
-
-    S --> I[Common experiment semantics]
-    R --> I
-    X --> I
-    I --> D[Evidence / JSONL / Parquet]
+```text
+                         synthran
+                            |
+          +-----------------+-----------------+
+          |                                   |
+    --radio rfsim                       --radio r2lab
+          |                                   |
+ SLICES compute resources              active R2Lab lease
+ Open5GS + srsRAN/RFSIM                 exact N3xx + UE claim
+ srsUE packet endpoint                  Open5GS + N3xx gNB
+          |                              physical UE/PDU
+          +-----------------+-----------------+
+                            |
+                 deterministic IoT workload
+                            |
+                    accepted evidence
+                            |
+                 JSONL + Parquet + logs
 ```
 
-The only supported operator executable is `synthran`. There is no separate interactive frontend or external workbench protocol. `synthran.cli` is the command dispatch boundary; provider-specific execution is selected through the backend registry rather than implemented by the top-level CLI. Internal application, workspace, reconciliation, operation, and provider modules remain implementation boundaries rather than additional products.
+There is one installed executable and one lifecycle command: `synthran run`. RFSIM and R2Lab are implementations selected by `--radio`; they are not independent applications.
 
-## Backend boundary
+## Public command boundary
 
-RFSIM remains the accepted virtual reference path. R2Lab is the physical-radio implementation and must satisfy the same experiment-level semantics before a physical stage is described as accepted.
-
-The backend contract uses one ordered lifecycle:
+The supported top-level commands are:
 
 ```text
-access
--> resources
--> kubernetes
--> core
--> gNB
--> N2
--> UE management
--> cell
--> registration
--> PDU
--> user plane
--> workload
--> data
--> acceptance
--> cleanup
+run
+ doctor
+inspect
+logs
+stop
+research
+deps
+dev
 ```
 
-A backend may advertise only a contiguous implemented prefix of that lifecycle. Implementation capability is not live acceptance: accepted physical capability still depends on current evidence for the exact run and resources. RFSIM implements the complete reference contract; R2Lab advances through the same contract as physical stages are implemented and proven.
+Only `run` performs the complete experiment lifecycle. `doctor` is read-only, `inspect` reads capabilities/evidence, `logs` reads the persisted event stream, and `stop` releases exact resources owned by a run. Research and repository-maintenance commands are separate because they operate on accepted evidence or source state rather than constructing another network lifecycle.
 
-Backend-specific mechanisms stay below this boundary:
+Backend-specific resource preparation, Open5GS reconciliation, gNB staging, UE activation, PDU proof, and cleanup functions are Python implementation boundaries. They are deliberately not separate public command groups.
 
-| Concern | RFSIM | R2Lab |
-|---|---|---|
-| Radio | simulated RF | selected physical radio |
-| UE | srsUE | selected physical UE/modem |
-| PDU interface | `tun_srsue1` | physical UE data interface such as `wwan0` |
-| Cell proof | simulated cell state | current physical NR acquisition |
-| Authority | SLICES/POS run authority | SLICES/POS plus current R2Lab physical authority |
+## Run orchestration
 
-Above that boundary, experiment identity, deterministic IoT inputs, telemetry semantics, research validity, evidence provenance, and cleanup rules remain common. Backend-specific interface names, resource identifiers, and provider diagnostics must not become common experiment semantics.
-
-## Persistent state
-
-Long-lived intent and short-lived provider truth are separated. Current workspace state may include profiles, experiment desired state, observed state, operation records, preparation authority, manifests, and immutable experiment evidence.
-
-`ExperimentDesiredState` contains requested intent and stable constraints. Provider-assigned or runtime-discovered values belong in observed state.
-
-Examples of observed-only facts include reservation and allocation IDs, provider-assigned nodes, pod names, live PDU addresses, lease state, registration state, and current routes.
-
-Truth ranking is:
-
-```text
-provider
-> direct observation
-> persisted evidence
-> manifest
-> cache
-```
-
-Historical evidence proves a past event. It does not become current mutation authority after its freshness boundary expires.
-
-## Reconciliation and operations
-
-Reconciliation and operation policy are fail-closed. A controlled mutation must be bound to current desired state, current observations, exact targets, ownership, and relevant input digests before execution.
-
-Representative network progression is:
+A run executes the following logical sequence:
 
 ```text
 provider context
--> resources
--> preparation
--> core
--> gNB
--> N2
--> UE
--> registration
--> PDU
--> user plane
--> workload
--> evidence
--> cleanup
+-> resource authority
+-> 5G foundation
+-> radio/gNB path
+-> UE/PDU/user-plane proof
+-> deterministic workload
+-> acceptance
+-> exact cleanup
 ```
 
-Risk classes remain distinct:
+The concrete work differs by backend.
+
+### RFSIM
+
+The virtual implementation composes the established SLICES path:
 
 ```text
-R0  local/read-only
-R1  live/read-only
-R2  controlled mutation
-R3  destructive mutation
+provider experiment
+-> reservation/allocation
+-> live preflight
+-> Open5GS + srsRAN/RFSIM deployment
+-> srsUE/PDU path proof
+-> deterministic IoT workload
+-> experiment evidence
 ```
 
-Only one mutating operation may hold a workspace mutation claim. Failed or interrupted mutation retains the claim unless clean rollback is proven. Structured evidence and events are preferred over parsing arbitrary provider prose.
+The existing deployment and experiment functions remain reusable internal services. Their historical CLI wrappers were removed when `synthran run` became the sole lifecycle entry.
 
-## Resource ownership
+### R2Lab
 
-Resource selection is deterministic and capability-based. Generic rollback authority comes only from exact resource IDs proven to have been created or owned by the current operation.
+The physical implementation composes:
 
-Unknown, stale, foreign, or ambiguous ownership fails closed. This applies from provider resources down to run-owned processes, namespaces, temporary routes, radio state, and experiment objects. Broad cleanup is forbidden.
+```text
+provider experiment
+-> active R2Lab lease
+-> exact N3xx + UE claim
+-> selected compute-node authority
+-> Kubernetes/Open5GS foundation
+-> stopped pinned N3xx gNB render
+-> singleton gNB + stable N2
+-> selected UE activation
+-> registration + PDU
+-> route-bound user-plane proof
+-> deterministic IoT workload
+-> exact physical cleanup
+```
 
-## Dependency composition
+Every physical mutation refreshes current authority. Earlier accepted evidence never substitutes for a current lease, allocation, resource state, gNB pod, registration state, route, or PDU observation.
 
-SynthRAN reuses complete pinned upstream checkouts and immutable runtime artifacts:
+## Provider context
 
-| System | Role |
-|---|---|
-| `sopnode/5g_ansible` | SLICES node setup and reviewed 5G deployment path |
-| Open5GS | 5G core / UPF |
-| srsRAN | gNB, srsUE, RFSIM and physical gNB integration |
-| Contiki-NG + Cooja | deterministic constrained-IoT emulation |
-| Eclipse Mosquitto | edge and central MQTT transport |
-| iperf3 | external capacity calibration and controlled load |
+A SLICES project must already exist and the operator must already be authenticated. A run may select the configured project, create or reuse the provider experiment associated with its run ID, acquire the Post5G prefix, and verify the resulting network context.
 
-Dependency trees live under ignored `.deps/` storage. SynthRAN-owned overlays and the IoT application remain in this repository. Runtime images and direct dependencies are pinned through repository-controlled provenance.
+Provider experiment creation is therefore part of the unified run, while project creation and authentication remain outside SynthRAN.
 
-## Accepted virtual golden path
+## Ansible execution
+
+SynthRAN relies on pinned upstream Ansible content rather than duplicating provider mechanics.
+
+All long Ansible execution uses:
+
+```text
+synthran.ansible_streaming.run_streaming_ansible_command
+```
+
+The shared streamer:
+
+- captures stdout/stderr without a shell;
+- emits only reviewed, operator-useful task names;
+- keeps failures visible even when routine task chatter is suppressed;
+- emits heartbeats for long tasks;
+- returns complete command output for sanitized run logs and evidence.
+
+It is used by virtual deployment, physical Open5GS reconciliation, and physical UE role execution. New Ansible-driven paths must use the same implementation rather than adding another subprocess wrapper.
+
+## Unified progress and logs
+
+`synthran run` writes a single sanitized event stream:
+
+```text
+.synthran/events/<run-id>.jsonl
+```
+
+The same messages are mirrored to the terminal unless `--quiet` is used. `synthran logs` reads this event stream, so live output and later diagnostics share one contract.
+
+The event stream contains high-level run transitions and sanitized child-operation output. Raw provider output is not a second public log API.
+
+## Evidence model
+
+Runtime evidence has two jobs:
+
+1. prove a boundary was satisfied at a particular time;
+2. provide enough provenance to reproduce or audit the run.
+
+Evidence does not authorize later mutation. Current provider and runtime observation remain authoritative for live control.
+
+Typical persisted records include:
+
+```text
+provider/resource manifests
+network evidence
+physical-run.json
+experiment-evidence.json
+research-summary.json
+telemetry.jsonl / telemetry.parquet
+probe.jsonl / probe.parquet
+network-samples.jsonl / network-samples.parquet
+load.jsonl / load.parquet
+.synthran/events/<run-id>.jsonl
+```
+
+## Deterministic IoT path
+
+The scientific workload is backend-independent at the experiment level:
 
 ```text
 10 deterministic Contiki-NG/Cooja sensors
 -> RPL/6LoWPAN border router
--> Cooja Serial Socket
--> loopback-only reverse SSH tunnel
--> remote tunslip6/tun0
--> counted TCP ingress
--> Mosquitto bridge inside srsUE network namespace
--> tun_srsue1
--> srsRAN gNB
+-> counted ingress
+-> UE-side MQTT handoff
+-> 5G user plane
 -> Open5GS UPF
--> run-owned central Mosquitto
+-> run-owned central MQTT collector
 -> canonical JSONL
 -> deterministic Parquet
 ```
 
-The Cooja Serial Socket crosses the simulator boundary, the reverse SSH tunnel exposes that loopback-only socket to the remote experiment node, `tunslip6` creates the IPv6 edge interface, counted TCP ingress records the adapter boundary, and the Mosquitto bridge runs in the srsUE network namespace where the live PDU exists.
+RFSIM uses srsUE and a virtual radio. R2Lab uses the selected physical Quectel UE and N3xx radio. Interface names, modem commands, radio addresses, and provider identifiers are implementation details and must not change scientific telemetry semantics.
 
-The PDU is rediscovered after RFSIM reconciliation and is not static configuration. Acceptance includes route, interface, broker, message, cleanup, and base-network reproof evidence.
+## Research boundary
 
-## Controlled research architecture
+Controlled measurement tools operate on an accepted base path. The current controlled-load campaign implementation is validated on the virtual network-evidence representation. Physical runs already execute the deterministic workload through the physical user plane, but controlled-load campaign parity is not claimed until physical measurement and load control have accepted evidence.
 
-Controlled research wraps the deterministic workload in a fixed measurement window. Background-load service termination is outside the 5G core host so a same-host Kubernetes or hairpin path cannot masquerade as external user-plane transport.
+This distinction is intentional: a common public lifecycle does not justify claiming common scientific capability before it is measured.
 
-A research run persists immutable experiment specification, exact measurement-window bounds, telemetry, RTT observations, network counters, load records when enabled, path/readiness/cleanup evidence, validity-aware summaries, and artifact hashes.
+## Source layout
 
-Configured cadence and achieved cadence are separate evidence. Telemetry continuity is evaluated from observed sequence gaps and duplicates rather than nominal fixed-window occupancy alone.
+The principal runtime boundaries are:
 
-## Data and privacy boundary
+```text
+synthran/cli.py                 public parser entry
+synthran/operator.py            public command definitions and dispatch
+synthran/provider.py            shared SLICES provider context
+synthran/backends/run.py        backend-selecting run orchestration
+synthran/ansible_streaming.py   shared Ansible progress
+synthran/network/               virtual compute/network implementation
+synthran/r2lab/                 physical authority/radio/UE implementation
+synthran/experiment/            deterministic workload runtime
+synthran/research/              controlled measurements and analysis
+synthran/privacy.py             repository/privacy controls
+```
 
-Canonical JSONL is the append-only audit source. Deterministic Parquet is an analysis derivative, not a second source of truth. Raw immutable experiment bundles belong in durable research or object storage; small sanitized derivatives, summaries, and figures may be tracked in Git.
+`command_runtime.py` is internal support for existing virtual-path and research functions. It does not define a public parser or command dispatch tree.
 
-SynthRAN is designed to prove accepted paths without broad packet capture. Route proof, interface counters, broker receipt, run-scoped records, and UPF evidence form the default lower-risk proof surface.
+## Design rules
 
-Private keys, provider tokens, S3 secrets, kubeconfigs, authority files, dependency trees, generated run directories, and unsanitized secret-bearing evidence must remain outside Git.
-
-## Current boundary of claims
-
-The live-accepted virtual system covers Open5GS, srsRAN, one srsUE, RFSIM, deterministic ten-sensor IoT traffic, external-peer calibration, controlled UDP load, fixed-window instrumentation, randomized blocked campaigns, and offline paired analysis.
-
-Physical RF capability is accepted only to the stage proven by current R2Lab evidence. Multi-UE or multi-slice experiments, formal RIC/A1/E2 control, generative models, and automated policy synthesis are not claimed without explicit accepted evidence.
+- one installed executable;
+- one public lifecycle command;
+- backend selection through `--radio`;
+- shared progress/log semantics;
+- exact ownership-bound mutation and cleanup;
+- provider/direct observation outranks historical evidence for live authority;
+- backend-specific mechanics do not leak into the scientific data contract;
+- unsupported capability is reported as unsupported rather than inferred from a neighboring successful boundary.
