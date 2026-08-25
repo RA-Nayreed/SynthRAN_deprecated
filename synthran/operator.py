@@ -23,6 +23,7 @@ from synthran.r2lab.controller import gateway_command, subprocess_runner as r2la
 from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology, capabilities
 from synthran.r2lab.n3xx import stop_n3xx_gnb
 from synthran.r2lab.resources import load_topology, release_physical_resources
+from synthran.r2lab.stale_claim import retire_if_lease_absent
 from synthran.slices_controller import SlicesControllerError, verify_slices_controller
 
 
@@ -334,14 +335,50 @@ def stop_command(args: argparse.Namespace) -> int:
         }
         print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload["detail"])
         return 0
-    if not args.r2lab_slice or not args.owner or args.known_hosts is None:
+    if not args.r2lab_slice:
         raise BackendError(
-            "physical stop requires --slice/SYNTHRAN_R2LAB_SLICE, --owner/SYNTHRAN_OWNER, and --known-hosts/SYNTHRAN_SLICES_KNOWN_HOSTS"
+            "physical stop requires --slice or SYNTHRAN_R2LAB_SLICE"
+        )
+
+    topology = load_topology(run_root=run_root, run_id=args.run_id).validate()
+    retirement = retire_if_lease_absent(
+        run_root=run_root,
+        run_id=args.run_id,
+        slice_name=args.r2lab_slice,
+        topology=topology,
+        runner=r2lab_runner,
+        timeout_seconds=min(args.timeout, 300),
+    )
+    if retirement is not None:
+        result = {
+            "schema": "synthran/stop/v1",
+            "run_id": args.run_id,
+            "radio": topology.radio,
+            "ue": topology.ue,
+            "released": False,
+            "retired": True,
+            "hardware_mutated": False,
+            "detail": (
+                "current R2Lab lease is not held; retired the stale local claim "
+                "without touching provider hardware"
+            ),
+            "retirement": retirement.to_dict(),
+        }
+        print(
+            json.dumps(result, indent=2, sort_keys=True)
+            if args.json
+            else result["detail"]
+        )
+        return 0
+
+    if not args.owner or args.known_hosts is None:
+        raise BackendError(
+            "physical cleanup with a current lease requires --owner/SYNTHRAN_OWNER "
+            "and --known-hosts/SYNTHRAN_SLICES_KNOWN_HOSTS"
         )
     known_hosts = Path(args.known_hosts).expanduser().resolve()
     if not known_hosts.is_file():
         raise BackendError("strict SLICES known-hosts file is missing")
-    topology = load_topology(run_root=run_root, run_id=args.run_id).validate()
     evidence_path = run_directory / "physical-run.json"
     stop = None
     if evidence_path.is_file():
@@ -369,6 +406,7 @@ def stop_command(args: argparse.Namespace) -> int:
         "radio": topology.radio,
         "ue": topology.ue,
         "released": True,
+        "retired": False,
         "release": payload,
     }
     print(json.dumps(result, indent=2, sort_keys=True) if args.json else "Selected run resources released.")

@@ -152,7 +152,7 @@ workload cleanup
 -> release the run claim
 ```
 
-If cleanup cannot prove exact ownership/state, the run fails closed instead of expanding the target set.
+If cleanup cannot prove exact ownership/state while the lease is current, the run fails closed instead of expanding the target set.
 
 An interrupted or retained run can be cleaned with:
 
@@ -163,6 +163,20 @@ synthran stop \
   --owner "$SYNTHRAN_OWNER" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 ```
+
+### Claim retirement after lease expiry
+
+A local physical claim is authority only while the corresponding R2Lab lease is current. If a run leaves `.synthran/r2lab/active.json` behind and the lease later expires, `synthran stop` first verifies that Faraday is reachable and checks `rhubarbe leases --check` for the configured slice.
+
+If the slice no longer holds a current lease, SynthRAN does **not** attempt gNB, UE, radio, PDU, or Kubernetes cleanup. It instead:
+
+1. verifies that the active claim exactly matches the requested run and stored topology;
+2. archives the original claim as `.synthran/r2lab/<run-id>/retired-claim.json`;
+3. writes `.synthran/r2lab/<run-id>/claim-retirement.json` with `hardware_mutated=false` and the retirement reason;
+4. removes only the workspace-level `active.json` marker;
+5. preserves all existing run and acceptance evidence.
+
+A Faraday transport/access failure does not retire anything. A later physical run still requires a fresh valid lease and all normal live authority checks before any mutation. Claim retirement therefore removes stale local bookkeeping without asserting that SynthRAN itself proved the post-lease hardware state.
 
 ## Logs and evidence
 
@@ -222,4 +236,5 @@ The physical backend now reaches the deterministic workload boundary. The curren
 - one run-owned physical gNB for the selected radio;
 - UE modem mechanics stay in pinned upstream roles;
 - functional postconditions are independently verified by SynthRAN;
-- cleanup releases a claim only after exact off/clean state is proven.
+- with a current lease, cleanup releases a claim only after exact off/clean state is proven;
+- without a current lease, SynthRAN performs no cleanup mutation and may retire only the exact stale local claim with explicit retirement evidence.
