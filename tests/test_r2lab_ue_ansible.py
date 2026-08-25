@@ -18,7 +18,9 @@ from synthran.r2lab.radio import (
 from synthran.r2lab.ue import PhysicalUeRuntimeEvidence
 from synthran.r2lab.ue_activation import _pass_functional_path, recover_retryable_transport_failure
 from synthran.r2lab.ue_ansible import (
+    CONNECT_ROLE,
     OPEN5GS_UPF_ADDRESS,
+    STOP_ROLE,
     _inventory,
     _playbook,
     _profile,
@@ -97,7 +99,10 @@ class SelectedUeRoleExecutionTests(unittest.TestCase):
                 "    slice: slice1\n",
                 encoding="utf-8",
             )
-            (checkout / "roles").mkdir(parents=True)
+            for relative in (CONNECT_ROLE, STOP_ROLE):
+                path = checkout / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("---\n", encoding="utf-8")
 
             with patch("synthran.r2lab.ue_ansible._configured_identity", return_value=None):
                 result = execute_selected_ue_role(
