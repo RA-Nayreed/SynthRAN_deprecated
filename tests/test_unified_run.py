@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import unittest
 
 from synthran.backends import RunCommandAdapter, backend_for_argv
+from synthran.backends.run import _RunProgress
 from synthran.cli import _parser
 from synthran.dependencies import load_lock
 from synthran.live_preflight import CommandResult
@@ -57,6 +59,7 @@ class UnifiedRunTests(unittest.TestCase):
         self.assertEqual(physical.radio, "r2lab")
         self.assertEqual(physical.device, "n300")
         self.assertEqual(physical.ue, "qfit07")
+        self.assertFalse(physical.quiet)
 
         virtual = _parser().parse_args(
             (
@@ -69,11 +72,37 @@ class UnifiedRunTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "virtual-001",
+                "--quiet",
             )
         )
         self.assertEqual(virtual.radio, "rfsim")
         self.assertIsNone(virtual.device)
         self.assertIsNone(virtual.ue)
+        self.assertTrue(virtual.quiet)
+
+    def test_progress_is_live_and_separate_from_result_stdout(self) -> None:
+        stream = io.StringIO()
+        progress = _RunProgress(stream=stream)
+        progress.start("provider", "select SLICES context")
+        progress.done("provider", "ready")
+        progress.start("gNB/N2", "establish stable N2")
+        progress.fail("N2 was not established")
+
+        self.assertEqual(
+            stream.getvalue().splitlines(),
+            [
+                "→ provider: select SLICES context",
+                "✓ provider: ready",
+                "→ gNB/N2: establish stable N2",
+                "✗ gNB/N2: N2 was not established",
+            ],
+        )
+
+        quiet_stream = io.StringIO()
+        quiet = _RunProgress(enabled=False, stream=quiet_stream)
+        quiet.start("provider")
+        quiet.done("provider")
+        self.assertEqual(quiet_stream.getvalue(), "")
 
     def test_n300_generated_values_restore_open5gs_runtime_network(self) -> None:
         lock = load_lock(Path("dependencies.lock.yml"))
