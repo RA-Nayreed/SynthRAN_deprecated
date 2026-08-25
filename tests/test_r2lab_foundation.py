@@ -411,10 +411,13 @@ class R2LabPhysicalFoundationTests(unittest.TestCase):
             REPOSITORY_ROOT / "deploy" / "ansible" / "r2lab-open5gs-core.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('core_node_name == "sopnode-f2"', wrapper)
-        self.assertIn('ran_node_name == "sopnode-f3"', wrapper)
-        self.assertIn('rru == "n300"', wrapper)
-        self.assertIn('synthran_subscriber == "qfit07"', wrapper)
+        nodes = '["sopnode-f1", "sopnode-f2", "sopnode-f3", "sopnode-w3"]'
+        subscribers = '["qfit07", "qfit09", "qfit18", "qfit29", "qfit32", "qfit34", "qhat01", "qhat02", "qhat03", "qhat10", "qhat11", "qhat20", "qhat21", "qhat22", "qhat23"]'
+        self.assertIn(f"core_node_name in {nodes}", wrapper)
+        self.assertIn(f"ran_node_name in {nodes}", wrapper)
+        self.assertIn("core_node_name != ran_node_name", wrapper)
+        self.assertIn('rru in ["n300", "n320"]', wrapper)
+        self.assertIn(f"synthran_subscriber in {subscribers}", wrapper)
         self.assertIn("name: open5gs-smf2", wrapper)
         self.assertIn("name: open5gs-upf2", wrapper)
         self.assertIn("name=smf1", wrapper)
