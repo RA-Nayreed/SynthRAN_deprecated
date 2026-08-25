@@ -52,6 +52,8 @@ from synthran.slices_controller import (
     subprocess_runner as slices_runner,
     verify_slices_controller,
 )
+from synthran.workspace.model import WorkspaceError
+from synthran.workspace.store import find_workspace_root, load_workspace
 
 
 _EXECUTABLE_RADIOS = tuple(
@@ -141,9 +143,12 @@ def _topology_from_args(args: argparse.Namespace) -> PhysicalTopology:
 def _ensure_slices_provider_context(args: argparse.Namespace) -> tuple[str, str, bool, object]:
     project = getattr(args, "slices_project", None)
     if not project:
-        raise BackendError(
-            "R2Lab prepare requires --slices-project or SYNTHRAN_SLICES_PROJECT"
-        )
+        try:
+            project = load_workspace(find_workspace_root()).project
+        except WorkspaceError as exc:
+            raise BackendError(
+                "R2Lab prepare requires a persisted workspace project, --slices-project, or SYNTHRAN_SLICES_PROJECT"
+            ) from exc
     experiment = getattr(args, "slices_experiment", None) or str(args.run_id)
     duration = str(getattr(args, "slices_duration", "4h"))
     if _SLICES_DURATION_RE.fullmatch(duration) is None:
@@ -609,6 +614,7 @@ class R2LabBackend:
             R2LabTopologyFoundationError,
             R2LabTopologyResourceError,
             SlicesControllerError,
+            WorkspaceError,
             OSError,
             ValueError,
         ) as exc:
