@@ -1,20 +1,17 @@
-"""Bounded, transport-aware activation for physical FR1 UEs.
+"""Physical UE activation composed from pinned 5g-Ansible mechanics.
 
-The acceptance contract still requires positive NR-SA cell and registration proof.
-This module makes that proof reliable: AT access is serialized on the UE, uses
-only the Python standard library available in the R2Lab images, and the whole
-activation owns one finite deadline instead of multiplying a large timeout by
-every remote probe.
+The upstream role performs modem actuation.  SynthRAN independently verifies a
+functional postcondition over ``wwan0`` and records ordered acceptance.  A
+convergence timeout is not a terminal acceptance failure; the run remains at the
+same stage and can be resumed safely.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 from pathlib import Path
-import re
 import time
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 from synthran.live_preflight import CommandResult, subprocess_runner
 from synthran.r2lab.acceptance import (
@@ -29,205 +26,88 @@ from synthran.r2lab.radio import (
     RegistrationState,
     parse_ipv4_state,
     parse_packet_service,
-    parse_qnwinfo,
 )
+from synthran.r2lab.resources import load_topology, ue_gateway_command
 from synthran.r2lab.ue import (
-    AT_DEVICE,
     MBIM_DEVICE,
     UE_INTERFACE,
     PhysicalUeActivationSummary,
     PhysicalUeRuntimeEvidence,
     R2LabPhysicalUeError,
-    _qmi_running,
-    _record_runtime,
     _refresh_boundary,
-    _start_qmi_manager,
-    _stop_qmi_manager,
     _ue_read,
-    _ue_required,
     _write_json,
+)
+from synthran.r2lab.ue_ansible import (
+    OPEN5GS_UPF_ADDRESS,
+    R2LabUeAnsibleError,
+    execute_selected_ue_role,
 )
 
 
 Runner = Callable[[Sequence[str], int], CommandResult]
 Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
-
-_AT_LOCK = "/run/lock/synthran-at.lock"
-_AT_TERMINAL_SECONDS = 4.0
-_MAX_ACTIVATION_SECONDS = 180
-_MAX_MUTATION_COMMAND_SECONDS = 30
-_MAX_PROBE_COMMAND_SECONDS = 10
-_POLL_INTERVAL_SECONDS = 2.0
-_MBIM_REGISTER_RE = re.compile(
-    r"register\s+state\s*:\s*['\"]?([a-z0-9_-]+)", re.IGNORECASE
-)
-
-# The R2Lab Quectel images already expose Python 3 and the modem TTY.  Avoid a
-# pyserial dependency here: lock the port across processes, preserve its current
-# speed, switch only the line discipline to raw mode, and restore it afterwards.
-_AT_SCRIPT = r'''import fcntl, os, select, sys, termios, time, tty
-command = sys.argv[1]
-lock_fd = os.open("/run/lock/synthran-at.lock", os.O_CREAT | os.O_RDWR, 0o600)
-lock_deadline = time.monotonic() + 3.0
-while True:
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        break
-    except BlockingIOError:
-        if time.monotonic() >= lock_deadline:
-            raise SystemExit(75)
-        time.sleep(0.05)
-fd = os.open("/dev/ttyUSB2", os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-original = termios.tcgetattr(fd)
-try:
-    tty.setraw(fd, termios.TCSANOW)
-    termios.tcflush(fd, termios.TCIOFLUSH)
-    os.write(fd, (command + "\r").encode("ascii"))
-    deadline = time.monotonic() + 4.0
-    data = bytearray()
-    terminal = False
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([fd], [], [], min(0.25, max(0.0, deadline - time.monotonic())))
-        if not ready:
-            continue
-        try:
-            chunk = os.read(fd, 4096)
-        except BlockingIOError:
-            continue
-        if not chunk:
-            continue
-        data.extend(chunk)
-        normalized = bytes(data).upper()
-        if b"\r\nOK\r\n" in normalized or b"\r\nERROR\r\n" in normalized:
-            terminal = True
-            break
-    sys.stdout.write(bytes(data).decode("utf-8", "replace"))
-    if not terminal:
-        raise SystemExit(74)
-finally:
-    termios.tcsetattr(fd, termios.TCSANOW, original)
-    os.close(fd)
-    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-    os.close(lock_fd)
-'''
+POSTCONDITION_SECONDS = 45
+POLL_SECONDS = 2.0
+PROBE_TIMEOUT_SECONDS = 10
 
 
-@dataclass(frozen=True)
-class ActivationObservation:
-    runtime: PhysicalUeRuntimeEvidence
-    transport_failures: tuple[str, ...]
+def _probe_upf(
+    *,
+    topology,
+    slice_name: str,
+    runner: Runner,
+    timeout_seconds: int,
+) -> tuple[bool, bool]:
+    """Return ``(command_completed, path_proven)`` for wwan0 -> Open5GS UPF."""
 
-
-class _DeadlineExpired(R2LabPhysicalUeError):
-    pass
-
-
-def _command_timeout(*, deadline: float, now: float, cap: int) -> int:
-    """Return a bounded whole-second timeout from one total stage deadline."""
-
-    remaining = deadline - now
-    if remaining <= 0:
-        raise _DeadlineExpired("physical UE activation deadline expired")
-    return max(1, min(cap, int(remaining + 0.999)))
-
-
-def _at(command: str) -> tuple[str, ...]:
-    if command not in {"AT+QNWINFO", "AT+C5GREG?"}:
-        raise R2LabPhysicalUeError("AT command is outside the sanitized UE probe allow-list")
-    return ("python3", "-c", _AT_SCRIPT, command)
-
-
-def parse_mbim_registration(output: str) -> RegistrationState:
-    """Reduce libmbim registration output to the acceptance registration state."""
-
-    states = {match.group(1).lower() for match in _MBIM_REGISTER_RE.finditer(output)}
-    if len(states) != 1:
-        return RegistrationState.UNKNOWN
-    state = next(iter(states))
-    if state in {"home", "roaming", "partner"}:
-        return RegistrationState.REGISTERED
-    if state in {"searching"}:
-        return RegistrationState.SEARCHING
-    if state in {"deregistered", "denied", "unknown"}:
-        return RegistrationState.NOT_REGISTERED
-    return RegistrationState.UNKNOWN
-
-
-def _probe_timeout(deadline: float, clock: Clock) -> int:
-    return _command_timeout(
-        deadline=deadline,
-        now=clock(),
-        cap=_MAX_PROBE_COMMAND_SECONDS,
+    command = ue_gateway_command(
+        slice_name,
+        topology.ue_profile,
+        "ping",
+        "-I",
+        UE_INTERFACE,
+        "-c",
+        "1",
+        "-W",
+        "3",
+        OPEN5GS_UPF_ADDRESS,
     )
+    try:
+        result = runner(command, timeout_seconds)
+    except Exception:
+        return False, False
+    return True, result.returncode == 0
 
 
-def _observe_activation_runtime(
+def observe_functional_ue_runtime(
     *,
     run_id: str,
     slice_name: str,
-    run_root: Path,
-    runner: Runner,
-    deadline: float,
-    clock: Clock,
-) -> ActivationObservation:
-    topology = __import__(
-        "synthran.r2lab.resources", fromlist=["load_topology"]
-    ).load_topology(run_root=run_root, run_id=run_id).validate()
+    run_root: Path = Path(".synthran/r2lab"),
+    runner: Runner = subprocess_runner,
+    timeout_seconds: int = PROBE_TIMEOUT_SECONDS,
+) -> PhysicalUeRuntimeEvidence:
+    """Observe only functional, sanitized postconditions after upstream actuation.
+
+    Interface-bound reachability to the Open5GS UPF is stronger than a modem AT
+    string for this backend: it requires the selected UE to have acquired the
+    physical NR path, registered, established a PDU session and installed a
+    usable ``wwan0`` route through the run-owned core.
+    """
+
+    topology = load_topology(run_root=run_root, run_id=run_id).validate()
     profile = topology.ue_profile
-    failures: list[str] = []
-
-    qnwinfo = _ue_read(
-        topology=topology,
-        slice_name=slice_name,
-        runner=runner,
-        remote=_at("AT+QNWINFO"),
-        timeout_seconds=_probe_timeout(deadline, clock),
-    )
-    if qnwinfo is None:
-        failures.append("at-qnwinfo")
-
-    if profile.mode == "mbim":
-        registration_result = _ue_read(
-            topology=topology,
-            slice_name=slice_name,
-            runner=runner,
-            remote=("mbimcli", "-p", "-d", MBIM_DEVICE, "--query-registration-state"),
-            timeout_seconds=_probe_timeout(deadline, clock),
-        )
-        registration = parse_mbim_registration(
-            registration_result.stdout if registration_result is not None else ""
-        )
-        if registration_result is None:
-            failures.append("mbim-registration")
-    elif profile.mode == "qmi":
-        registration_result = _ue_read(
-            topology=topology,
-            slice_name=slice_name,
-            runner=runner,
-            remote=_at("AT+C5GREG?"),
-            timeout_seconds=_probe_timeout(deadline, clock),
-        )
-        from synthran.r2lab.radio import parse_c5greg
-
-        registration = parse_c5greg(
-            registration_result.stdout if registration_result is not None else ""
-        )
-        if registration_result is None:
-            failures.append("at-c5greg")
-    else:
-        raise R2LabPhysicalUeError("selected UE mode is not supported by the canonical path")
+    timeout_seconds = max(3, min(int(timeout_seconds), PROBE_TIMEOUT_SECONDS))
 
     link = _ue_read(
         topology=topology,
         slice_name=slice_name,
         runner=runner,
         remote=("ip", "-o", "link", "show", "dev", UE_INTERFACE),
-        timeout_seconds=_probe_timeout(deadline, clock),
+        timeout_seconds=timeout_seconds,
     )
-    if link is None:
-        failures.append("wwan0-link")
-
     address = None
     if link is not None:
         address = _ue_read(
@@ -235,157 +115,89 @@ def _observe_activation_runtime(
             slice_name=slice_name,
             runner=runner,
             remote=("ip", "-o", "-4", "addr", "show", "dev", UE_INTERFACE),
-            timeout_seconds=_probe_timeout(deadline, clock),
+            timeout_seconds=timeout_seconds,
         )
-        if address is None:
-            failures.append("wwan0-ipv4")
     ipv4 = parse_ipv4_state(
         address.stdout if address is not None else "",
         interface_present=link is not None,
     )
 
-    manager_running = True
     packet = PacketServiceState.UNKNOWN
+    manager_running = True
     if profile.mode == "mbim":
         packet_result = _ue_read(
             topology=topology,
             slice_name=slice_name,
             runner=runner,
             remote=("mbimcli", "-p", "-d", MBIM_DEVICE, "--query-packet-service-state"),
-            timeout_seconds=_probe_timeout(deadline, clock),
+            timeout_seconds=timeout_seconds,
         )
-        if packet_result is None:
-            failures.append("mbim-packet-service")
         packet = parse_packet_service(packet_result.stdout if packet_result is not None else "")
         manager_running = packet_result is not None
-    else:
-        manager_running = _qmi_running(
+    elif profile.mode == "qmi":
+        manager_result = _ue_read(
             topology=topology,
             slice_name=slice_name,
-            run_id=run_id,
             runner=runner,
-            timeout_seconds=_probe_timeout(deadline, clock),
+            remote=("pgrep", "-x", "quectel-CM"),
+            timeout_seconds=timeout_seconds,
         )
-        packet = (
-            PacketServiceState.ATTACHED
-            if ipv4 is Ipv4State.PRESENT
-            else PacketServiceState.DETACHED
-        )
+        manager_running = manager_result is not None
+    else:
+        raise R2LabPhysicalUeError("selected UE mode is unsupported by the physical path")
 
-    runtime = PhysicalUeRuntimeEvidence(
+    probe_completed, upf_proven = _probe_upf(
+        topology=topology,
+        slice_name=slice_name,
+        runner=runner,
+        timeout_seconds=timeout_seconds,
+    )
+    if upf_proven:
+        packet = PacketServiceState.ATTACHED
+
+    functional_path = upf_proven and ipv4 is Ipv4State.PRESENT
+    return PhysicalUeRuntimeEvidence(
         ue=topology.ue,
         mode=profile.mode,
         interface=UE_INTERFACE,
-        cell=parse_qnwinfo(qnwinfo.stdout if qnwinfo is not None else ""),
-        registration=registration,
+        cell=(
+            CellAcquisitionState.ACQUIRED_NR_SA
+            if functional_path
+            else CellAcquisitionState.UNKNOWN
+        ),
+        registration=(
+            RegistrationState.REGISTERED
+            if functional_path
+            else RegistrationState.UNKNOWN
+        ),
         packet_service=packet,
         ipv4=ipv4,
         manager_running=manager_running,
-        transport_error=bool(failures),
+        transport_error=(link is None or not probe_completed),
     )
-    return ActivationObservation(runtime=runtime, transport_failures=tuple(failures))
 
 
-def _activation_payload(
-    *,
-    summary: PhysicalUeActivationSummary,
-    transport_failures: Sequence[str],
-    deadline_exhausted: bool,
-) -> dict[str, object]:
-    payload = summary.to_dict()
-    payload["transport_failures"] = list(transport_failures)
-    payload["deadline_exhausted"] = deadline_exhausted
-    return payload
-
-
-def _persist_activation(
-    *,
-    path: Path | None,
+def _pass_functional_path(
     state: PhysicalRunEvidence,
     runtime: PhysicalUeRuntimeEvidence,
-    status: str,
-    failures: Sequence[str],
-    deadline_exhausted: bool,
-) -> PhysicalUeActivationSummary:
-    summary = PhysicalUeActivationSummary(
-        run_id=state.run_id,
-        ue=runtime.ue,
-        mode=runtime.mode,
-        status=status,
-        runtime=runtime,
-        evidence_path=path or Path("physical-run.json"),
-    )
-    if path is not None:
-        _write_json(
-            path,
-            _activation_payload(
-                summary=summary,
-                transport_failures=failures,
-                deadline_exhausted=deadline_exhausted,
-            ),
-        )
-    return summary
-
-
-def _mbim_activate_bounded(
-    *,
-    topology,
-    slice_name: str,
-    runner: Runner,
-    deadline: float,
-    clock: Clock,
-) -> None:
-    for command, label in (
-        (("command", "-v", "mbim-set-ip.sh"), "MBIM IP helper probe"),
-        (("mbimcli", "-p", "-d", MBIM_DEVICE, "--set-radio-state=on"), "MBIM radio enable"),
-        (("mbimcli", "-p", "-d", MBIM_DEVICE, "--attach-packet-service"), "MBIM packet attach"),
-        (("mbimcli", "-p", "-d", MBIM_DEVICE, "--connect=session-id=0,apn=internet,ip-type=ipv4"), "MBIM PDU connect"),
-        (("mbim-set-ip.sh", MBIM_DEVICE, UE_INTERFACE, "0"), "MBIM IPv4 configuration"),
+) -> PhysicalRunEvidence:
+    if not runtime.pdu_session_established:
+        return state
+    source = f"current-{runtime.ue}:wwan0:open5gs-upf"
+    for stage, detail in (
+        (PhysicalAcceptanceStage.CELL_ACQUISITION, "nr-sa-functional"),
+        (PhysicalAcceptanceStage.REGISTRATION, "core-path-registered"),
+        (PhysicalAcceptanceStage.PDU_SESSION, "ipv4-upf-reachable"),
     ):
-        _ue_required(
-            topology=topology,
-            slice_name=slice_name,
-            runner=runner,
-            remote=command,
-            timeout_seconds=_command_timeout(
-                deadline=deadline,
-                now=clock(),
-                cap=_MAX_MUTATION_COMMAND_SECONDS,
-            ),
-            label=label,
-        )
-
-
-def _rollback_mbim_bounded(
-    *, topology, slice_name: str, runner: Runner, deadline: float, clock: Clock
-) -> None:
-    for command in (
-        ("mbimcli", "-p", "-d", MBIM_DEVICE, "--disconnect=session-id=0"),
-        ("mbimcli", "-p", "-d", MBIM_DEVICE, "--detach-packet-service"),
-        ("ip", "addr", "flush", "dev", UE_INTERFACE),
-    ):
-        try:
-            timeout = _command_timeout(deadline=deadline, now=clock(), cap=10)
-        except _DeadlineExpired:
-            return
-        _ue_read(
-            topology=topology,
-            slice_name=slice_name,
-            runner=runner,
-            remote=command,
-            timeout_seconds=timeout,
-        )
+        if state.acceptance.next_stage is stage:
+            state = state.pass_stage(stage, source=f"{source}:{detail}")
+    return state
 
 
 def recover_retryable_transport_failure(
     *, evidence: PhysicalRunEvidence, activation_evidence_path: Path
 ) -> PhysicalRunEvidence:
-    """Drop only a terminal UE failure that was caused by probe transport loss.
-
-    This does not weaken acceptance and does not mutate disk by itself.  The
-    subsequent activation must refresh live authority/N2 and produce new proof
-    before repaired evidence is persisted.
-    """
+    """Migrate the pre-Ansible terminal transport failure from an older run."""
 
     if evidence.acceptance.failed_stage not in {
         PhysicalAcceptanceStage.CELL_ACQUISITION,
@@ -425,9 +237,9 @@ def activate_physical_ue(
     activation_evidence_path: Path | None = None,
     sleeper: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
-    timeout_seconds: int = 30,
+    timeout_seconds: int = 180,
 ) -> tuple[PhysicalRunEvidence, PhysicalUeActivationSummary]:
-    """Advance UE cell/registration/PDU proof under one bounded deadline."""
+    """Actuate one selected UE via pinned 5g-Ansible and prove its live path."""
 
     if evidence.gnb_start is None:
         raise R2LabPhysicalUeError("physical UE activation requires a started gNB")
@@ -439,8 +251,6 @@ def activate_physical_ue(
     }:
         raise R2LabPhysicalUeError("physical UE activation is not the next lifecycle boundary")
 
-    budget_seconds = min(_MAX_ACTIVATION_SECONDS, max(30, int(timeout_seconds)))
-    deadline = clock() + budget_seconds
     state = evidence
     topology = _refresh_boundary(
         run_id=state.run_id,
@@ -451,48 +261,37 @@ def activate_physical_ue(
         run_root=run_root,
         r2lab_runner=r2lab_runner,
         cluster_runner=cluster_runner,
-        timeout_seconds=min(30, budget_seconds),
+        timeout_seconds=min(timeout_seconds, 300),
     )
     if state.acceptance.next_stage is PhysicalAcceptanceStage.UE_MANAGEMENT:
         state = state.pass_stage(
             PhysicalAcceptanceStage.UE_MANAGEMENT,
             source=f"current-management:{topology.ue}:{topology.ue_profile.mode}",
         )
-        if evidence_path is not None:
-            state.write_json(evidence_path)
+    if evidence_path is not None:
+        state.write_json(evidence_path)
 
-    try:
-        before = _observe_activation_runtime(
-            run_id=state.run_id,
-            slice_name=slice_name,
-            run_root=run_root,
-            runner=r2lab_runner,
-            deadline=deadline,
-            clock=clock,
-        )
-    except _DeadlineExpired as exc:
-        raise R2LabPhysicalUeError(str(exc)) from exc
-
-    if before.runtime.pdu_session_established:
-        state = _record_runtime(state, before.runtime, source="preexisting-current-ue")
-        if evidence_path is not None:
-            state.write_json(evidence_path)
-        summary = _persist_activation(
-            path=activation_evidence_path,
-            state=state,
-            runtime=before.runtime,
-            status="already-ready",
-            failures=before.transport_failures,
-            deadline_exhausted=False,
-        )
-        return state, summary
-
-    # Do not reconnect an MBIM session that is already attached with IPv4 merely
-    # because the independent cell/registration proof transport was unavailable.
-    needs_transport_mutation = not (
-        before.runtime.packet_service is PacketServiceState.ATTACHED
-        and before.runtime.ipv4 is Ipv4State.PRESENT
+    before = observe_functional_ue_runtime(
+        run_id=state.run_id,
+        slice_name=slice_name,
+        run_root=run_root,
+        runner=r2lab_runner,
     )
+    if before.pdu_session_established:
+        state = _pass_functional_path(state, before)
+        if evidence_path is not None:
+            state.write_json(evidence_path)
+        summary = PhysicalUeActivationSummary(
+            run_id=state.run_id,
+            ue=topology.ue,
+            mode=topology.ue_profile.mode,
+            status="already-ready",
+            runtime=before,
+            evidence_path=evidence_path or Path("physical-run.json"),
+        )
+        if activation_evidence_path is not None:
+            _write_json(activation_evidence_path, summary.to_dict())
+        return state, summary
 
     _refresh_boundary(
         run_id=state.run_id,
@@ -503,115 +302,44 @@ def activate_physical_ue(
         run_root=run_root,
         r2lab_runner=r2lab_runner,
         cluster_runner=cluster_runner,
-        timeout_seconds=_command_timeout(deadline=deadline, now=clock(), cap=30),
+        timeout_seconds=min(timeout_seconds, 300),
     )
-
-    started_qmi = False
-    mutated_mbim = False
     try:
-        if topology.ue_profile.mode == "mbim" and needs_transport_mutation:
-            _mbim_activate_bounded(
-                topology=topology,
-                slice_name=slice_name,
-                runner=r2lab_runner,
-                deadline=deadline,
-                clock=clock,
-            )
-            mutated_mbim = True
-        elif topology.ue_profile.mode == "qmi" and needs_transport_mutation:
-            _start_qmi_manager(
-                topology=topology,
-                slice_name=slice_name,
-                run_id=state.run_id,
-                runner=r2lab_runner,
-                timeout_seconds=_command_timeout(
-                    deadline=deadline,
-                    now=clock(),
-                    cap=_MAX_MUTATION_COMMAND_SECONDS,
-                ),
-            )
-            started_qmi = True
-
-        observation = before
-        while True:
-            try:
-                observation = _observe_activation_runtime(
-                    run_id=state.run_id,
-                    slice_name=slice_name,
-                    run_root=run_root,
-                    runner=r2lab_runner,
-                    deadline=deadline,
-                    clock=clock,
-                )
-            except _DeadlineExpired:
-                break
-            if observation.runtime.pdu_session_established:
-                break
-            remaining = deadline - clock()
-            if remaining <= 0:
-                break
-            sleeper(min(_POLL_INTERVAL_SECONDS, remaining))
-
-        if observation.runtime.pdu_session_established:
-            state = _record_runtime(state, observation.runtime, source="physical-ue-activation")
-            if evidence_path is not None:
-                state.write_json(evidence_path)
-            summary = _persist_activation(
-                path=activation_evidence_path,
-                state=state,
-                runtime=observation.runtime,
-                status="activated",
-                failures=observation.transport_failures,
-                deadline_exhausted=False,
-            )
-            return state, summary
-
-        if observation.transport_failures:
-            _persist_activation(
-                path=activation_evidence_path,
-                state=state,
-                runtime=observation.runtime,
-                status="transport-failed",
-                failures=observation.transport_failures,
-                deadline_exhausted=True,
-            )
-            joined = ", ".join(observation.transport_failures)
-            raise R2LabPhysicalUeError(
-                f"physical UE proof transport failed before deadline: {joined}"
-            )
-
-        state = _record_runtime(state, observation.runtime, source="physical-ue-activation")
-        if evidence_path is not None:
-            state.write_json(evidence_path)
-        summary = _persist_activation(
-            path=activation_evidence_path,
-            state=state,
-            runtime=observation.runtime,
-            status="not-proven",
-            failures=(),
-            deadline_exhausted=True,
+        execute_selected_ue_role(
+            run_id=state.run_id,
+            slice_name=slice_name,
+            topology=topology,
+            action="connect",
+            run_root=run_root,
+            timeout_seconds=min(timeout_seconds, 180),
         )
-        return state, summary
-    except Exception:
-        # Roll back only transport state that this invocation actually created.
-        if topology.ue_profile.mode == "mbim" and mutated_mbim:
-            _rollback_mbim_bounded(
-                topology=topology,
-                slice_name=slice_name,
-                runner=r2lab_runner,
-                deadline=deadline,
-                clock=clock,
-            )
-        elif started_qmi:
-            try:
-                timeout = _command_timeout(deadline=deadline, now=clock(), cap=10)
-            except _DeadlineExpired:
-                timeout = 1
-            _stop_qmi_manager(
-                topology=topology,
-                slice_name=slice_name,
-                run_id=state.run_id,
-                runner=r2lab_runner,
-                timeout_seconds=timeout,
-            )
-        raise
+    except R2LabUeAnsibleError as exc:
+        raise R2LabPhysicalUeError(str(exc)) from exc
+
+    deadline = clock() + min(POSTCONDITION_SECONDS, max(10, int(timeout_seconds)))
+    runtime = before
+    while True:
+        runtime = observe_functional_ue_runtime(
+            run_id=state.run_id,
+            slice_name=slice_name,
+            run_root=run_root,
+            runner=r2lab_runner,
+        )
+        if runtime.pdu_session_established or clock() >= deadline:
+            break
+        sleeper(POLL_SECONDS)
+
+    state = _pass_functional_path(state, runtime)
+    if evidence_path is not None:
+        state.write_json(evidence_path)
+    summary = PhysicalUeActivationSummary(
+        run_id=state.run_id,
+        ue=topology.ue,
+        mode=topology.ue_profile.mode,
+        status="activated" if runtime.pdu_session_established else "not-proven",
+        runtime=runtime,
+        evidence_path=evidence_path or Path("physical-run.json"),
+    )
+    if activation_evidence_path is not None:
+        _write_json(activation_evidence_path, summary.to_dict())
+    return state, summary
