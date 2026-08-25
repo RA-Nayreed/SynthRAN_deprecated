@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from synthran import command_runtime
 from synthran.backends.base import BackendContract, BackendError, LIFECYCLE_STAGES
-from synthran.dependencies import DependencyError
+from synthran.dependencies import DependencyError, load_lock
 from synthran.experiment import ExperimentError
 from synthran.experiment.runtime import (
     DEFAULT_COLLECTION_SECONDS,
@@ -46,7 +47,11 @@ from synthran.r2lab.resources import (
     release_physical_resources,
 )
 from synthran.r2lab.ue import R2LabPhysicalUeError
-from synthran.slices_controller import SlicesControllerError
+from synthran.slices_controller import (
+    SlicesControllerError,
+    subprocess_runner as slices_runner,
+    verify_slices_controller,
+)
 
 
 _EXECUTABLE_RADIOS = tuple(
@@ -55,6 +60,7 @@ _EXECUTABLE_RADIOS = tuple(
 _EXECUTABLE_UES = tuple(
     sorted(name for name, profile in UES.items() if profile.executable)
 )
+_SLICES_DURATION_RE = re.compile(r"^[1-9][0-9]*(?:m|h)$")
 
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
@@ -130,6 +136,48 @@ def _topology_from_args(args: argparse.Namespace) -> PhysicalTopology:
         radio=str(args.radio),
         ue=str(args.ue),
     ).validate()
+
+
+def _ensure_slices_provider_context(args: argparse.Namespace) -> tuple[str, str, bool, object]:
+    project = getattr(args, "slices_project", None)
+    if not project:
+        raise BackendError(
+            "R2Lab prepare requires --slices-project or SYNTHRAN_SLICES_PROJECT"
+        )
+    experiment = getattr(args, "slices_experiment", None) or str(args.run_id)
+    duration = str(getattr(args, "slices_duration", "4h"))
+    if _SLICES_DURATION_RE.fullmatch(duration) is None:
+        raise BackendError("SLICES experiment duration must look like 30m or 4h")
+    timeout = min(max(int(args.timeout), 60), 300)
+
+    selected = slices_runner(("slices", "project", "use", str(project)), timeout)
+    if selected.returncode != 0:
+        raise SlicesControllerError("SLICES project selection failed")
+
+    shown = slices_runner(("slices", "experiment", "show", experiment), timeout)
+    created = False
+    if shown.returncode != 0:
+        created_result = slices_runner(
+            ("slices", "experiment", "create", experiment, "--duration", duration),
+            timeout,
+        )
+        if created_result.returncode != 0:
+            raise SlicesControllerError("SLICES experiment creation failed")
+        created = True
+
+    prefix = slices_runner(("post5g", "experiment", "prefix", experiment), timeout)
+    if prefix.returncode != 0:
+        raise SlicesControllerError("Post5G prefix acquisition failed")
+
+    report = verify_slices_controller(
+        lock=load_lock(Path(args.lock)),
+        project=str(project),
+        experiment=experiment,
+        timeout_seconds=timeout,
+    )
+    if report.post5g_network is None:
+        raise SlicesControllerError("Post5G provider network was not verified")
+    return str(project), experiment, created, report
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -224,6 +272,22 @@ class R2LabBackend:
             existing = commands.choices[name]
             _add_if_missing(existing, "--core-node", required=True)
             _add_if_missing(existing, "--ran-node", required=True)
+
+        prepare = commands.choices["prepare"]
+        if _action(prepare, "slices_project") is None:
+            command_runtime._add_slices_context(prepare)
+        _add_if_missing(
+            prepare,
+            "--slices-duration",
+            default="4h",
+            help="provider experiment duration when a new SLICES experiment is required",
+        )
+        _add_if_missing(
+            prepare,
+            "--lock",
+            type=Path,
+            default=Path("dependencies.lock.yml"),
+        )
 
         foundation = commands.choices.get("foundation")
         if foundation is None:
@@ -352,6 +416,7 @@ class R2LabBackend:
 
             if args.r2lab_command == "prepare":
                 topology = _topology_from_args(args)
+                project, experiment, created, controller = _ensure_slices_provider_context(args)
                 result = prepare_physical_resources(
                     run_id=args.run_id,
                     slice_name=_require_slice(args),
@@ -359,7 +424,16 @@ class R2LabBackend:
                     run_root=args.run_root,
                     timeout_seconds=args.timeout,
                 )
-                print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+                payload = result.to_dict()
+                assert controller.post5g_network is not None
+                payload["slices_provider"] = {
+                    "project": project,
+                    "experiment": experiment,
+                    "experiment_created": created,
+                    "network": controller.post5g_network.to_dict(),
+                    "controller_ready": controller.ready,
+                }
+                print(json.dumps(payload, indent=2, sort_keys=True))
                 return 0
 
             if args.r2lab_command == "foundation":
