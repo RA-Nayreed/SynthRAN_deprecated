@@ -1,84 +1,82 @@
-# Dependency Reuse and Updates
+# Dependencies
 
-## Reuse model
+SynthRAN integrates reviewed upstream projects by immutable identity. External repositories remain external dependencies; SynthRAN wraps them with validation, narrow overlays, evidence, and cleanup rather than vendoring or rewriting them.
 
-SynthRAN composes upstream systems; it does not absorb them.
+## Lock file
 
-- Git dependencies are complete detached checkouts at immutable commits.
-- Container images use immutable digests.
-- Direct Conda dependencies use exact versions under `conda.packages`, and the lock declares `linux-64` as the supported platform.
-- Mutable upstream branch names are provenance notes only and are never runtime selectors.
-- No Git submodules are used.
-- Dependency source belongs under ignored `.deps/` storage.
+`dependencies.lock.yml` is the reproducibility authority for reviewed upstream Git commits, tool versions, and container identities.
 
-Complete checkouts matter because `5g_ansible` and Contiki-NG behavior depends on repository-relative roles, examples, templates, build files, and scripts. Copying only visible entry points would make SynthRAN responsible for reconstructing undocumented upstream coupling.
+Synchronize the managed checkouts with:
 
-## Synchronization
-
-Activate `synthran` and install the repository command before running these operations.
-
-Preview direct checkouts:
-
-```sh
-synthran deps sync --dry-run
-```
-
-Synchronize them:
-
-```sh
+```zsh
 synthran deps sync
 ```
 
-Inspect locked transitive Git repositories as well:
+or select exact dependencies:
 
-```sh
-synthran deps sync --all
+```zsh
+synthran deps sync --name fiveg_ansible --name srsran_helm
 ```
 
-Sync named dependencies without inspecting unrelated checkouts:
+Managed checkouts live below ignored `.deps/` storage and are not committed.
 
-```sh
-synthran deps sync \
-  --name fiveg_ansible \
-  --name srsran_helm
+## Core upstream projects
+
+The run path depends on reviewed versions of components including:
+
+- `fiveg_ansible` for SLICES/R2Lab infrastructure and UE roles;
+- `srsran_helm` for reviewed srsRAN deployment/radio profiles;
+- Open5GS Kubernetes material used by the virtual and physical foundation;
+- Contiki-NG/Cooja for deterministic IoT traffic;
+- runtime tools such as Helm, Ansible, Mosquitto, iperf3, and provider CLIs.
+
+Exact commits and image identities belong in the lock file, not duplicated as mutable documentation claims.
+
+## Shared Ansible execution
+
+Ansible is a common actuation mechanism across both radio backends. Long Ansible work must use:
+
+```text
+synthran.ansible_streaming.run_streaming_ansible_command
 ```
 
-Synchronization refuses an origin mismatch or dirty managed checkout. It never merges an upstream branch and never discards local work.
+This applies to virtual deployment, physical Open5GS reconciliation, and R2Lab UE setup/connect/stop. The shared wrapper provides one sanitized progress/failure/heartbeat contract.
 
-## Golden-path variable mapping
+Do not add a second Ansible subprocess implementation for a new backend path.
 
-The pinned `5g_ansible` tree accepts its transitive repositories through Ansible variables:
+## Overlays
 
-| Locked dependency | Ansible variable |
-|---|---|
-| `sopnode/open5gs-k8s` | `repo_branch` |
-| `turletti/srsran-helm` | `version` |
+SynthRAN may create an isolated worktree or temporary copy of a locked upstream dependency and apply reviewed, deterministic transformations required by the experiment contract. Such transformations must:
 
-The golden-path planner and executor pass these exact commits. The SynthRAN-owned preparation overlay pins required Ansible collections and host tooling. Deployment is separately evidence-gated, verifies locked inputs, replaces selected mutable image tags with Linux AMD64 digests before Kubernetes sees a manifest, and uses an isolated detached `5g_ansible` worktree rather than invoking upstream `deploy.sh`.
+- start from the exact locked commit;
+- fail if expected upstream source no longer matches;
+- remain run-local;
+- record the resulting provenance/hash where relevant;
+- never mutate the managed locked checkout in place.
 
-The tracked preparation and deployment patches apply only to their locked upstream commits. A patch-context mismatch is terminal.
+## Containers
 
-## Research measurement dependencies
+Runtime container identities should be digest-addressed where supported. A mutable tag alone is not sufficient reproducibility evidence for a claimed accepted path.
 
-Controlled research experiments and capacity calibration rely on tooling across controller, host, and container environments:
+Physical radio images that are tied to a reviewed upstream profile must match the profile and lock contract before cluster mutation.
 
-- `iperf3` provides reference capacity and controlled UDP background load.
-- `ping` and `ip` provide continuous path probing and route ownership checks.
-- `pyarrow` derives deterministic compressed Parquet tables from accepted JSONL audit records.
-- OpenJDK provides the Java runtime required by Cooja.
+## Tool discovery
 
-The current operator interface does not require Node.js or an interactive-terminal library.
+A missing executable is an environment error, not permission to fetch an arbitrary replacement during a live run. Installation belongs to the reviewed environment/setup path. Live execution should use the dependency identities already selected by the repository environment and lock file.
 
-## Update procedure
+## Updating a dependency
 
-Update one dependency at a time:
+A dependency update should include:
 
-1. Resolve the intended source reference to an immutable commit or digest.
-2. Inspect its license and redistribution implications.
-3. Update `dependencies.lock.yml` and `THIRD_PARTY.md` together when provenance changes.
-4. Synchronize and verify a clean detached checkout.
-5. Run all offline tests and privacy checks.
-6. Complete the golden-path compatibility test appropriate to that dependency.
-7. Preserve accepted evidence outside generated or private repository paths.
+1. the new immutable identity in `dependencies.lock.yml`;
+2. adapter/overlay updates required by upstream changes;
+3. tests for the affected boundary;
+4. a clean privacy scan;
+5. fresh live evidence before capability claims are updated;
+6. third-party attribution updates if licensing/provenance changed.
 
-Do not copy `5g_ansible` source into SynthRAN. Its pinned tree has no asserted top-level license, so derivative publication requires clarification.
+A unit-test pass proves adapter consistency, not live acceptance. `docs/results.md` changes only when new accepted evidence justifies them.
+
+## Third-party attribution
+
+Licenses and provenance are summarized in [`../THIRD_PARTY.md`](../THIRD_PARTY.md). Do not remove attribution merely because a dependency is fetched dynamically rather than vendored.
