@@ -1,15 +1,12 @@
 """Physical R2Lab adapter for the deterministic SynthRAN IoT workload.
 
-The accepted virtual experiment deliberately owns an srsUE Deployment and
-``tun_srsue1``.  A COTS qfit UE has neither.  This module therefore reuses the
-stable Cooja/tunslip/collector contracts but replaces the virtual UE sidecar
-with a transient stdio relay that executes on the selected qfit and binds its
-outbound TCP socket to ``wwan0``.
-
-The relay is an integration adapter, not a substitute for physical-path proof.
-The caller must enter through the R2Lab workload handoff after user-plane
-acceptance; this executor additionally proves the exact central destination is
-routed through ``wwan0`` and requires the qfit interface counters to increase.
+The virtual experiment owns an srsUE Deployment and ``tun_srsue1``.  Physical
+FR1 Quectel UEs instead expose the accepted PDU session through ``wwan0``.  This
+module reuses the deterministic Cooja/tunslip/collector contracts and inserts a
+transient stdio relay on the exact selected UE.  The relay is an integration
+adapter, not a substitute for physical-path proof: the caller enters only after
+user-plane acceptance and this executor re-proves the destination route and
+interface counters while binding the run to its persisted topology.
 """
 
 from __future__ import annotations
@@ -84,15 +81,16 @@ from synthran.ingress import IngressSnapshot
 from synthran.iot import write_run_inputs
 from synthran.live_preflight import CommandResult, ssh_command
 from synthran.mqtt_collector import collect_mqtt
-from synthran.r2lab.controller import qfit_gateway_command
+from synthran.r2lab.hardware import UES, UeProfile
+from synthran.r2lab.resources import load_topology, ue_gateway_command
 from synthran.r2lab.ue import PhysicalWorkloadContext, PhysicalWorkloadResult
 
 
 DEFAULT_PHYSICAL_RUN_ROOT = Path(".synthran/experiments-r2lab")
-LOCAL_QFIT_RELAY_PORT = 18887
+DEFAULT_R2LAB_RUN_ROOT = Path(".synthran/r2lab")
+LOCAL_UE_RELAY_PORT = 18887
 KUBERNETES_NAMESPACE = "open5gs"
-_QFIT_INTERFACE = "wwan0"
-_QFIT_RE = re.compile(r"^qfit(?:07|09|18|29|32|34)$")
+_UE_INTERFACE = "wwan0"
 _SAFE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _RELAY_MARKER = "SYNTHRAN_R2LAB_RELAY"
 
@@ -144,18 +142,18 @@ class PhysicalExperimentScenario:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema": "synthran/iot-experiment-r2lab/v1alpha1",
+            "schema": "synthran/iot-experiment-r2lab/v1alpha2",
             "run_id": self.run_id,
             "network_run_id": self.network_run_id,
             "backend": "r2lab",
-            "ue_interface": _QFIT_INTERFACE,
+            "ue_interface": _UE_INTERFACE,
             "sensor_count": self.sensor_count,
             "sensor_period_seconds": self.sensor_period_seconds,
             "cooja_seed": self.cooja_seed,
             "serial_socket_port": self.serial_socket_port,
             "topic_root": self.topic_root,
             "rpl_prefix": "fd00::/64",
-            "edge_adapter": "qfit-stdio-tcp-relay",
+            "edge_adapter": "physical-ue-stdio-tcp-relay",
             "raw_pdu_address_persisted": False,
             "data_contract": "synthran/telemetry/v1alpha1",
         }
@@ -170,11 +168,12 @@ class PhysicalExperimentConfig:
     repository_root: Path
     workload_id: str
     run_root: Path = DEFAULT_PHYSICAL_RUN_ROOT
+    physical_run_root: Path = DEFAULT_R2LAB_RUN_ROOT
     collection_seconds: int = DEFAULT_COLLECTION_SECONDS
     minimum_per_sensor: int = DEFAULT_MINIMUM_PER_SENSOR
     cooja_seed: int = 424242
     sensor_period_seconds: int = 10
-    local_qfit_relay_port: int = LOCAL_QFIT_RELAY_PORT
+    local_ue_relay_port: int = LOCAL_UE_RELAY_PORT
     progress: TextIO | None = None
 
     def validate(self) -> "PhysicalExperimentConfig":
@@ -185,8 +184,8 @@ class PhysicalExperimentConfig:
             raise R2LabPhysicalExperimentError("collection duration must be between 30 and 3600 seconds")
         if self.minimum_per_sensor < 1 or self.minimum_per_sensor > 100:
             raise R2LabPhysicalExperimentError("minimum events per sensor must be between 1 and 100")
-        if self.local_qfit_relay_port < 1024 or self.local_qfit_relay_port > 65535:
-            raise R2LabPhysicalExperimentError("local qfit relay port is invalid")
+        if self.local_ue_relay_port < 1024 or self.local_ue_relay_port > 65535:
+            raise R2LabPhysicalExperimentError("local physical UE relay port is invalid")
         return self
 
 
@@ -303,11 +302,16 @@ def render_physical_central_objects(
     return config, deployment
 
 
-def _validate_qfit(qfit: str) -> str:
-    value = qfit.strip().lower()
-    if not _QFIT_RE.fullmatch(value):
-        raise R2LabPhysicalExperimentError("physical workload requires one reviewed qfit UE")
-    return value
+def _validate_ue(ue: str) -> UeProfile:
+    value = ue.strip().lower()
+    profile = UES.get(value)
+    if profile is None or not profile.executable or not profile.is_fr1_quectel:
+        raise R2LabPhysicalExperimentError(
+            "physical workload requires one executable FR1 Quectel UE"
+        )
+    if profile.data_interface != _UE_INTERFACE:
+        raise R2LabPhysicalExperimentError("selected physical UE does not expose wwan0")
+    return profile
 
 
 _RELAY_SCRIPT = r'''
@@ -345,19 +349,19 @@ sock.close()
 '''.strip()
 
 
-def build_qfit_stdio_relay_command(
+def build_physical_ue_stdio_relay_command(
     *,
     slice_name: str,
-    qfit: str,
+    ue: str,
     run_id: str,
     central_address: str,
     central_port: int = CENTRAL_PORT,
-    interface: str = _QFIT_INTERFACE,
+    interface: str = _UE_INTERFACE,
 ) -> tuple[str, ...]:
     """Build one strict SSH command whose remote socket is bound to wwan0."""
 
     validate_run_id(run_id)
-    _validate_qfit(qfit)
+    profile = _validate_ue(ue)
     try:
         address = ipaddress.ip_address(central_address)
     except ValueError as exc:
@@ -366,11 +370,11 @@ def build_qfit_stdio_relay_command(
         raise R2LabPhysicalExperimentError("current physical workload is IPv4-only")
     if central_port < 1 or central_port > 65535:
         raise R2LabPhysicalExperimentError("central broker port is invalid")
-    if interface != _QFIT_INTERFACE:
+    if interface != _UE_INTERFACE:
         raise R2LabPhysicalExperimentError("physical relay must bind to wwan0")
-    return qfit_gateway_command(
+    return ue_gateway_command(
         slice_name,
-        qfit,
+        profile,
         "python3",
         "-c",
         _RELAY_SCRIPT,
@@ -395,46 +399,48 @@ def route_uses_wwan0(text: str, destination: str) -> bool:
         item
         for item in payload
         if isinstance(item, dict)
-        and item.get("dev") == _QFIT_INTERFACE
+        and item.get("dev") == _UE_INTERFACE
         and str(item.get("dst", wanted)) == wanted
     ]
     return bool(matching)
 
 
-def _qfit_read(
+def _ue_read(
     *,
     slice_name: str,
-    qfit: str,
+    profile: UeProfile,
     command: Sequence[str],
     timeout_seconds: int = 30,
 ) -> CommandResult:
     result = _run(
-        qfit_gateway_command(slice_name, qfit, *tuple(command)),
+        ue_gateway_command(slice_name, profile, *tuple(command)),
         timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
-        raise R2LabPhysicalExperimentError("qfit workload precondition could not be observed")
+        raise R2LabPhysicalExperimentError(
+            "physical UE workload precondition could not be observed"
+        )
     return result
 
 
-def _qfit_counter(slice_name: str, qfit: str, counter: str) -> int:
+def _ue_counter(slice_name: str, profile: UeProfile, counter: str) -> int:
     if counter not in {"rx_bytes", "tx_bytes"}:
-        raise R2LabPhysicalExperimentError("unsupported qfit interface counter")
-    result = _qfit_read(
+        raise R2LabPhysicalExperimentError("unsupported physical UE interface counter")
+    result = _ue_read(
         slice_name=slice_name,
-        qfit=qfit,
-        command=("cat", f"/sys/class/net/{_QFIT_INTERFACE}/statistics/{counter}"),
+        profile=profile,
+        command=("cat", f"/sys/class/net/{_UE_INTERFACE}/statistics/{counter}"),
     )
     value = result.stdout.strip()
     if not value.isdigit():
-        raise R2LabPhysicalExperimentError("qfit interface counter returned malformed data")
+        raise R2LabPhysicalExperimentError("physical UE interface counter returned malformed data")
     return int(value)
 
 
-def _prove_qfit_route(slice_name: str, qfit: str, central_address: str) -> None:
-    route = _qfit_read(
+def _prove_ue_route(slice_name: str, profile: UeProfile, central_address: str) -> None:
+    route = _ue_read(
         slice_name=slice_name,
-        qfit=qfit,
+        profile=profile,
         command=("ip", "-j", "route", "get", central_address),
     )
     if not route_uses_wwan0(route.stdout, central_address):
@@ -443,17 +449,19 @@ def _prove_qfit_route(slice_name: str, qfit: str, central_address: str) -> None:
         )
 
 
-def _prove_qfit_python(slice_name: str, qfit: str) -> None:
-    result = _qfit_read(
+def _prove_ue_python(slice_name: str, profile: UeProfile) -> None:
+    result = _ue_read(
         slice_name=slice_name,
-        qfit=qfit,
+        profile=profile,
         command=("python3", "-c", "import socket; print('ok')"),
     )
     if result.stdout.strip() != "ok":
-        raise R2LabPhysicalExperimentError("qfit python3 relay capability is unavailable")
+        raise R2LabPhysicalExperimentError("physical UE python3 relay capability is unavailable")
 
 
-def _qfit_relay_process_count(slice_name: str, qfit: str, run_id: str) -> int:
+def _ue_relay_process_count(
+    slice_name: str, profile: UeProfile, run_id: str
+) -> int:
     validate_run_id(run_id)
     probe = r'''
 import os, sys
@@ -472,14 +480,16 @@ for entry in os.listdir('/proc'):
         count += 1
 print(count)
 '''.strip()
-    result = _qfit_read(
+    result = _ue_read(
         slice_name=slice_name,
-        qfit=qfit,
+        profile=profile,
         command=("python3", "-c", probe, _RELAY_MARKER, run_id),
     )
     value = result.stdout.strip()
     if not value.isdigit():
-        raise R2LabPhysicalExperimentError("qfit relay cleanup probe returned malformed data")
+        raise R2LabPhysicalExperimentError(
+            "physical UE relay cleanup probe returned malformed data"
+        )
     return int(value)
 
 
@@ -584,8 +594,8 @@ class _RelayHandler(socketserver.BaseRequestHandler):
         self.server.unregister_child(process)
 
 
-class ManagedQfitRelay:
-    """Local TCP endpoint that creates one strict qfit stdio relay per client."""
+class ManagedPhysicalUeRelay:
+    """Local TCP endpoint creating one strict selected-UE stdio relay per client."""
 
     def __init__(self, *, port: int, command: tuple[str, ...]) -> None:
         self.server = _RelayTCPServer(("127.0.0.1", port), command)
@@ -608,26 +618,30 @@ class ManagedQfitRelay:
 def _physical_manifest(
     *,
     scenario: PhysicalExperimentScenario,
+    ue: str,
+    mode: str,
     status: str,
     cleanup_proven: bool,
     failure: str | None,
     data_evidence_sha256: str | None,
-    qfit_tx_delta: int | None,
-    qfit_rx_delta: int | None,
+    ue_tx_delta: int | None,
+    ue_rx_delta: int | None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
-        "schema": "synthran/r2lab-physical-iot-workload/v1alpha1",
+        "schema": "synthran/r2lab-physical-iot-workload/v1alpha2",
         "run_id": scenario.run_id,
         "physical_run_id": scenario.network_run_id,
         "backend": "r2lab",
-        "ue_interface": _QFIT_INTERFACE,
+        "ue": ue,
+        "ue_mode": mode,
+        "ue_interface": _UE_INTERFACE,
         "status": status,
         "cleanup_proven": cleanup_proven,
         "data_evidence_sha256": data_evidence_sha256,
-        "qfit_tx_delta_bytes": qfit_tx_delta,
-        "qfit_rx_delta_bytes": qfit_rx_delta,
+        "ue_tx_delta_bytes": ue_tx_delta,
+        "ue_rx_delta_bytes": ue_rx_delta,
         "raw_pdu_address_persisted": False,
-        "raw_qfit_route_persisted": False,
+        "raw_ue_route_persisted": False,
         "updated_at_utc": datetime.now(timezone.utc)
         .isoformat()
         .replace("+00:00", "Z"),
@@ -697,12 +711,7 @@ def execute_physical_iot_workload(
     *,
     config: PhysicalExperimentConfig,
 ) -> PhysicalWorkloadResult:
-    """Run the deterministic 10-sensor workload through qfit/wwan0.
-
-    This function assumes it is called by ``execute_physical_workload_handoff``
-    after the ordered physical user-plane stage has passed.  It performs no R2Lab
-    booking, radio power, modem attach, or gNB lifecycle mutation.
-    """
+    """Run the deterministic 10-sensor workload through the selected UE/wwan0."""
 
     config.validate()
     if sys.platform != "linux":
@@ -711,9 +720,25 @@ def execute_physical_iot_workload(
         raise R2LabPhysicalExperimentError(
             "physical workload execution requires the active synthran Conda environment"
         )
-    if context.interface != _QFIT_INTERFACE:
+    if context.interface != _UE_INTERFACE:
         raise R2LabPhysicalExperimentError("physical workload context must use wwan0")
-    qfit = _validate_qfit(context.qfit)
+    profile = _validate_ue(context.ue)
+    topology = load_topology(
+        run_root=config.physical_run_root,
+        run_id=context.run_id,
+    ).validate()
+    if topology.ue != context.ue:
+        raise R2LabPhysicalExperimentError(
+            "physical workload context does not match the persisted UE selection"
+        )
+    inventory = config.inventory
+    if (
+        inventory.core_node.name != topology.core_node
+        or inventory.ran_node.name != topology.ran_node
+    ):
+        raise R2LabPhysicalExperimentError(
+            "physical workload inventory does not match the persisted compute topology"
+        )
     scenario = PhysicalExperimentScenario(
         run_id=config.workload_id,
         network_run_id=context.run_id,
@@ -721,7 +746,6 @@ def execute_physical_iot_workload(
         cooja_seed=config.cooja_seed,
     )
 
-    inventory = config.inventory
     lock = config.lock
     repository_root = config.repository_root.resolve()
     dependency_root = config.dependency_root.resolve()
@@ -733,13 +757,13 @@ def execute_physical_iot_workload(
         if config.progress is not None:
             print(f"[synthran] {message}", file=config.progress, flush=True)
 
-    # Fail before run-scoped mutation if the physical path cannot host the
-    # workload adapter or the destination route is not currently cellular.
-    _prove_qfit_python(config.slice_name, qfit)
-    _prove_qfit_route(config.slice_name, qfit, core_address)
-    if _qfit_relay_process_count(config.slice_name, qfit, scenario.run_id) != 0:
+    # Fail before run-scoped mutation if the selected cellular route cannot host
+    # the relay or the destination is not currently routed through wwan0.
+    _prove_ue_python(config.slice_name, profile)
+    _prove_ue_route(config.slice_name, profile, core_address)
+    if _ue_relay_process_count(config.slice_name, profile, scenario.run_id) != 0:
         raise R2LabPhysicalExperimentError(
-            "an existing qfit relay still owns this workload ID"
+            "an existing physical UE relay still owns this workload ID"
         )
     _probe_experiment_host(
         inventory,
@@ -781,12 +805,14 @@ def execute_physical_iot_workload(
     _save_manifest(
         manifest_path,
         {
-            "schema": "synthran/experiment-run-r2lab/v1alpha1",
+            "schema": "synthran/experiment-run-r2lab/v1alpha2",
             "run_id": scenario.run_id,
             "physical_run_id": context.run_id,
             "status": "running",
             "backend": "r2lab",
-            "ue_interface": _QFIT_INTERFACE,
+            "ue": context.ue,
+            "ue_mode": profile.mode,
+            "ue_interface": _UE_INTERFACE,
             "scenario": scenario_path.name,
             "reservation_action": "none",
             "network_deployment_action": "none",
@@ -794,7 +820,7 @@ def execute_physical_iot_workload(
     )
 
     processes: list[ManagedProcess] = []
-    relay: ManagedQfitRelay | None = None
+    relay: ManagedPhysicalUeRelay | None = None
     central_deployment = physical_central_name(scenario.run_id)
     remote_workspace = f"/tmp/synthran/{scenario.run_id}"
     remote_workspace_created = False
@@ -825,33 +851,31 @@ def execute_physical_iot_workload(
             )
         _central_rollout(inventory, central_deployment)
 
-        # Re-prove the destination route after the central endpoint exists and
-        # before any sensor traffic is accepted.
-        _prove_qfit_route(config.slice_name, qfit, core_address)
-        tx_before = _qfit_counter(config.slice_name, qfit, "tx_bytes")
-        rx_before = _qfit_counter(config.slice_name, qfit, "rx_bytes")
+        _prove_ue_route(config.slice_name, profile, core_address)
+        tx_before = _ue_counter(config.slice_name, profile, "tx_bytes")
+        rx_before = _ue_counter(config.slice_name, profile, "rx_bytes")
 
-        relay_command = build_qfit_stdio_relay_command(
+        relay_command = build_physical_ue_stdio_relay_command(
             slice_name=config.slice_name,
-            qfit=qfit,
+            ue=context.ue,
             run_id=scenario.run_id,
             central_address=core_address,
         )
-        relay = ManagedQfitRelay(
-            port=config.local_qfit_relay_port,
+        relay = ManagedPhysicalUeRelay(
+            port=config.local_ue_relay_port,
             command=relay_command,
         )
         relay.start()
 
         reverse_edge = _start_process(
-            "physical qfit edge reverse tunnel",
+            "physical UE edge reverse tunnel",
             _ssh_reverse_tunnel_command(
                 inventory,
                 remote_port=REMOTE_EDGE_FORWARD_PORT,
                 local_port=relay.port,
             ),
             cwd=repository_root,
-            log_path=logs / "qfit-edge-reverse-tunnel.log",
+            log_path=logs / "physical-ue-edge-reverse-tunnel.log",
         )
         processes.append(reverse_edge)
         _wait_remote_tcp(
@@ -997,12 +1021,12 @@ def execute_physical_iot_workload(
                 break
             time.sleep(1)
         else:
-            raise R2LabPhysicalExperimentError("tun0 did not become ready on the core node")
+            raise R2LabPhysicalExperimentError("tun0 did not become ready on the selected core node")
         checks.append(
             ExperimentCheck(
                 "rpl-border-router",
                 True,
-                "Cooja SerialSocket is bridged through remote tunslip6/tun0",
+                "Cooja SerialSocket is bridged through selected-core tunslip6/tun0",
             )
         )
 
@@ -1061,12 +1085,12 @@ def execute_physical_iot_workload(
             ExperimentCheck(
                 "edge-adapter",
                 True,
-                "ten-sensor MQTT ingress crossed the qfit stdio relay adapter",
+                "ten-sensor MQTT ingress crossed the selected physical UE stdio relay",
             )
         )
 
-        tx_after = _qfit_counter(config.slice_name, qfit, "tx_bytes")
-        rx_after = _qfit_counter(config.slice_name, qfit, "rx_bytes")
+        tx_after = _ue_counter(config.slice_name, profile, "tx_bytes")
+        rx_after = _ue_counter(config.slice_name, profile, "rx_bytes")
         if tx_before is None or tx_after <= tx_before:
             raise R2LabPhysicalExperimentError(
                 "wwan0 TX counter did not increase during physical telemetry delivery"
@@ -1079,7 +1103,7 @@ def execute_physical_iot_workload(
                 f"rx +{max(0, rx_after - (rx_before or 0))})",
             )
         )
-        _prove_qfit_route(config.slice_name, qfit, core_address)
+        _prove_ue_route(config.slice_name, profile, core_address)
         checks.append(
             ExperimentCheck(
                 "physical-route",
@@ -1115,7 +1139,7 @@ def execute_physical_iot_workload(
             try:
                 relay.stop()
             except Exception as exc:
-                cleanup_errors.append(f"qfit relay cleanup: {exc}")
+                cleanup_errors.append(f"physical UE relay cleanup: {exc}")
 
         try:
             _cleanup_remote_run_processes(
@@ -1154,10 +1178,10 @@ def execute_physical_iot_workload(
             cleanup_errors.append(f"run-scoped Kubernetes cleanup: {exc}")
 
         try:
-            if _qfit_relay_process_count(config.slice_name, qfit, scenario.run_id) != 0:
-                cleanup_errors.append("qfit relay processes remain after cleanup")
+            if _ue_relay_process_count(config.slice_name, profile, scenario.run_id) != 0:
+                cleanup_errors.append("physical UE relay processes remain after cleanup")
         except Exception as exc:
-            cleanup_errors.append(f"qfit relay cleanup postcondition: {exc}")
+            cleanup_errors.append(f"physical UE relay cleanup postcondition: {exc}")
 
         try:
             _probe_experiment_host(
@@ -1196,23 +1220,27 @@ def execute_physical_iot_workload(
         physical_summary_path,
         _physical_manifest(
             scenario=scenario,
+            ue=context.ue,
+            mode=profile.mode,
             status="iot-to-5g-path-proven" if accepted else "failed",
             cleanup_proven=cleanup_proven,
             failure=failure,
             data_evidence_sha256=data_digest,
-            qfit_tx_delta=tx_delta,
-            qfit_rx_delta=rx_delta,
+            ue_tx_delta=tx_delta,
+            ue_rx_delta=rx_delta,
         ),
     )
     _save_manifest(
         manifest_path,
         {
-            "schema": "synthran/experiment-run-r2lab/v1alpha1",
+            "schema": "synthran/experiment-run-r2lab/v1alpha2",
             "run_id": scenario.run_id,
             "physical_run_id": context.run_id,
             "status": "iot-to-5g-path-proven" if accepted else "failed",
             "backend": "r2lab",
-            "ue_interface": _QFIT_INTERFACE,
+            "ue": context.ue,
+            "ue_mode": profile.mode,
+            "ue_interface": _UE_INTERFACE,
             "scenario": scenario_path.name,
             "physical_workload": physical_summary_path.name,
             "reservation_action": "none",
@@ -1224,16 +1252,14 @@ def execute_physical_iot_workload(
         run_id=context.run_id,
         workload_id=scenario.run_id,
         backend="r2lab",
-        interface=_QFIT_INTERFACE,
+        interface=_UE_INTERFACE,
         evidence_sha256=sha256_file(physical_summary_path),
         accepted=accepted,
         cleanup_proven=cleanup_proven,
     )
 
 
-def build_physical_workload_executor(
-    config: PhysicalExperimentConfig,
-):
+def build_physical_workload_executor(config: PhysicalExperimentConfig):
     """Return the concrete executor expected by the R2Lab workload handoff."""
 
     config.validate()
