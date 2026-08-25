@@ -1,9 +1,7 @@
 """Pinned 5g-Ansible actuation boundary for one selected R2Lab UE.
 
-SynthRAN owns authority, exact resource selection, time bounds, postcondition
-verification, and public evidence.  The pinned upstream ``r2lab/ue/connect``
-and ``r2lab/ue/stop`` roles own modem mechanics such as ``start.sh``,
-``stop.sh``, ``quectel-CM`` and ``ci_ctl_qtel.py``.
+SynthRAN owns authority, exact resource selection, postconditions, and public
+evidence.  Modem/setup mechanics stay in the locked upstream Ansible roles.
 """
 
 from __future__ import annotations
@@ -24,19 +22,29 @@ from synthran.r2lab.controller import _configured_identity
 from synthran.r2lab.hardware import PhysicalTopology
 
 
-UeRoleAction = Literal["connect", "stop"]
+UeRoleAction = Literal["setup", "connect", "stop"]
 RunCommand = Callable[[Sequence[str], Path, Mapping[str, str] | None, int], CommandResult]
 CheckoutValidator = Callable[[DependencyLock, Path], Path]
 
 FIVEG_PROFILE = "synthran"
 UPSTREAM_PROFILE = "group_vars/all/5g_profile_default.yaml"
+SETUP_ROLE = "roles/r2lab/ue/setup/tasks/main.yml"
 CONNECT_ROLE = "roles/r2lab/ue/connect/tasks/main.yml"
 STOP_ROLE = "roles/r2lab/ue/stop/tasks/main.yml"
 OPEN5GS_SLICE_NAME = "slice1"
 OPEN5GS_DNN = "internet"
 OPEN5GS_UE_PREFIX = "12.1.1"
 OPEN5GS_UPF_ADDRESS = f"{OPEN5GS_UE_PREFIX}.1"
-ROLE_TIMEOUT_SECONDS = 180
+
+# The locked upstream QMI connect role can legitimately spend more than 180 s
+# in its own retry loops.  These are action floors, not acceptance timeouts;
+# SynthRAN still applies its independent postcondition window afterwards.
+_ROLE_TIMEOUT_FLOORS: Mapping[UeRoleAction, int] = {
+    "setup": 600,
+    "connect": 300,
+    "stop": 120,
+}
+ROLE_TIMEOUT_SECONDS = 900
 
 
 class R2LabUeAnsibleError(RuntimeError):
@@ -78,23 +86,20 @@ def _dependency_commit(lock: DependencyLock) -> str:
 
 
 def _validate_pinned_profile(checkout: Path, topology: PhysicalTopology) -> None:
-    """Fail closed if the locked role/profile contract no longer matches R2Lab."""
-
-    required_interfaces = (UPSTREAM_PROFILE, CONNECT_ROLE, STOP_ROLE)
-    if any(not (checkout / relative).is_file() for relative in required_interfaces):
-        raise R2LabUeAnsibleError("pinned 5g-Ansible checkout is missing UE role interfaces")
-    profile_path = checkout / UPSTREAM_PROFILE
+    required = (UPSTREAM_PROFILE, SETUP_ROLE, CONNECT_ROLE, STOP_ROLE)
+    if any(not (checkout / relative).is_file() for relative in required):
+        raise R2LabUeAnsibleError("pinned 5g-Ansible checkout is missing R2Lab UE roles")
     try:
-        profile = profile_path.read_text(encoding="utf-8")
+        profile = (checkout / UPSTREAM_PROFILE).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise R2LabUeAnsibleError("pinned 5g-Ansible profile is unavailable") from exc
-    required = (
+    contract = (
         f"  - name: {OPEN5GS_SLICE_NAME}\n",
         f"    dnn: {OPEN5GS_DNN}\n",
         f"    ip_prefix: \"{OPEN5GS_UE_PREFIX}\"\n",
         f"  {topology.ue}:\n",
     )
-    if any(item not in profile for item in required):
+    if any(item not in profile for item in contract):
         raise R2LabUeAnsibleError(
             "pinned 5g-Ansible UE profile no longer matches the SynthRAN Open5GS contract"
         )
@@ -107,59 +112,84 @@ def _selected_host(topology: PhysicalTopology) -> str:
     return host
 
 
-def _inventory(*, slice_name: str, topology: PhysicalTopology) -> str:
-    host = _selected_host(topology)
-    mode = topology.ue_profile.mode
-    if mode not in {"mbim", "qmi"}:
-        raise R2LabUeAnsibleError("selected UE mode is unsupported by the pinned connect role")
+def _safe_slice(slice_name: str) -> str:
     if not slice_name or any(
         not (character.isalnum() or character in "._-") for character in slice_name
     ):
         raise R2LabUeAnsibleError("R2Lab slice name is unsafe for Ansible inventory")
-    return (
+    return slice_name
+
+
+def _role_ue(topology: PhysicalTopology, action: UeRoleAction) -> str:
+    if action == "setup":
+        if topology.ue_profile.kind != "qhat":
+            raise R2LabUeAnsibleError(
+                "the pinned setup role cannot safely map qfit resource names to FIT runtime hosts"
+            )
+        return topology.ue
+    return _selected_host(topology)
+
+
+def _inventory(*, slice_name: str, topology: PhysicalTopology, action: UeRoleAction) -> str:
+    slice_name = _safe_slice(slice_name)
+    role_ue = _role_ue(topology, action)
+    mode = topology.ue_profile.mode
+    if mode not in {"mbim", "qmi"}:
+        raise R2LabUeAnsibleError("selected UE mode is unsupported by the pinned UE roles")
+
+    # Use the literal host name because the pinned stop/setup roles delegate to
+    # faraday.inria.fr explicitly.  This keeps the slice user/key attached to
+    # both normal execution and delegated tasks.
+    faraday = (
         "[faraday]\n"
-        f"faraday ansible_host=faraday.inria.fr ansible_user={slice_name} "
+        f"faraday.inria.fr ansible_user={slice_name} "
         "ansible_ssh_common_args='-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes'\n\n"
-        "[selected_ue]\n"
-        f"{host} mode={mode}\n"
     )
+    if action == "setup":
+        return faraday + "[qhats]\n" + f"{role_ue} mode={mode}\n"
+    return faraday + "[selected_ue]\n" + f"{role_ue} mode={mode}\n"
 
 
-def _profile(topology: PhysicalTopology) -> str:
-    host = _selected_host(topology)
+def _profile(topology: PhysicalTopology, action: UeRoleAction) -> str:
+    role_ue = _role_ue(topology, action)
     return (
         "slices:\n"
         f"  - name: {OPEN5GS_SLICE_NAME}\n"
         f"    dnn: {OPEN5GS_DNN}\n"
+        "    sst: \"1\"\n"
+        "    sd: \"EMPTY\"\n"
         f"    ip_prefix: \"{OPEN5GS_UE_PREFIX}\"\n"
         "ues:\n"
-        f"  {host}:\n"
+        f"  {role_ue}:\n"
         f"    slice: {OPEN5GS_SLICE_NAME}\n"
     )
 
 
 def _playbook(*, action: UeRoleAction, topology: PhysicalTopology) -> str:
-    host = _selected_host(topology)
-    role = f"r2lab/ue/{action}"
-    role_vars = (
-        f"        ue_item: {host}\n"
-        if action == "stop"
-        else (
-            f"        ue_item: {host}\n"
-            f"        fiveg_profile: {FIVEG_PROFILE}\n"
-            "        ignore_task_errors: false\n"
-        )
-    )
+    role_ue = _role_ue(topology, action)
+    vars_: list[str] = []
+    if action == "setup":
+        vars_.extend((f"        fiveg_profile: {FIVEG_PROFILE}", f"        rru: {topology.radio}"))
+    else:
+        vars_.append(f"        ue_item: {role_ue}")
+        if action == "connect":
+            vars_.extend((f"        fiveg_profile: {FIVEG_PROFILE}", "        ignore_task_errors: false"))
+    rendered_vars = "\n".join(vars_) + "\n"
     return (
         "---\n"
         f"- name: SynthRAN selected R2Lab UE {action}\n"
         "  hosts: faraday\n"
         "  gather_facts: false\n"
         "  roles:\n"
-        f"    - role: {role}\n"
+        f"    - role: r2lab/ue/{action}\n"
         "      vars:\n"
-        f"{role_vars}"
+        f"{rendered_vars}"
     )
+
+
+def _effective_timeout(action: UeRoleAction, requested: int) -> int:
+    floor = _ROLE_TIMEOUT_FLOORS[action]
+    return min(max(int(requested), floor), ROLE_TIMEOUT_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -206,12 +236,12 @@ def execute_selected_ue_role(
     runner: RunCommand = run_command,
     checkout_validator: CheckoutValidator = validate_fiveg_checkout,
 ) -> UeRoleResult:
-    """Run exactly one pinned upstream UE role for the selected physical UE."""
+    """Run one locked upstream UE role for the exact selected physical UE."""
 
     topology = topology.validate()
-    if action not in {"connect", "stop"}:
-        raise R2LabUeAnsibleError("physical UE role action must be connect or stop")
-    timeout_seconds = max(30, min(int(timeout_seconds), ROLE_TIMEOUT_SECONDS))
+    if action not in {"setup", "connect", "stop"}:
+        raise R2LabUeAnsibleError("physical UE role action must be setup, connect, or stop")
+    timeout_seconds = _effective_timeout(action, timeout_seconds)
     try:
         lock = load_lock(lock_path)
         checkout = checkout_validator(lock, deps_root.expanduser().resolve())
@@ -219,8 +249,8 @@ def execute_selected_ue_role(
         raise R2LabUeAnsibleError(str(exc)) from exc
     _validate_pinned_profile(checkout, topology)
 
-    inventory_text = _inventory(slice_name=slice_name, topology=topology)
-    profile_text = _profile(topology)
+    inventory_text = _inventory(slice_name=slice_name, topology=topology, action=action)
+    profile_text = _profile(topology, action)
     playbook_text = _playbook(action=action, topology=topology)
     physical = run_root.expanduser().resolve() / run_id / "physical"
     evidence_path = physical / f"physical-ue-role-{action}.json"
@@ -239,7 +269,7 @@ def execute_selected_ue_role(
     if identity is not None:
         environment["ANSIBLE_PRIVATE_KEY_FILE"] = str(identity)
 
-    result_payload = UeRoleResult(
+    payload = UeRoleResult(
         run_id=run_id,
         ue=topology.ue,
         host=_selected_host(topology),
@@ -252,7 +282,7 @@ def execute_selected_ue_role(
         status="running",
         evidence_path=evidence_path,
     )
-    _atomic_json(evidence_path, result_payload.to_dict())
+    _atomic_json(evidence_path, payload.to_dict())
 
     try:
         with tempfile.TemporaryDirectory(prefix="ue-ansible-", dir=physical) as directory:
@@ -274,15 +304,15 @@ def execute_selected_ue_role(
                 timeout_seconds,
             )
     except Exception as exc:
-        failed = UeRoleResult(**{**result_payload.__dict__, "status": "failed"})
+        failed = UeRoleResult(**{**payload.__dict__, "status": "failed"})
         _atomic_json(evidence_path, failed.to_dict())
         raise R2LabUeAnsibleError(f"pinned 5g-Ansible UE {action} role could not complete") from exc
 
     if result.returncode != 0:
-        failed = UeRoleResult(**{**result_payload.__dict__, "status": "failed"})
+        failed = UeRoleResult(**{**payload.__dict__, "status": "failed"})
         _atomic_json(evidence_path, failed.to_dict())
         raise R2LabUeAnsibleError(f"pinned 5g-Ansible UE {action} role returned nonzero")
 
-    completed = UeRoleResult(**{**result_payload.__dict__, "status": "completed"})
+    completed = UeRoleResult(**{**payload.__dict__, "status": "completed"})
     _atomic_json(evidence_path, completed.to_dict())
     return completed
