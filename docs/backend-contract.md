@@ -1,76 +1,172 @@
-# Backend Contract
+# Backend contract
 
-SynthRAN exposes one experiment lifecycle through the `synthran` executable. RFSIM and R2Lab are backend implementations of that lifecycle. RFSIM remains the accepted virtual reference path; R2Lab provides the corresponding physical-radio path. Backend choice may change how a stage is realized, but it must not change the meaning of experiment acceptance, research data, or cleanup.
+SynthRAN exposes RFSIM and R2Lab through the same operator lifecycle. This document defines what must remain common and what may legitimately differ.
 
-A backend is conformant only for stages it can prove from current observations. Historical evidence does not authorize a current operation, and an implementation must not report a later stage when an earlier required stage is unproven.
+## Public contract
 
-## Lifecycle contract
+A backend is selected only through:
 
-| Stage | Required proof | RFSIM realization | R2Lab realization |
-| --- | --- | --- | --- |
-| Access | Current provider identity and authority are valid for the requested run. | Current SLICES project and experiment context. | Current SLICES context plus current R2Lab lease and physical-resource authority. |
-| Resources | Exact run-owned resources required by the selected backend are available. | Prepared compute resources for core and RAN/UE execution. | Prepared compute resources plus the selected radio and UE resources. |
-| Kubernetes | The cluster is reachable and the expected nodes are ready. | Prepared SLICES cluster. | Prepared SLICES cluster. |
-| Core | Open5GS is ready and bound to the current run context. | Open5GS on the selected core node. | Open5GS on the selected core node. |
-| gNB | The current gNB instance is ready and bound to the intended backend. | srsRAN gNB using RFSIM. | Physical gNB using the selected R2Lab radio. |
-| N2 | The current gNB has a stable AMF association. | Current N2 observation from the virtual gNB/core path. | Current N2 observation from the physical gNB/core path. |
-| UE management | The selected UE can be observed and controlled through the backend's management boundary. | srsUE process and pod state. | Selected qfit/qhat management path and modem state. |
-| Cell | The UE observes the intended NR cell through the selected radio path. | RFSIM cell visibility. | Physical NR cell acquisition. |
-| Registration | The UE is currently registered on the intended 5G network. | Current srsUE registration state. | Current modem registration state. |
-| PDU | A current PDU session exists and has a usable address. | `tun_srsue1` with the accepted PDU address. | `wwan0` or the selected physical UE data interface with the accepted PDU address. |
-| User plane | Traffic is proven to traverse the accepted PDU path. | Route, reachability, and counters through `tun_srsue1`. | Route, reachability, and counters through the physical UE data interface. |
-| Workload | The canonical IoT workload traverses the accepted 5G path. | Deterministic Cooja workload through the RFSIM user plane. | The same deterministic Cooja workload through the physical user plane. |
-| Data | Canonical telemetry and derived research artifacts satisfy the same schemas and validity rules. | JSONL audit data and deterministic Parquet derivative. | JSONL audit data and deterministic Parquet derivative. |
-| Acceptance | Persisted evidence binds the run, backend, resources, network path, workload, and validity checks. | Virtual-path evidence. | Physical-path evidence with the same experiment-level meaning. |
-| Cleanup | Only exact run-owned state is removed or restored, and the backend can prove the resulting safe state. | Run-owned process, Kubernetes, tunnel, and experiment cleanup. | Run-owned process and Kubernetes cleanup plus exact physical-resource restoration or release. |
+```text
+synthran run --radio rfsim ...
+synthran run --radio r2lab ...
+```
 
-## Common semantics
+Backend-specific lifecycle command groups are not part of the product interface. Readiness, inspection, logs, and cleanup are likewise backend-neutral top-level commands.
 
-The backend boundary ends below experiment semantics. Code above that boundary must not infer lifecycle behavior from backend-specific names such as `tun_srsue1`, `wwan0`, a qfit identifier, a pod name, or an R2Lab radio identifier. A backend supplies current accepted network and user-plane context; the experiment layer consumes that context.
+## Common run semantics
 
-The canonical IoT experiment keeps the same scientific inputs across backends where the hardware permits them: sensor count, Contiki-NG/Cooja source, seed, sensor period, MQTT topic semantics, collection window, minimum observation rules, integrity checks, and research validity gates. Physical RF measurements may differ from RFSIM measurements; data meaning and validation rules do not.
+Every accepted run must have:
 
-Backend-specific diagnostics may expose additional observations needed to establish or repair a stage. They are not a second lifecycle and must not create an alternative definition of experiment success.
+- one immutable run ID;
+- verified provider context;
+- exact resource authority;
+- a proven 5G data path;
+- the deterministic ten-sensor workload;
+- persisted acceptance evidence;
+- a sanitized run event stream;
+- bounded, exact cleanup semantics.
 
-## Evidence rules
+A backend may not declare acceptance merely because deployment returned zero. Acceptance is evidence-based and must prove the required path.
 
-Every accepted stage must be tied to the current run and to the resources that produced it. Evidence must distinguish observation from mutation and must include enough identity to reject stale or foreign state.
+## Allowed backend differences
 
-Current provider or direct observation outranks persisted evidence, manifests, and caches for mutation authority. Persisted evidence proves that an earlier event occurred; it does not make a lease, allocation, gNB, UE registration, PDU session, or user-plane route current.
+The following are implementation details and may differ:
 
-A later stage may depend on evidence from an earlier stage only when that evidence is still current under the stage's freshness and identity rules. Physical mutations additionally require current physical authority immediately before the mutation boundary.
+| Concern | RFSIM | R2Lab |
+| --- | --- | --- |
+| Radio | virtual RFSIM | N300/N320 |
+| UE | srsUE | selected FR1 Quectel UE |
+| Hardware authority | SLICES compute resources | SLICES compute + active R2Lab lease + exact radio/UE claim |
+| Registration observation | srsUE/Kubernetes state | modem/runtime state |
+| PDU interface | `tun_srsue1` | selected physical data interface, normally `wwan0` |
+| gNB deployment | virtual srsRAN path | pinned N3xx Helm values and singleton hardware radio |
+| Cleanup | run-owned virtual/network resources | run-owned gNB + exact radio/UE resources |
 
-### Hash policy
+These differences must stay below the experiment data contract.
 
-Cryptographic digests are used where byte identity is the actual property being protected: pinned external revisions, downloaded tools, container images, rendered deployment artifacts, immutable data products, and persisted provenance. They are not a substitute for current ownership or live state.
+## Experiment semantics that must not differ
 
-A runtime stage must not repeatedly hash or propagate an unchanged artifact merely to authorize the next operation when exact run/resource identity and a fresh provider or direct observation already prove that boundary. Hash checks belong at artifact creation, transfer, loading, or provenance verification boundaries; live lease, allocation, radio, gNB, UE, PDU, route, and cleanup authority is established from current state.
+The following meanings are backend-independent:
 
-## Ownership and cleanup
+- run identity;
+- deterministic Cooja seed and sensor configuration;
+- telemetry schema and sequence semantics;
+- collection-window definition;
+- minimum evidence gates;
+- artifact hashing and provenance;
+- accepted/failed status meaning;
+- immutable failure evidence;
+- cleanup evidence.
 
-Both backends use exact ownership. SynthRAN must not infer ownership from a broad name pattern when a run identifier, provider identifier, allocation identifier, process identifier, namespace label, or other exact binding is available.
+A physical interface name or radio identifier must not appear as a new scientific telemetry field unless the field is genuinely part of the experimental variable being studied.
 
-Cleanup is idempotent with respect to already-absent run-owned state. It must fail closed when ownership is unknown or when removing a target could affect another run. Physical cleanup must not use global radio or UE power-off operations when the selected resource can be addressed exactly.
+## Authority rules
 
-If an operation fails after mutation and safe rollback cannot be proven, the result is a recovery condition rather than a successful cleanup.
+Current live control uses fresh provider/runtime observation. The ordering is:
 
-## Interface invariants
+```text
+current provider state
+> current direct runtime observation
+> persisted acceptance evidence
+> manifests
+> cached information
+```
 
-The supported operator executable is `synthran`. Public lifecycle commands select or resolve a backend and then invoke the same lifecycle semantics. Backend implementation modules are internal integration boundaries, not independent products.
+Persisted evidence can justify resuming a run only when the current authority and current target state are reverified.
 
-RFSIM is retained as the virtual reference backend. Physical support is conformant only when the same required stages are proven through R2Lab hardware. Static implementation capability does not itself claim that a physical run is currently accepted; live acceptance still requires current evidence from the selected hardware and provider resources.
+Unknown, stale, foreign, expired, malformed, or ambiguous ownership fails closed.
 
-## Conformance tests
+## Provider rules
 
-Backend-neutral tests should assert the contract at the semantic boundary rather than compare implementation details. At minimum, conformance covers:
+A SLICES project must already exist. The operator must already be authenticated. A run may:
 
-- stage ordering and fail-closed behavior;
-- current authority and ownership checks;
-- gNB and N2 identity binding;
-- UE, registration, PDU, and user-plane acceptance;
-- workload handoff through an accepted user plane;
-- common telemetry and evidence schemas;
-- immutable run identity and provenance;
-- exact, idempotent cleanup.
+- select the configured project;
+- create or reuse the provider experiment associated with the run;
+- acquire the Post5G prefix;
+- verify the active provider network.
 
-Hardware integration tests may require an active R2Lab lease and are separate from offline unit tests. Passing offline tests alone is not evidence that a physical stage is live-accepted.
+A run must not create projects, bypass authentication, or manufacture authority identifiers.
+
+## Physical resource rules
+
+R2Lab adds these requirements:
+
+- an active lease must be proven before hardware mutation;
+- the exact selected radio and UE are bound to the run;
+- selected compute-node allocation authority is verified;
+- a physical gNB is staged at zero replicas before singleton start;
+- only one run-owned physical gNB may be active for the selected radio;
+- UE setup/connect/stop mechanics come from the pinned `fiveg_ansible` roles;
+- user-plane proof must bind traffic to the selected physical data interface;
+- cleanup must prove the selected resources are off/clean before the claim is released.
+
+Global radio/UE cleanup and guessed ownership are prohibited.
+
+## Ansible rules
+
+All long Ansible work must use the shared sanitized streaming implementation. This applies equally to:
+
+- RFSIM resource/network Ansible;
+- R2Lab Open5GS Ansible;
+- R2Lab UE setup/connect/stop roles.
+
+The shared stream suppresses routine noise, retains meaningful tasks and failures, and emits heartbeats. Adding a backend-specific Ansible output parser would violate the contract.
+
+## Progress and logs
+
+Every run writes:
+
+```text
+.synthran/events/<run-id>.jsonl
+```
+
+This is the public run-log contract. Terminal output and `synthran logs` are two views of the same sanitized messages. `--quiet` affects only terminal rendering, not persistence.
+
+Backend-specific raw logs may be retained internally when required for diagnosis, but they do not replace or redefine the common event stream.
+
+## Acceptance boundaries
+
+The logical acceptance order is:
+
+```text
+provider
+-> resources
+-> 5G foundation
+-> radio/gNB path
+-> UE/PDU/user plane
+-> workload
+-> final acceptance
+-> cleanup
+```
+
+For R2Lab the evidence record is more granular because hardware safety requires explicit N2, management, acquisition, registration, PDU, and user-plane boundaries. That extra granularity is an implementation safety requirement; it does not create a different public lifecycle.
+
+## Resume behavior
+
+A run may resume when persisted evidence exists, but it must:
+
+1. validate the requested topology against persisted topology;
+2. refresh current authority;
+3. re-observe any live state needed to authorize the next mutation;
+4. continue only from a boundary consistent with current evidence;
+5. preserve previous failure evidence instead of silently rewriting history.
+
+Run IDs are never recycled for a different topology or experimental intent.
+
+## Research parity
+
+The deterministic workload is implemented on both backends. Controlled-load research campaigns are a separate scientific capability. The current campaign runtime is accepted on RFSIM; R2Lab campaign parity is not claimed until physical load generation, measurement peer selection, timing validity, and cleanup have current accepted evidence.
+
+This is not a weakness in the public interface. It is the required distinction between architectural parity and scientifically demonstrated parity.
+
+## Adding a backend or hardware profile
+
+A new backend or physical profile should not add a new command family. It must instead:
+
+- extend the backend selection/capability model;
+- implement the required run boundaries;
+- use the common event stream;
+- use shared Ansible streaming where Ansible is involved;
+- produce experiment evidence compatible with the common semantics;
+- document unsupported scientific capability explicitly;
+- add tests that prove the public command surface did not expand unnecessarily.
