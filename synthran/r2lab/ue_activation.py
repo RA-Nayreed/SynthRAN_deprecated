@@ -60,8 +60,6 @@ def _probe_upf(
     runner: Runner,
     timeout_seconds: int,
 ) -> tuple[bool, bool]:
-    """Return ``(command_completed, path_proven)`` for wwan0 -> Open5GS UPF."""
-
     command = ue_gateway_command(
         slice_name,
         topology.ue_profile,
@@ -89,18 +87,11 @@ def observe_functional_ue_runtime(
     runner: Runner = subprocess_runner,
     timeout_seconds: int = PROBE_TIMEOUT_SECONDS,
 ) -> PhysicalUeRuntimeEvidence:
-    """Observe sanitized functional postconditions after upstream actuation.
-
-    Interface-bound reachability to the Open5GS UPF is stronger than a modem AT
-    string for this backend: it requires the selected UE to have acquired the
-    physical NR path, registered, established a PDU session and installed a
-    usable ``wwan0`` route through the run-owned core.
-    """
+    """Observe sanitized functional postconditions after upstream actuation."""
 
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
     profile = topology.ue_profile
     timeout_seconds = max(3, min(int(timeout_seconds), PROBE_TIMEOUT_SECONDS))
-
     link = _ue_read(
         topology=topology,
         slice_name=slice_name,
@@ -154,22 +145,13 @@ def observe_functional_ue_runtime(
     )
     if upf_proven:
         packet = PacketServiceState.ATTACHED
-
     functional_path = upf_proven and ipv4 is Ipv4State.PRESENT
     return PhysicalUeRuntimeEvidence(
         ue=topology.ue,
         mode=profile.mode,
         interface=UE_INTERFACE,
-        cell=(
-            CellAcquisitionState.ACQUIRED_NR_SA
-            if functional_path
-            else CellAcquisitionState.UNKNOWN
-        ),
-        registration=(
-            RegistrationState.REGISTERED
-            if functional_path
-            else RegistrationState.UNKNOWN
-        ),
+        cell=CellAcquisitionState.ACQUIRED_NR_SA if functional_path else CellAcquisitionState.UNKNOWN,
+        registration=RegistrationState.REGISTERED if functional_path else RegistrationState.UNKNOWN,
         packet_service=packet,
         ipv4=ipv4,
         manager_running=manager_running,
@@ -224,7 +206,14 @@ def recover_retryable_transport_failure(
 
 
 def _best_effort_stop(
-    *, run_id: str, slice_name: str, topology, run_root: Path, timeout_seconds: int
+    *,
+    run_id: str,
+    slice_name: str,
+    topology,
+    run_root: Path,
+    lock_path: Path,
+    deps_root: Path,
+    timeout_seconds: int,
 ) -> None:
     try:
         execute_selected_ue_role(
@@ -232,12 +221,12 @@ def _best_effort_stop(
             slice_name=slice_name,
             topology=topology,
             action="stop",
+            lock_path=lock_path,
+            deps_root=deps_root,
             run_root=run_root,
             timeout_seconds=min(timeout_seconds, 180),
         )
     except R2LabUeAnsibleError:
-        # Exact hardware power-off remains the cleanup authority.  A failed
-        # graceful stop must not fabricate acceptance or hide the original error.
         return
 
 
@@ -248,6 +237,8 @@ def activate_physical_ue(
     owner: str,
     allocation_id: str | None,
     known_hosts: Path,
+    lock_path: Path = Path("dependencies.lock.yml"),
+    deps_root: Path = Path(".deps"),
     run_root: Path = Path(".synthran/r2lab"),
     r2lab_runner: Runner = subprocess_runner,
     cluster_runner: Runner = subprocess_runner,
@@ -257,8 +248,6 @@ def activate_physical_ue(
     clock: Clock = time.monotonic,
     timeout_seconds: int = 180,
 ) -> tuple[PhysicalRunEvidence, PhysicalUeActivationSummary]:
-    """Actuate one selected UE via pinned 5g-Ansible and prove its live path."""
-
     if evidence.gnb_start is None:
         raise R2LabPhysicalUeError("physical UE activation requires a started gNB")
     if evidence.acceptance.next_stage not in {
@@ -328,6 +317,8 @@ def activate_physical_ue(
             slice_name=slice_name,
             topology=topology,
             action="connect",
+            lock_path=lock_path,
+            deps_root=deps_root,
             run_root=run_root,
             timeout_seconds=min(timeout_seconds, 180),
         )
@@ -337,6 +328,8 @@ def activate_physical_ue(
             slice_name=slice_name,
             topology=topology,
             run_root=run_root,
+            lock_path=lock_path,
+            deps_root=deps_root,
             timeout_seconds=timeout_seconds,
         )
         raise R2LabPhysicalUeError(str(exc)) from exc
@@ -357,12 +350,11 @@ def activate_physical_ue(
     state = _pass_functional_path(state, runtime)
     if evidence_path is not None:
         state.write_json(evidence_path)
-    status = "activated" if runtime.pdu_session_established else "not-proven"
     summary = PhysicalUeActivationSummary(
         run_id=state.run_id,
         ue=topology.ue,
         mode=topology.ue_profile.mode,
-        status=status,
+        status="activated" if runtime.pdu_session_established else "not-proven",
         runtime=runtime,
         evidence_path=evidence_path or Path("physical-run.json"),
     )
@@ -374,6 +366,8 @@ def activate_physical_ue(
             slice_name=slice_name,
             topology=topology,
             run_root=run_root,
+            lock_path=lock_path,
+            deps_root=deps_root,
             timeout_seconds=timeout_seconds,
         )
     return state, summary
