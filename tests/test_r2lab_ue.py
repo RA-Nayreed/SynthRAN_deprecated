@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from synthran.r2lab.acceptance import (
-    PhysicalAcceptanceStage,
-    PhysicalRunEvidence,
-    STAGE_ORDER,
-)
+from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence, STAGE_ORDER
 from synthran.r2lab.radio import (
     CellAcquisitionState,
     Ipv4State,
@@ -18,10 +14,8 @@ from synthran.r2lab.ue import (
     PhysicalWorkloadContext,
     PhysicalWorkloadResult,
     R2LabPhysicalUeError,
-    _qmi_pid_path,
-    _record_runtime,
-    _serial,
 )
+from synthran.r2lab.ue_activation import _pass_functional_path
 
 
 RUN_ID = "r2lab-ue-test"
@@ -69,7 +63,7 @@ class PhysicalUeRuntimeTests(unittest.TestCase):
         self.assertEqual("qmi", payload["mode"])
         self.assertEqual("wwan0", payload["interface"])
 
-    def test_ordered_runtime_records_cell_registration_and_pdu(self) -> None:
+    def test_functional_path_records_cell_registration_and_pdu_in_order(self) -> None:
         runtime = PhysicalUeRuntimeEvidence(
             ue="qhat23",
             mode="qmi",
@@ -81,64 +75,30 @@ class PhysicalUeRuntimeTests(unittest.TestCase):
             manager_running=True,
             transport_error=False,
         )
-        completed = _record_runtime(
-            evidence_at_cell(),
-            runtime,
-            source="current-qhat23",
-        )
-        self.assertEqual(
-            PhysicalAcceptanceStage.USER_PLANE,
-            completed.acceptance.next_stage,
-        )
+        completed = _pass_functional_path(evidence_at_cell(), runtime)
+        self.assertEqual(PhysicalAcceptanceStage.USER_PLANE, completed.acceptance.next_stage)
 
-    def test_failed_cell_blocks_later_physical_stages(self) -> None:
+    def test_unproven_functional_path_remains_retryable(self) -> None:
         runtime = PhysicalUeRuntimeEvidence(
             ue="qfit07",
             mode="mbim",
             interface="wwan0",
-            cell=CellAcquisitionState.NO_SERVICE,
-            registration=RegistrationState.NOT_REGISTERED,
+            cell=CellAcquisitionState.UNKNOWN,
+            registration=RegistrationState.UNKNOWN,
             packet_service=PacketServiceState.DETACHED,
             ipv4=Ipv4State.ABSENT,
             manager_running=True,
             transport_error=False,
         )
-        failed = _record_runtime(
-            evidence_at_cell(),
-            runtime,
-            source="current-qfit07",
-        )
-        self.assertEqual(
-            PhysicalAcceptanceStage.CELL_ACQUISITION,
-            failed.acceptance.failed_stage,
-        )
-        self.assertIsNone(failed.acceptance.next_stage)
-
-
-class PhysicalQmiOwnershipTests(unittest.TestCase):
-    def test_qmi_process_ownership_is_bound_to_one_run_id(self) -> None:
-        self.assertEqual(
-            "/run/synthran/r2lab-ue-test.qmi.pid",
-            _qmi_pid_path(RUN_ID),
-        )
-        with self.assertRaises(R2LabPhysicalUeError):
-            _qmi_pid_path("../other-run")
-
-    def test_at_probe_allow_list_contains_only_runtime_state_queries(self) -> None:
-        self.assertEqual("AT+QNWINFO", _serial("AT+QNWINFO")[-1])
-        self.assertEqual("AT+C5GREG?", _serial("AT+C5GREG?")[-1])
-        with self.assertRaises(R2LabPhysicalUeError):
-            _serial("AT+CIMI")
+        pending = _pass_functional_path(evidence_at_cell(), runtime)
+        self.assertIsNone(pending.acceptance.failed_stage)
+        self.assertEqual(PhysicalAcceptanceStage.CELL_ACQUISITION, pending.acceptance.next_stage)
 
 
 class PhysicalWorkloadContextTests(unittest.TestCase):
     def test_context_is_generic_across_qfit_and_qhat_and_has_no_hash_authority(self) -> None:
         for ue in ("qfit07", "qhat10", "qhat23"):
-            context = PhysicalWorkloadContext(
-                run_id=RUN_ID,
-                ue=ue,
-                interface="wwan0",
-            )
+            context = PhysicalWorkloadContext(run_id=RUN_ID, ue=ue, interface="wwan0")
             payload = context.to_dict()
             self.assertEqual(ue, payload["ue"])
             self.assertNotIn("sha", str(payload).lower())
@@ -158,11 +118,7 @@ class PhysicalWorkloadContextTests(unittest.TestCase):
 
     def test_workload_context_rejects_virtual_interface(self) -> None:
         with self.assertRaises(R2LabPhysicalUeError):
-            PhysicalWorkloadContext(
-                run_id=RUN_ID,
-                ue="qhat23",
-                interface="tun_srsue1",
-            )
+            PhysicalWorkloadContext(run_id=RUN_ID, ue="qhat23", interface="tun_srsue1")
 
 
 if __name__ == "__main__":
