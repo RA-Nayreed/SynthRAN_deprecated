@@ -321,6 +321,8 @@ def _run_r2lab(
             run_id=args.run_id,
             slice_name=slice_name,
             topology=topology,
+            lock_path=args.lock,
+            deps_root=args.deps_root,
             run_root=run_root,
             timeout_seconds=min(args.timeout, 300),
         )
@@ -425,6 +427,8 @@ def _run_r2lab(
             allocation_id=allocation_id,
             known_hosts=known_hosts,
             peer=peer,
+            lock_path=args.lock,
+            deps_root=args.deps_root,
             run_root=run_root,
             timeout_seconds=min(args.timeout, 300),
         )
