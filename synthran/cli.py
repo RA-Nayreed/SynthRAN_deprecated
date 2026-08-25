@@ -8,6 +8,7 @@ from typing import Sequence
 
 from synthran.backends.base import BackendError
 from synthran.operator import configure_operator_parser, dispatch
+from synthran.r2lab.resources import R2LabTopologyResourceError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -25,6 +26,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(arguments)
     try:
         return dispatch(args)
-    except BackendError as exc:
+    except (BackendError, R2LabTopologyResourceError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
