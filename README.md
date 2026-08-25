@@ -4,7 +4,7 @@
 
 **Reproducible IoT experiments across virtual and physical open 5G radio paths.**
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![5G](https://img.shields.io/badge/5G-srsRAN%20%2B%20Open5GS-6C63FF)](docs/architecture.md)
 [![IoT](https://img.shields.io/badge/IoT-Contiki--NG%20%2B%20Cooja-00A86B)](docs/experiment.md)
 [![License](https://img.shields.io/github/license/RA-Nayreed/SynthRAN)](LICENSE)
@@ -26,7 +26,7 @@ The supported top-level interface is intentionally small:
 
 ```text
 run       execute a complete experiment lifecycle
- doctor    perform read-only readiness checks
+doctor    perform read-only readiness checks
 inspect   show capabilities or persisted run evidence
 logs      read or follow the unified run event stream
 stop      release resources owned by one run
