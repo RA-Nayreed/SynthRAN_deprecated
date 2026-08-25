@@ -29,6 +29,19 @@ synthran
 
 Lifecycle and research operations use explicit CLI arguments. RFSIM remains the virtual reference path; R2Lab integration supplies the corresponding physical-radio path as its stages are proven by current evidence.
 
+```mermaid
+flowchart LR
+    CLI[synthran] --> ORCH[Lifecycle orchestration]
+    ORCH --> RFSIM[RFSIM backend]
+    ORCH --> R2LAB[R2Lab backend]
+    RFSIM --> CONTRACT[Common lifecycle and evidence contracts]
+    R2LAB --> CONTRACT
+```
+
+## Current status
+
+The accepted virtual path uses RFSIM and carries the deterministic IoT workload through srsRAN and Open5GS into run-owned collection artifacts. R2Lab support is evidence-gated and advances only when each physical boundary is proven from current observations. RFSIM remains supported while the physical backend is brought to the same lifecycle contract.
+
 ## Accepted virtual golden path
 
 ```text
@@ -146,7 +159,7 @@ R2Lab support is evidence-gated. Physical commands must bind current lease/alloc
 
 Current physical integration details and accepted evidence boundaries are documented in [`docs/r2lab-integration.md`](docs/r2lab-integration.md) and the focused R2Lab documents under `docs/`.
 
-## Research output
+## Planned experiment output
 
 A valid controlled run produces artifacts such as:
 
