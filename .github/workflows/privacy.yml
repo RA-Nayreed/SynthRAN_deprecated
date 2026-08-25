@@ -43,13 +43,13 @@ jobs:
           show-channel-urls: true
 
       - name: Install SynthRAN command
-        run: python -m pip install --no-deps -e .
+        run: conda run --no-capture-output -n synthran python -m pip install --no-deps -e .
 
       - name: Run offline unit tests
-        run: python -m unittest discover -s tests -v
+        run: conda run --no-capture-output -n synthran python -m unittest discover -s tests -v
 
       - name: Scan tracked source for private context
-        run: synthran privacy scan --worktree
+        run: conda run --no-capture-output -n synthran synthran privacy scan --worktree
         if: ${{ !cancelled() }}
 
       - name: Scan Git history for secrets
