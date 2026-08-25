@@ -2,7 +2,7 @@
 
 # SynthRAN
 
-**Deterministic IoT workloads over an open 5G user plane, with reproducible evidence from setup to analysis.**
+**Reproducible IoT experiments across virtual and physical open 5G radio paths.**
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![5G](https://img.shields.io/badge/5G-srsRAN%20%2B%20Open5GS-6C63FF)](docs/architecture.md)
@@ -11,187 +11,186 @@
 
 </div>
 
-## Why SynthRAN exists
+SynthRAN turns a collection of provider, radio, 5G, IoT, and measurement tools into one evidence-producing experiment. It owns orchestration, exact resource authority, validation, deterministic workload execution, sanitized progress, cleanup, and reproducibility records. It does not reimplement Open5GS, srsRAN, Contiki-NG, Cooja, Mosquitto, iperf3, SLICES, or R2Lab.
 
-Open 5G components and IoT simulators can each run independently. The harder research problem is making them form one controlled experiment whose workload, network state, measurements, cleanup, and outputs can all be reproduced and checked.
+## One command surface
 
-SynthRAN is that integration and evidence layer. It can generate deterministic Contiki-NG/Cooja sensor traffic, carry it through an open 5G user plane, apply calibrated background load, collect path and network measurements, and preserve canonical JSONL plus deterministic Parquet evidence.
-
-It does not reimplement Open5GS, srsRAN, Contiki-NG, Cooja, Mosquitto, iperf3, SLICES, or R2Lab provider services.
-
-## Operator interface
-
-There is one supported product executable:
+There is one installed executable and one lifecycle command:
 
 ```text
-synthran
+synthran run --radio rfsim ...
+synthran run --radio r2lab ...
 ```
 
-Lifecycle and research operations use explicit CLI arguments. RFSIM remains the virtual reference path; R2Lab integration supplies the corresponding physical-radio path as its stages are proven by current evidence.
-
-```mermaid
-flowchart LR
-    CLI[synthran] --> ORCH[Lifecycle orchestration]
-    ORCH --> RFSIM[RFSIM backend]
-    ORCH --> R2LAB[R2Lab backend]
-    RFSIM --> CONTRACT[Common lifecycle and evidence contracts]
-    R2LAB --> CONTRACT
-```
-
-## Current status
-
-The accepted virtual path uses RFSIM and carries the deterministic IoT workload through srsRAN and Open5GS into run-owned collection artifacts. R2Lab support is evidence-gated and advances only when each physical boundary is proven from current observations. RFSIM remains supported while the physical backend is brought to the same lifecycle contract.
-
-## Accepted virtual golden path
+The supported top-level interface is intentionally small:
 
 ```text
-10 deterministic Contiki-NG/Cooja sensors
--> RPL/6LoWPAN border router
--> Cooja Serial Socket
--> loopback-only reverse SSH tunnel
--> remote tunslip6/tun0
--> counted TCP ingress
--> Mosquitto bridge inside srsUE network namespace
--> tun_srsue1
--> srsRAN gNB
--> Open5GS UPF
--> run-owned central Mosquitto
--> canonical JSONL
--> deterministic Parquet
+run       execute a complete experiment lifecycle
+ doctor    perform read-only readiness checks
+inspect   show capabilities or persisted run evidence
+logs      read or follow the unified run event stream
+stop      release resources owned by one run
+research  controlled measurement and campaign tools
+deps      synchronize pinned external dependencies
+dev       repository maintenance commands
 ```
 
-The accepted virtual configuration uses RFSIM, one srsUE as the IoT edge gateway, one SST-1 slice, and ten deterministic sensors. Research load terminates on a prepared external node rather than the 5G core host.
-
-See [`docs/results.md`](docs/results.md) for current accepted evidence and measured limitations.
+RFSIM and R2Lab are backends of the same product, not separate workflows. Backend-specific resource and hardware functions remain internal implementation boundaries.
 
 ## Install
 
-The reviewed development and live-control path is Linux-first.
-
-```bash
+```zsh
 git clone https://github.com/RA-Nayreed/SynthRAN.git
 cd SynthRAN
 conda env create -f environment.yml
 conda activate synthran
 python -m pip install --no-deps -e .
-```
-
-Verify the command and repository:
-
-```bash
-synthran --help
 synthran deps sync
-python -m unittest discover -s tests -v
-synthran privacy scan --worktree
+synthran --help
 ```
 
-## SLICES virtual quick start
+A SLICES project must already exist and the provider CLI must be authenticated. Export the project and owner once:
 
-A SLICES project, an existing provider experiment, and an active Post5G prefix are required. SynthRAN verifies these objects; it does not silently create or switch them.
-
-```bash
-slices auth login
-slices project use PROJECT_NAME
-slices experiment create EXPERIMENT_NAME --duration 4h
-post5g experiment prefix EXPERIMENT_NAME
-
-export SYNTHRAN_SLICES_PROJECT=PROJECT_NAME
-export SYNTHRAN_SLICES_EXPERIMENT=EXPERIMENT_NAME
-export SYNTHRAN_OWNER=YOUR_SLICES_USERNAME
+```zsh
+export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
+export SYNTHRAN_OWNER='YOUR_SLICES_USERNAME'
 ```
 
-Prepare resources:
+A run creates or reuses its provider experiment and acquires the required Post5G prefix. By default the provider experiment name is the run ID.
 
-```bash
-export PREPARATION_RUN=prepare-001
+## Virtual run
 
-synthran network prepare \
-  --owner "$SYNTHRAN_OWNER" \
-  --duration-minutes 120 \
-  --run-id "$PREPARATION_RUN"
+```zsh
+export RUN_ID='virtual-001'
 
-source ".synthran/preparations/$PREPARATION_RUN/authority.env"
-export INVENTORY=".synthran/preparations/$PREPARATION_RUN/hosts.ini"
-```
-
-Preflight, deploy, and prove the network path:
-
-```bash
 synthran doctor \
-  --inventory "$INVENTORY" \
-  --evidence-out .synthran/preflight.json
+  --radio rfsim \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3
 
-export NETWORK_RUN=network-001
-
-synthran network deploy \
-  --inventory "$INVENTORY" \
-  --preflight-evidence .synthran/preflight.json \
-  --run-id "$NETWORK_RUN"
-
-synthran network verify \
-  --inventory "$INVENTORY" \
-  --run-id "$NETWORK_RUN" \
-  --timeout 120
+synthran run \
+  --radio rfsim \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --run-id "$RUN_ID" \
+  --owner "$SYNTHRAN_OWNER" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-Run the deterministic IoT acceptance path:
+The run prepares compute resources, verifies authority, deploys Open5GS and srsRAN/RFSIM, proves the user path, executes the deterministic ten-sensor workload, and persists acceptance evidence.
 
-```bash
-export IOT_RUN=iot-001
+## Physical R2Lab run
 
-synthran experiment plan \
-  --network-run-id "$NETWORK_RUN" \
-  --run-id "$IOT_RUN"
+R2Lab additionally requires an active lease, an allowed N3xx radio/UE pair, the R2Lab slice identity, and strict known-hosts state.
 
-synthran experiment run \
-  --inventory "$INVENTORY" \
-  --network-run-id "$NETWORK_RUN" \
-  --run-id "$IOT_RUN"
+```zsh
+export SYNTHRAN_R2LAB_SLICE='YOUR_R2LAB_SLICE'
+export SYNTHRAN_SLICES_KNOWN_HOSTS="$PWD/.synthran/r2lab/known_hosts"
+export RUN_ID='physical-001'
 
-synthran experiment verify --run-id "$IOT_RUN"
+synthran doctor \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3
+
+synthran run \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --run-id "$RUN_ID" \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --owner "$SYNTHRAN_OWNER" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-For controlled campaigns, calibrate against a prepared peer outside the core host, create a deterministic campaign schedule, execute it, and analyze only persisted valid runs. The complete procedure and preservation rules are in [`docs/operator-guide.md`](docs/operator-guide.md).
+The physical path reuses the active R2Lab lease, claims only the selected radio and UE, reconciles the selected SLICES/Open5GS foundation, stages and starts the pinned N3xx gNB, proves N2, activates the selected UE through pinned `5g_ansible` roles, proves the PDU/user plane, runs the same deterministic IoT workload, then releases exact run-owned physical resources unless `--keep-resources` was requested.
 
-## R2Lab physical integration
+## Live progress and logs
 
-R2Lab support is evidence-gated. Physical commands must bind current lease/allocation authority and exact radio/UE resources before mutation. gNB/N2, UE registration, PDU, user-plane, workload, and cleanup are separate acceptance boundaries; a later stage is never inferred from an earlier one.
+All long Ansible work uses the same sanitized streaming implementation. RFSIM deployment, physical Open5GS work, and R2Lab UE setup/connect/stop therefore expose the same task filtering, failures, and heartbeats.
 
-Current physical integration details and accepted evidence boundaries are documented in [`docs/r2lab-integration.md`](docs/r2lab-integration.md) and the focused R2Lab documents under `docs/`.
-
-## Planned experiment output
-
-A valid controlled run produces artifacts such as:
+Every run also writes the same messages to:
 
 ```text
-experiment-spec.json
-measurement-window.json
-measurement-path.json
-telemetry.jsonl / telemetry.parquet
-probe.jsonl / probe.parquet
-network-samples.jsonl / network-samples.parquet
-load.jsonl / load.parquet
-research-summary.json
+.synthran/events/<run-id>.jsonl
 ```
 
-JSONL remains the append-only audit source; Parquet is the deterministic analysis derivative. Raw immutable campaign bundles belong in durable research/object storage.
+Read or follow them with:
 
-## Repository guide
+```zsh
+synthran logs --run-id "$RUN_ID"
+synthran logs --run-id "$RUN_ID" --follow
+```
 
-| Area | Start here |
+`--quiet` suppresses terminal progress but still records the event stream.
+
+## Inspect and cleanup
+
+```zsh
+synthran inspect --run-id "$RUN_ID"
+synthran inspect --radio r2lab
+synthran stop --run-id "$RUN_ID"
+```
+
+Physical cleanup is authority-bound and exact. SynthRAN does not use broad radio power-off, wildcard deletion, or guessed ownership.
+
+## Research
+
+The controlled research tools are top-level commands:
+
+```text
+synthran research plan
+synthran research run
+synthran research calibrate
+synthran research campaign-plan
+synthran research campaign-run
+synthran research analyze
+```
+
+The published controlled-load campaign implementation is currently validated against the accepted RFSIM network-evidence path. Physical deterministic workload execution is implemented, but physical controlled-load campaign parity is not claimed until it has its own accepted evidence.
+
+Current accepted measurements and interpretation limits are in [`docs/results.md`](docs/results.md).
+
+## Deterministic workload
+
+The reference workload is:
+
+```text
+10 deterministic Contiki-NG/Cooja sensors
+-> RPL/6LoWPAN border router
+-> counted ingress
+-> UE-side MQTT handoff
+-> 5G user plane
+-> Open5GS UPF
+-> run-owned central MQTT collector
+-> canonical JSONL
+-> deterministic Parquet
+```
+
+The virtual backend carries that path through srsUE/RFSIM. The physical backend substitutes the selected physical UE and N3xx radio while preserving experiment-level workload and evidence semantics.
+
+## Documentation
+
+| Document | Purpose |
 | --- | --- |
-| Current measured results and limitations | [`docs/results.md`](docs/results.md) |
-| Experiment protocol | [`docs/experiment.md`](docs/experiment.md) |
-| System architecture | [`docs/architecture.md`](docs/architecture.md) |
-| End-to-end operation | [`docs/operator-guide.md`](docs/operator-guide.md) |
-| R2Lab integration | [`docs/r2lab-integration.md`](docs/r2lab-integration.md) |
-| Development | [`docs/development.md`](docs/development.md) |
-| Dependencies | [`docs/dependencies.md`](docs/dependencies.md) |
-| Security and privacy | [`docs/security.md`](docs/security.md) |
-| Contributor invariants | [`AGENTS.md`](AGENTS.md) |
+| [`docs/architecture.md`](docs/architecture.md) | system boundaries and data flow |
+| [`docs/backend-contract.md`](docs/backend-contract.md) | RFSIM/R2Lab parity and safety rules |
+| [`docs/operator-guide.md`](docs/operator-guide.md) | complete operating procedure |
+| [`docs/experiment.md`](docs/experiment.md) | deterministic workload and measurement protocol |
+| [`docs/r2lab-integration.md`](docs/r2lab-integration.md) | physical backend details |
+| [`docs/results.md`](docs/results.md) | canonical accepted research evidence |
+| [`docs/dependencies.md`](docs/dependencies.md) | pinned upstream dependencies |
+| [`docs/security.md`](docs/security.md) | credentials, privacy, and mutation safety |
+| [`docs/development.md`](docs/development.md) | validation and contribution workflow |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | repository invariants |
 
-## Scope
+## Capability boundary
 
-Live-accepted virtual capability includes Open5GS, srsRAN, one srsUE, RFSIM, deterministic Cooja/RPL telemetry, external-peer capacity calibration, controlled UDP load, fixed-window measurement, blocked campaigns, and offline paired analysis.
+Accepted virtual evidence includes Open5GS, srsRAN, RFSIM, deterministic Cooja telemetry, external-peer capacity calibration, controlled UDP load, fixed-window measurement, blocked campaigns, and offline paired analysis.
 
-Physical RF capability is claimed only to the boundary established by current R2Lab evidence. Multiple UEs or slices, formal A1/E2/RIC control, generative models, and automated RAN-policy synthesis are not claimed without accepted evidence.
+R2Lab implements the corresponding physical lifecycle through exact hardware authority, N3xx gNB/N2, selected Quectel UE activation, PDU/user-plane proof, deterministic workload execution, and exact cleanup. A physical capability is considered established only when current accepted evidence proves it; historical observations are not upgraded into current authority or scientific results.
