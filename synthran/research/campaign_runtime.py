@@ -1,9 +1,9 @@
 """Campaign-scoped runtime lifecycle for controlled research campaigns.
 
-A research campaign compares load conditions, not UE registration churn.  The
-single-run experiment runtime deliberately patches the srsUE Deployment with an
-MQTT sidecar and restores it afterwards.  Repeating that lifecycle for every
-campaign treatment rolls the UE and forces a fresh RFSIM/PDU session each time.
+A research campaign compares load conditions, not UE registration churn. The
+single-run experiment runtime patches the srsUE Deployment with an MQTT sidecar
+and restores it afterwards. Repeating that lifecycle for every campaign
+treatment rolls the UE and forces a fresh RFSIM/PDU session each time.
 
 This module scopes that instrumentation to the whole ``campaign-run`` command:
 
@@ -18,9 +18,8 @@ This module scopes that instrumentation to the whole ``campaign-run`` command:
 * restore the original srsUE Deployment and reprove the accepted network once
   when the campaign command exits, including invalid/aborted campaigns.
 
-The implementation uses the same scoped runtime-override pattern already used
-by research instrumentation.  All patched module globals are restored in
-``__exit__`` so single-run research behavior is unchanged.
+All runtime substitutions are restored in ``__exit__`` so single-run research
+behavior is unchanged.
 """
 
 from __future__ import annotations
@@ -42,13 +41,13 @@ from synthran.experiment.resources import (
     render_edge_cleanup_patch as canonical_edge_cleanup_patch,
 )
 from synthran.fiveg_ansible import NetworkInventory, load_inventory
-from synthran.network_runtime import verify_network_path
-from synthran.research import RESEARCH_CAMPAIGN_SCHEMA, ResearchError, atomic_json
-from synthran.rfsim_runtime import (
+from synthran.network.runtime import verify_network_path
+from synthran.network.rfsim import (
     RfsimRuntimeState,
     _current_pdu_address,
     _discover_pod,
 )
+from synthran.research import RESEARCH_CAMPAIGN_SCHEMA, ResearchError, atomic_json
 import synthran.experiment.runtime as base_runtime
 import synthran.research.instrumentation as research_instrumentation
 import synthran.research.runtime as research_runtime
@@ -72,7 +71,7 @@ def _option_value(arguments: Sequence[str], name: str) -> str | None:
 
 
 def is_campaign_run(arguments: Sequence[str]) -> bool:
-    return tuple(arguments[:3]) == ("experiment", "research", "campaign-run")
+    return tuple(arguments[:2]) == ("research", "campaign-run")
 
 
 def _campaign_edge_config_name(campaign_id: str) -> str:
@@ -157,7 +156,7 @@ class CampaignRuntimeSession:
             self.errors.append(f"campaign command exception: {exc}")
         try:
             self._restore_base_runtime()
-        except Exception as cleanup_exc:  # cleanup must be reported, never hidden
+        except Exception as cleanup_exc:
             self.cleanup_error = str(cleanup_exc)
             self.errors.append(f"campaign cleanup: {cleanup_exc}")
         finally:
@@ -227,7 +226,13 @@ class CampaignRuntimeSession:
         assert self.campaign_id is not None
         return _campaign_edge_config_name(self.campaign_id)
 
-    def _render_edge_patch(self, scenario: Any, *, lock: Any, core_address: str) -> Mapping[str, Any]:
+    def _render_edge_patch(
+        self,
+        scenario: Any,
+        *,
+        lock: Any,
+        core_address: str,
+    ) -> Mapping[str, Any]:
         self._ensure_campaign()
         assert self.campaign_id is not None
         assert self.network_run_id is not None
@@ -254,8 +259,6 @@ class CampaignRuntimeSession:
         return patch
 
     def _render_edge_cleanup_patch(self) -> Mapping[str, Any]:
-        # Per-run cleanup must not roll the UE.  The real cleanup is performed once
-        # by _restore_base_runtime() after campaign-run exits.
         return {}
 
     def _render_experiment_objects(
@@ -309,9 +312,7 @@ class CampaignRuntimeSession:
             return config
         marker = "restart_timeout 5"
         if marker not in config:
-            raise ResearchError(
-                "campaign MQTT config is missing the bridge restart marker"
-            )
+            raise ResearchError("campaign MQTT config is missing the bridge restart marker")
         return config.replace(
             marker,
             "bridge_reload_type immediate\n" + marker,
@@ -342,9 +343,7 @@ class CampaignRuntimeSession:
             research_instrumentation._edge_sidecar_status(inventory, pod)
         )
         if not (container_ready and pod_ready and running):
-            raise ResearchError(
-                "edge MQTT sidecar is not Ready before in-place config reload"
-            )
+            raise ResearchError("edge MQTT sidecar is not Ready before in-place config reload")
         restart(inventory, pod)
         time.sleep(1)
         deadline = time.monotonic() + timeout_seconds
@@ -429,10 +428,6 @@ class CampaignRuntimeSession:
         prove_icmp: Any,
         prove_transport: Any,
     ) -> None:
-        # Match the established research-runtime contract exactly. Loaded runs are
-        # gated by the actual iperf3 transport that defines the treatment; ICMP is
-        # not a prerequisite for that transport. Baseline has no load transport,
-        # so it retains the bounded ICMP readiness proof.
         if spec.load.enabled:
             prove_transport()
             return
