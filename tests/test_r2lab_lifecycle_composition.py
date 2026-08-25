@@ -17,8 +17,8 @@ from synthran.r2lab.lifecycle import (
 
 class PhysicalPathCompositionTests(unittest.TestCase):
     @patch("synthran.r2lab.lifecycle._write_json")
-    @patch("synthran.r2lab.lifecycle.execute_authorized_qfit_user_plane")
-    @patch("synthran.r2lab.lifecycle.execute_authorized_qfit_activation")
+    @patch("synthran.r2lab.lifecycle.prove_physical_user_plane")
+    @patch("synthran.r2lab.lifecycle.activate_physical_ue")
     @patch("synthran.r2lab.lifecycle.PhysicalRunEvidence.read_json")
     def test_path_composes_activation_then_user_plane_without_digest_authority(
         self,
@@ -34,9 +34,9 @@ class PhysicalPathCompositionTests(unittest.TestCase):
         after_activation.acceptance.next_stage = PhysicalAcceptanceStage.USER_PLANE
         after_activation.acceptance.failed_stage = None
         after_activation.acceptance.outcome_for.return_value = AcceptanceOutcome.NOT_REACHED
-        activate.return_value = SimpleNamespace(
-            evidence=after_activation,
-            activation=SimpleNamespace(status="pdu-established"),
+        activate.return_value = (
+            after_activation,
+            SimpleNamespace(status="activated"),
         )
 
         after_user_plane = Mock()
@@ -52,6 +52,8 @@ class PhysicalPathCompositionTests(unittest.TestCase):
         summary = continue_physical_path(
             run_id="r2lab-run-001",
             slice_name="oulu_user",
+            owner="rnayreed",
+            allocation_id=None,
             known_hosts=Path("known_hosts"),
             peer="198.51.100.10",
             run_root=Path(".synthran/r2lab"),
@@ -61,14 +63,14 @@ class PhysicalPathCompositionTests(unittest.TestCase):
 
         self.assertTrue(summary.ready_for_workload)
         self.assertTrue(summary.user_plane_proven)
-        self.assertEqual("pdu-established", summary.activation_status)
+        self.assertEqual("activated", summary.activation_status)
         self.assertEqual("workload", summary.next_stage)
         self.assertNotIn("sha256", str(summary.to_dict()).lower())
         activate.assert_called_once()
         user_plane.assert_called_once()
         write_json.assert_called_once()
 
-    @patch("synthran.r2lab.lifecycle.execute_authorized_qfit_activation")
+    @patch("synthran.r2lab.lifecycle.activate_physical_ue")
     @patch("synthran.r2lab.lifecycle.PhysicalRunEvidence.read_json")
     def test_failed_physical_stage_returns_not_ready_instead_of_skipping(
         self,
@@ -81,12 +83,17 @@ class PhysicalPathCompositionTests(unittest.TestCase):
         failed.acceptance.next_stage = None
         failed.acceptance.failed_stage = PhysicalAcceptanceStage.CELL_ACQUISITION
         failed.acceptance.outcome_for.return_value = AcceptanceOutcome.NOT_REACHED
-        activate.return_value = SimpleNamespace(evidence=failed, activation=None)
+        activate.return_value = (
+            failed,
+            SimpleNamespace(status="not-proven"),
+        )
         read_evidence.return_value = initial
 
         summary = continue_physical_path(
             run_id="r2lab-run-001",
             slice_name="oulu_user",
+            owner="rnayreed",
+            allocation_id=None,
             known_hosts=Path("known_hosts"),
             peer="198.51.100.10",
             r2lab_runner=Mock(),
@@ -104,7 +111,7 @@ class PhysicalWorkloadCompositionTests(unittest.TestCase):
     @patch("synthran.r2lab.lifecycle.load_lock", return_value=object())
     @patch("synthran.r2lab.lifecycle.load_inventory", return_value=object())
     @patch("synthran.r2lab.lifecycle.PhysicalRunEvidence.read_json")
-    def test_workload_reuses_existing_physical_executor_and_common_result_semantics(
+    def test_workload_reuses_physical_executor_and_common_result_semantics(
         self,
         read_evidence,
         load_inventory,
@@ -121,15 +128,17 @@ class PhysicalWorkloadCompositionTests(unittest.TestCase):
 
         completed = Mock()
         completed.acceptance.accepted = True
-        handoff.return_value = SimpleNamespace(
-            evidence=completed,
-            result=SimpleNamespace(accepted=True, cleanup_proven=True),
+        handoff.return_value = (
+            completed,
+            SimpleNamespace(accepted=True, cleanup_proven=True),
         )
 
         summary = run_physical_workload(
             run_id="r2lab-run-001",
             workload_id="physical-iot-001",
             slice_name="oulu_user",
+            owner="rnayreed",
+            allocation_id=None,
             known_hosts=Path("known_hosts"),
             inventory_path=Path("hosts.ini"),
             r2lab_runner=Mock(),
@@ -144,7 +153,7 @@ class PhysicalWorkloadCompositionTests(unittest.TestCase):
                 "workload": True,
                 "data": True,
                 "acceptance": True,
-                "cleanup": True,
+                "workload_cleanup": True,
             },
             payload["stages"],
         )
