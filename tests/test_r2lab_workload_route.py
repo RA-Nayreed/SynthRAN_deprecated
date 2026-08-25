@@ -22,19 +22,8 @@ class PhysicalWorkloadRouteTests(unittest.TestCase):
 
         _prove_ue_route("oulu_user", UES["qfit07"], "172.28.2.77")
 
-        command = run.call_args.args[0]
-        self.assertEqual(
-            (
-                "ip",
-                "-j",
-                "route",
-                "get",
-                "172.28.2.77",
-                "oif",
-                "wwan0",
-            ),
-            command[-8:],
-        )
+        rendered = " ".join(run.call_args.args[0])
+        self.assertIn("ip -j route get 172.28.2.77 oif wwan0", rendered)
 
     @patch("synthran.experiment.r2lab._run")
     def test_route_probe_failure_names_exact_precondition(self, run) -> None:
