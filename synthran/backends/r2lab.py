@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 from synthran import command_runtime
@@ -17,7 +16,7 @@ from synthran.experiment.runtime import (
 )
 from synthran.fiveg_ansible import FiveGAnsibleError
 from synthran.privacy import PrivacyError
-from synthran.r2lab.acceptance import PhysicalRunEvidence
+from synthran.r2lab.acceptance import PhysicalRunEvidence, R2LabAcceptanceError
 from synthran.r2lab.controller import gateway_command, subprocess_runner as r2lab_runner
 from synthran.r2lab.foundation_topology import (
     R2LabTopologyFoundationError,
@@ -46,6 +45,7 @@ from synthran.r2lab.resources import (
     prepare_physical_resources,
     release_physical_resources,
 )
+from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.slices_controller import SlicesControllerError
 
 
@@ -130,15 +130,6 @@ def _topology_from_args(args: argparse.Namespace) -> PhysicalTopology:
         radio=str(args.radio),
         ue=str(args.ue),
     ).validate()
-
-
-def _print(payload: dict[str, object], *, as_json: bool) -> None:
-    if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return
-    for key, value in payload.items():
-        if isinstance(value, (str, int, float, bool)) or value is None:
-            print(f"{key}: {value}")
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -278,18 +269,6 @@ class R2LabBackend:
                 default=Path(".synthran/r2lab"),
                 help=argparse.SUPPRESS,
             )
-        else:
-            path_up = commands.choices["path-up"]
-            _add_if_missing(
-                path_up,
-                "--owner",
-                default=os.environ.get("SYNTHRAN_OWNER"),
-            )
-            _add_if_missing(
-                path_up,
-                "--allocation-id",
-                default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
-            )
 
         if "workload-run" not in commands.choices:
             workload = commands.add_parser(
@@ -328,18 +307,6 @@ class R2LabBackend:
                 default=Path(".synthran/experiments-r2lab"),
                 help=argparse.SUPPRESS,
             )
-        else:
-            workload = commands.choices["workload-run"]
-            _add_if_missing(
-                workload,
-                "--owner",
-                default=os.environ.get("SYNTHRAN_OWNER"),
-            )
-            _add_if_missing(
-                workload,
-                "--allocation-id",
-                default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
-            )
 
         release = commands.choices.get("release")
         if release is not None:
@@ -350,8 +317,7 @@ class R2LabBackend:
             raise BackendError("unsupported R2Lab command")
         try:
             if args.r2lab_command == "capabilities":
-                payload = capabilities()
-                print(json.dumps(payload, indent=2, sort_keys=True))
+                print(json.dumps(capabilities(), indent=2, sort_keys=True))
                 return 0
 
             if args.r2lab_command == "doctor":
