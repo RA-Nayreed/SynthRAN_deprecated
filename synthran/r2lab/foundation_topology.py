@@ -49,6 +49,7 @@ RELEASE = "srsran-gnb"
 GNB_SELECTOR = "app=srsran,component=gnb"
 RUN_LABEL = "synthran.run/id"
 REQUIRED_OPEN5GS_NFS = ("amf", "smf", "upf")
+REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS = ("n3network", "ru-network")
 DEFAULT_TIMEOUT_SECONDS = 1800
 FOUNDATION_SCHEMA = "synthran/r2lab-foundation/v1alpha2"
 
@@ -66,6 +67,7 @@ class TopologyFoundationResult:
     open5gs_reconciled: bool
     ready_node_count: int
     ready_open5gs_pod_count: int
+    ready_network_attachments: tuple[str, ...]
     evidence_path: Path
 
     def to_dict(self) -> dict[str, object]:
@@ -83,6 +85,7 @@ class TopologyFoundationResult:
             "open5gs_reconciled": self.open5gs_reconciled,
             "ready_node_count": self.ready_node_count,
             "ready_open5gs_pod_count": self.ready_open5gs_pod_count,
+            "ready_network_attachments": list(self.ready_network_attachments),
             "next_stage": PhysicalAcceptanceStage.GNB_N2.value,
             "status": "foundation-ready",
         }
@@ -467,6 +470,42 @@ def _open5gs_ready(
     return ready == len(REQUIRED_OPEN5GS_NFS), ready
 
 
+def _physical_networks_ready(
+    *, topology: PhysicalTopology, known_hosts: Path, runner: Runner, timeout_seconds: int
+) -> tuple[bool, tuple[str, ...]]:
+    payload = _json_object(
+        _checked(
+            runner,
+            _ssh(
+                topology.core_node,
+                known_hosts,
+                "kubectl",
+                "get",
+                "network-attachment-definitions.k8s.cni.cncf.io",
+                "-n",
+                NAMESPACE,
+                "-o",
+                "json",
+            ),
+            timeout_seconds=timeout_seconds,
+            label="physical Multus network query",
+        ),
+        "physical Multus network query",
+    )
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise R2LabTopologyFoundationError("physical Multus network evidence is malformed")
+    observed: set[str] = set()
+    for item in items:
+        metadata = item.get("metadata") if isinstance(item, dict) else None
+        name = metadata.get("name") if isinstance(metadata, dict) else None
+        if isinstance(name, str):
+            observed.add(name)
+    required = set(REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS)
+    ready = required.issubset(observed)
+    return ready, tuple(name for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS if name in observed)
+
+
 def _locked_git_commit(lock, name: str) -> str:
     dependency = next((item for item in lock.git if item.name == name), None)
     if dependency is None:
@@ -728,7 +767,13 @@ def accept_topology_foundation(
         runner=cluster_runner,
         timeout_seconds=min(timeout_seconds, 300),
     )
-    reconciled = not healthy
+    networks_ready, ready_networks = _physical_networks_ready(
+        topology=topology,
+        known_hosts=known_hosts,
+        runner=cluster_runner,
+        timeout_seconds=min(timeout_seconds, 300),
+    )
+    reconciled = not (healthy and networks_ready)
     if reconciled:
         reconcile_open5gs_topology(
             run_id=run_id,
@@ -750,8 +795,21 @@ def accept_topology_foundation(
             runner=cluster_runner,
             timeout_seconds=min(timeout_seconds, 300),
         )
+        networks_ready, ready_networks = _physical_networks_ready(
+            topology=topology,
+            known_hosts=known_hosts,
+            runner=cluster_runner,
+            timeout_seconds=min(timeout_seconds, 300),
+        )
     if not healthy:
         raise R2LabTopologyFoundationError("Open5GS did not reach one ready AMF/SMF/UPF set")
+    if not networks_ready:
+        missing = ", ".join(
+            name for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS if name not in ready_networks
+        )
+        raise R2LabTopologyFoundationError(
+            f"required physical Multus networks are missing: {missing}"
+        )
     authority()
     if _namespace_owner(
         topology=topology,
@@ -772,7 +830,7 @@ def accept_topology_foundation(
             f"current-slices:{topology.core_node}:{topology.ran_node}",
         ),
         (PhysicalAcceptanceStage.KUBERNETES, "selected-compute-nodes-ready"),
-        (PhysicalAcceptanceStage.OPEN5GS, "owned-open5gs-core-ready"),
+        (PhysicalAcceptanceStage.OPEN5GS, "owned-open5gs-core-and-physical-networks-ready"),
     ):
         evidence = evidence.pass_stage(stage, source=source)
     evidence_path = run_root.expanduser().resolve() / run_id / "physical-run.json"
@@ -794,5 +852,6 @@ def accept_topology_foundation(
         open5gs_reconciled=reconciled,
         ready_node_count=ready_nodes,
         ready_open5gs_pod_count=ready_pods,
+        ready_network_attachments=ready_networks,
         evidence_path=evidence_path,
     )
