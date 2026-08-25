@@ -29,7 +29,7 @@ The allowed top-level commands are:
 
 ```text
 run
- doctor
+doctor
 inspect
 logs
 stop
