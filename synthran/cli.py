@@ -6,10 +6,17 @@ import sys
 from typing import Sequence
 
 from synthran import command_runtime
-from synthran.backends import BackendError, backend_for_argv
+from synthran.backends import (
+    BackendError,
+    backend_for_argv,
+    configure_backend_parser,
+)
 
 
-_parser = command_runtime._parser
+def _parser():
+    parser = command_runtime._parser()
+    configure_backend_parser(parser)
+    return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:

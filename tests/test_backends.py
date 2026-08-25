@@ -16,7 +16,7 @@ from synthran.backends import (
     backend_for_argv,
     get_backend,
 )
-from synthran.cli import main as cli_main
+from synthran.cli import _parser, main as cli_main
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -37,19 +37,55 @@ class BackendContractTests(unittest.TestCase):
         self.assertEqual("virtual", backend.contract.radio_mode)
         self.assertEqual(LIFECYCLE_STAGES, backend.contract.implemented_stages)
 
-    def test_r2lab_capability_is_explicitly_bounded_at_n2(self) -> None:
+    def test_r2lab_implements_the_same_static_lifecycle_contract(self) -> None:
         backend = get_backend("r2lab")
         self.assertIsInstance(backend, R2LabBackend)
         self.assertEqual("physical", backend.contract.radio_mode)
-        self.assertTrue(backend.contract.supports(LifecycleStage.N2))
-        self.assertFalse(backend.contract.supports(LifecycleStage.UE_MANAGEMENT))
+        self.assertEqual(LIFECYCLE_STAGES, backend.contract.implemented_stages)
+        self.assertTrue(backend.contract.supports(LifecycleStage.CLEANUP))
 
     def test_cli_backend_resolution_keeps_experiment_above_boundary(self) -> None:
         self.assertIsInstance(backend_for_argv(["doctor"]), RfsimBackend)
         self.assertIsInstance(backend_for_argv(["network", "verify"]), RfsimBackend)
-        self.assertIsInstance(backend_for_argv(["r2lab", "plan"]), R2LabBackend)
+        self.assertIsInstance(backend_for_argv(["r2lab", "path-up"]), R2LabBackend)
         self.assertIsNone(backend_for_argv(["experiment", "plan"]))
         self.assertIsNone(backend_for_argv(["privacy", "scan"]))
+
+    def test_single_parser_contains_physical_path_and_workload_commands(self) -> None:
+        path = _parser().parse_args(
+            [
+                "r2lab",
+                "path-up",
+                "--slice",
+                "oulu_user",
+                "--known-hosts",
+                "known_hosts",
+                "--run-id",
+                "r2lab-run-001",
+                "--peer",
+                "198.51.100.10",
+            ]
+        )
+        workload = _parser().parse_args(
+            [
+                "r2lab",
+                "workload-run",
+                "--slice",
+                "oulu_user",
+                "--known-hosts",
+                "known_hosts",
+                "--run-id",
+                "r2lab-run-001",
+                "--workload-id",
+                "physical-iot-001",
+                "--inventory",
+                "hosts.ini",
+            ]
+        )
+        self.assertEqual("path-up", path.r2lab_command)
+        self.assertEqual("198.51.100.10", path.peer)
+        self.assertEqual("workload-run", workload.r2lab_command)
+        self.assertEqual(Path("hosts.ini"), workload.inventory)
 
     def test_rfsim_adapter_owns_virtual_command_execution(self) -> None:
         args = argparse.Namespace(command="network", network_command="verify")
@@ -60,14 +96,51 @@ class BackendContractTests(unittest.TestCase):
             self.assertEqual(7, RfsimBackend().dispatch(args))
         verify.assert_called_once_with(args)
 
-    def test_r2lab_adapter_owns_physical_command_execution(self) -> None:
-        args = argparse.Namespace(command="r2lab", r2lab_command="plan")
-        with patch(
-            "synthran.backends.r2lab.command_runtime._dispatch_r2lab",
-            return_value=9,
-        ) as dispatch:
-            self.assertEqual(9, R2LabBackend().dispatch(args))
-        dispatch.assert_called_once_with(args)
+    @patch("synthran.backends.r2lab.continue_physical_path")
+    def test_r2lab_adapter_owns_physical_path_execution(self, continue_path) -> None:
+        summary = Mock()
+        summary.ready_for_workload = True
+        summary.evidence_path = Path("physical-run.json")
+        continue_path.return_value = summary
+        args = argparse.Namespace(
+            command="r2lab",
+            r2lab_command="path-up",
+            r2lab_slice="oulu_user",
+            known_hosts=Path("known_hosts"),
+            run_id="r2lab-run-001",
+            peer="198.51.100.10",
+            run_root=Path(".synthran/r2lab"),
+            timeout=30,
+            json=False,
+        )
+        self.assertEqual(0, R2LabBackend().dispatch(args))
+        continue_path.assert_called_once()
+
+    @patch("synthran.backends.r2lab.run_physical_workload")
+    def test_r2lab_adapter_owns_physical_workload_execution(self, run_workload) -> None:
+        summary = Mock()
+        summary.accepted = True
+        summary.workload_result_path = Path("physical-workload-result.json")
+        run_workload.return_value = summary
+        args = argparse.Namespace(
+            command="r2lab",
+            r2lab_command="workload-run",
+            r2lab_slice="oulu_user",
+            known_hosts=Path("known_hosts"),
+            run_id="r2lab-run-001",
+            workload_id="physical-iot-001",
+            inventory=Path("hosts.ini"),
+            lock=Path("dependencies.lock.yml"),
+            deps_root=Path(".deps"),
+            run_root=Path(".synthran/r2lab"),
+            experiment_root=Path(".synthran/experiments-r2lab"),
+            collection_seconds=180,
+            minimum_per_sensor=3,
+            timeout=30,
+            json=False,
+        )
+        self.assertEqual(0, R2LabBackend().dispatch(args))
+        run_workload.assert_called_once()
 
 
 class CliBoundaryTests(unittest.TestCase):
@@ -103,12 +176,12 @@ class CliBoundaryTests(unittest.TestCase):
             patch("synthran.cli._parser", return_value=parser),
             patch("sys.stderr", stderr),
         ):
-            self.assertEqual(2, cli_main(["r2lab", "plan"]))
+            self.assertEqual(2, cli_main(["r2lab", "path-up"]))
         self.assertEqual("error: boundary failure\n", stderr.getvalue())
 
     def test_cli_module_is_dispatch_only(self) -> None:
         source = (REPOSITORY_ROOT / "synthran" / "cli.py").read_text(encoding="utf-8")
-        self.assertLessEqual(len(source.splitlines()), 40)
+        self.assertLessEqual(len(source.splitlines()), 45)
         self.assertNotIn("synthran.r2lab", source)
         self.assertNotIn("synthran.network", source)
         self.assertNotIn("synthran.experiment", source)

@@ -25,6 +25,9 @@ class RfsimBackend:
         implemented_stages=LIFECYCLE_STAGES,
     )
 
+    def configure_parser(self, parser: argparse.ArgumentParser) -> None:
+        return None
+
     def dispatch(self, args: argparse.Namespace) -> int:
         try:
             if args.command == "doctor":
