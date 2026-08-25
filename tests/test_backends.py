@@ -51,7 +51,25 @@ class BackendContractTests(unittest.TestCase):
         self.assertIsNone(backend_for_argv(["experiment", "plan"]))
         self.assertIsNone(backend_for_argv(["privacy", "scan"]))
 
-    def test_single_parser_contains_physical_path_and_workload_commands(self) -> None:
+    def test_single_parser_contains_topology_path_and_workload_commands(self) -> None:
+        plan = _parser().parse_args(
+            [
+                "r2lab",
+                "plan",
+                "--slice",
+                "oulu_user",
+                "--radio",
+                "n320",
+                "--ue",
+                "qhat23",
+                "--core-node",
+                "sopnode-f1",
+                "--ran-node",
+                "sopnode-w3",
+                "--run-id",
+                "r2lab-run-001",
+            ]
+        )
         path = _parser().parse_args(
             [
                 "r2lab",
@@ -82,6 +100,10 @@ class BackendContractTests(unittest.TestCase):
                 "hosts.ini",
             ]
         )
+        self.assertEqual("n320", plan.radio)
+        self.assertEqual("qhat23", plan.ue)
+        self.assertEqual("sopnode-f1", plan.core_node)
+        self.assertEqual("sopnode-w3", plan.ran_node)
         self.assertEqual("path-up", path.r2lab_command)
         self.assertEqual("198.51.100.10", path.peer)
         self.assertEqual("workload-run", workload.r2lab_command)
@@ -106,6 +128,8 @@ class BackendContractTests(unittest.TestCase):
             command="r2lab",
             r2lab_command="path-up",
             r2lab_slice="oulu_user",
+            owner="rnayreed",
+            allocation_id=None,
             known_hosts=Path("known_hosts"),
             run_id="r2lab-run-001",
             peer="198.51.100.10",
@@ -126,6 +150,8 @@ class BackendContractTests(unittest.TestCase):
             command="r2lab",
             r2lab_command="workload-run",
             r2lab_slice="oulu_user",
+            owner="rnayreed",
+            allocation_id=None,
             known_hosts=Path("known_hosts"),
             run_id="r2lab-run-001",
             workload_id="physical-iot-001",
