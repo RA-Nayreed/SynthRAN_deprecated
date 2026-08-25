@@ -1,10 +1,11 @@
 """Selected-topology N300/N320 srsRAN gNB adapter.
 
 The pinned radio values file remains the RF source of truth. SynthRAN overlays
-only lifecycle properties it owns (zero-pod staging, Recreate, selected RAN
-node, resource envelope, log-sidecar policy, and optional immutable image
-identity). Runtime authority is current lease/allocation/ownership state; hashes
-below identify transferred deployment bytes and are not treated as lease truth.
+the Open5GS network profile plus lifecycle properties it owns (zero-pod staging,
+Recreate, selected RAN node, resource envelope, log-sidecar policy, and optional
+immutable image identity). Runtime authority is current lease/allocation/ownership
+state; hashes below identify transferred deployment bytes and are not treated as
+lease truth.
 """
 
 from __future__ import annotations
@@ -54,6 +55,11 @@ GENERATED_VALUES = "synthran-physical-values.json"
 CPU_COUNT = 8
 MEMORY = "4Gi"
 DEFAULT_TIMEOUT_SECONDS = 120
+OPEN5GS_AMF_N2_ADDRESS = "10.10.3.200"
+OPEN5GS_GNB_N2_N3_ADDRESS = "10.10.3.234"
+OPEN5GS_N3_NETWORK = "n3network"
+OPEN5GS_RU_NETWORK = "ru-network"
+OPEN5GS_AMF_PORT = 38412
 
 
 class R2LabN3xxError(RuntimeError):
@@ -126,7 +132,6 @@ def _locked_image(lock: DependencyLock, profile: RadioProfile) -> tuple[str, str
             raise R2LabN3xxError(f"container lock {key} does not match the selected radio profile")
         digest = locked_digest
     else:
-        # If an optional radio-specific lock is later added, use it automatically.
         optional_key = f"srsran_gnb_physical_{profile.name}"
         containers = lock.raw.get("containers")
         entry = containers.get(optional_key) if isinstance(containers, dict) else None
@@ -171,7 +176,6 @@ def _overlay_template(source: str) -> str:
 def _radio_address(source_values: str) -> str:
     match = re.search(r"(?m)^\s*device_args:\s*[^\r\n]*?(?:^|,)addr=([^,\s]+)", source_values)
     if match is None:
-        # device_args is on one YAML line; the simpler expression covers current pins.
         match = re.search(r"(?m)^\s*device_args:\s*.*?addr=([^,\s]+)", source_values)
     if match is None:
         raise R2LabN3xxError("selected radio values do not expose a UHD address")
@@ -182,6 +186,13 @@ def _gnb_address(source_values: str) -> str:
     match = re.search(r"(?m)^gnbIp:\s*([^\s#]+)", source_values)
     if match is None:
         raise R2LabN3xxError("selected radio values do not expose gnbIp")
+    return match.group(1)
+
+
+def _ru_pod_address(source_values: str) -> str:
+    match = re.search(r"(?m)^ruPodIp:\s*([^\s#]+)", source_values)
+    if match is None:
+        raise R2LabN3xxError("selected radio values do not expose ruPodIp")
     return match.group(1)
 
 
@@ -205,6 +216,23 @@ def _generated_values(
         },
         "start": {"gnb": True, "logs": False},
         "nodeName": topology.ran_node,
+        "namespace": NAMESPACE,
+        "n3networkName": OPEN5GS_N3_NETWORK,
+        "gnbIp": OPEN5GS_GNB_N2_N3_ADDRESS,
+        "gnbConfig": {
+            "cu_cp": {
+                "amf": {
+                    "addr": OPEN5GS_AMF_N2_ADDRESS,
+                    "port": OPEN5GS_AMF_PORT,
+                    "bind_addr": OPEN5GS_GNB_N2_N3_ADDRESS,
+                }
+            },
+            "cu_up": {
+                "ngu": {
+                    "socket": [{"bind_addr": OPEN5GS_GNB_N2_N3_ADDRESS}],
+                }
+            },
+        },
     }
 
 
@@ -378,7 +406,13 @@ def _checked(runner: Runner, command: Sequence[str], timeout_seconds: int, label
 
 
 def _validate_render(
-    *, text: str, topology: PhysicalTopology, repository: str, tag: str, digest: str | None
+    *,
+    text: str,
+    topology: PhysicalTopology,
+    repository: str,
+    tag: str,
+    digest: str | None,
+    ru_pod_address: str,
 ) -> None:
     if not re.search(r"(?m)^\s*replicas:\s*0\s*$", text):
         raise R2LabN3xxError("offline physical render is not staged at zero replicas")
@@ -391,6 +425,15 @@ def _validate_render(
         raise R2LabN3xxError("offline physical render does not use the selected radio image")
     if "name: gnb-logs" in text:
         raise R2LabN3xxError("physical render unexpectedly contains the unpinned log sidecar")
+    network_requirements = (
+        (rf'"name"\s*:\s*"{re.escape(OPEN5GS_N3_NETWORK)}"', "Open5GS N3 network attachment"),
+        (rf'"ips"\s*:\s*\[\s*"{re.escape(OPEN5GS_GNB_N2_N3_ADDRESS)}/24"\s*\]', "Open5GS gNB N3 address"),
+        (rf'"name"\s*:\s*"{re.escape(OPEN5GS_RU_NETWORK)}"', "N3xx RU network attachment"),
+        (rf'"ips"\s*:\s*\[\s*"{re.escape(ru_pod_address)}/24"\s*\]', "N3xx RU pod address"),
+    )
+    for pattern, label in network_requirements:
+        if re.search(pattern, text) is None:
+            raise R2LabN3xxError(f"offline physical render is missing the required {label}")
 
 
 def stage_n3xx_gnb(
@@ -463,7 +506,6 @@ def stage_n3xx_gnb(
         generated = temporary / GENERATED_VALUES
         generated_text = json.dumps(_generated_values(topology=topology, lock=lock), indent=2, sort_keys=True) + "\n"
         generated.write_text(generated_text, encoding="utf-8", newline="\n")
-        # Put the generated file inside the packaged chart as well for auditability.
         (chart_copy / GENERATED_VALUES).write_text(generated_text, encoding="utf-8", newline="\n")
         helm = materialize_locked_helm(
             lock=lock,
@@ -493,6 +535,7 @@ def stage_n3xx_gnb(
             repository=repository,
             tag=tag,
             digest=digest,
+            ru_pod_address=_ru_pod_address(source_text),
         )
         render_path = temporary / "physical-render.yaml"
         render_path.write_text(render, encoding="utf-8", newline="\n")
@@ -508,7 +551,7 @@ def stage_n3xx_gnb(
             values_sha256=_sha256_file(generated),
             render_sha256=_sha256_text(render),
             expected_image_digest=digest,
-            expected_gnb_peer=_gnb_address(source_text),
+            expected_gnb_peer=OPEN5GS_GNB_N2_N3_ADDRESS,
             radio_address=_radio_address(source_text),
         )
         _write_json(temporary / "n3xx-artifact.json", artifact.to_dict())
@@ -935,7 +978,6 @@ def start_n3xx_gnb(
 
     known_hosts = known_hosts.expanduser().resolve()
     authority()
-    # Stopped ownership is verified before the mutation.
     deployment = json.loads(
         _checked(
             runner,
@@ -1155,6 +1197,19 @@ def start_n3xx_gnb(
             n2_path=n2_path,
         )
     except Exception:
+        physical_dir = run_root.expanduser().resolve() / run_id / "physical"
+        if last_observation:
+            failure_payload = {
+                **last_observation,
+                "status": "gnb-n2-not-proven",
+                "attempts": attempts,
+                "required_consecutive_proofs": required_consecutive_proofs,
+                "convergence_attempts": convergence_attempts,
+            }
+            try:
+                _write_json(physical_dir / "physical-gnb-n2-failure.json", failure_payload)
+            except R2LabN3xxError:
+                pass
         try:
             _checked(
                 runner,
