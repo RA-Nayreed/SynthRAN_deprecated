@@ -98,7 +98,7 @@ and N300.
 Only the physical dependencies are required for this boundary:
 
 ```text
-python -m synthran deps sync \
+synthran deps sync \
   --name fiveg_ansible \
   --name srsran_helm
 ```
