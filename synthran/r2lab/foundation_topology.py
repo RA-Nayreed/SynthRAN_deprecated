@@ -254,7 +254,6 @@ def _handoff_namespace(
         timeout_seconds=min(timeout_seconds, 60),
     )
     if owner is None:
-        # Missing and unlabeled are distinguished by a direct existence query.
         namespace = _checked(
             cluster_runner,
             _ssh(
@@ -287,8 +286,6 @@ def _handoff_namespace(
                 label="Open5GS namespace creation",
             )
         elif previous_run_id is None:
-            # A legacy unlabeled namespace may be reclaimed only after the exact
-            # gNB is stopped below.
             pass
     allowed = {run_id}
     if previous_run_id is not None:
@@ -701,6 +698,7 @@ def accept_topology_foundation(
             owner=owner,
             allocation_id=allocation_id,
             timeout_seconds=min(timeout_seconds, 300),
+            run_root=run_root,
         )
         authority()
     except R2LabTopologyResourceError as exc:
