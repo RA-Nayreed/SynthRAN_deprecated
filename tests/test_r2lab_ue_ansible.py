@@ -63,6 +63,19 @@ class SelectedUeRoleRenderingTests(unittest.TestCase):
         self.assertNotIn("mbimcli", connect + stop)
         self.assertNotIn("quectel-CM", connect + stop)
 
+    def test_synthran_ue_module_contains_no_direct_modem_actuator(self) -> None:
+        source = (REPOSITORY_ROOT / "synthran" / "r2lab" / "ue.py").read_text(encoding="utf-8")
+        for forbidden in (
+            "AT+QNWINFO",
+            "AT+C5GREG?",
+            "--set-radio-state=on",
+            "--attach-packet-service",
+            "--connect=session-id=0",
+            "nohup quectel-CM",
+            "ci_ctl_qtel.py",
+        ):
+            self.assertNotIn(forbidden, source)
+
     def test_open5gs_functional_peer_is_the_pinned_default_upf(self) -> None:
         self.assertEqual("12.1.1.1", OPEN5GS_UPF_ADDRESS)
 
