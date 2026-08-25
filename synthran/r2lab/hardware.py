@@ -100,10 +100,7 @@ RADIOS: Mapping[str, RadioProfile] = {
         executable=True,
         image_repository="r2labuser/srsran-gnb-uhd",
         image_tag="v1.0",
-        # The pinned upstream profile names this tag but the repository lock did
-        # not previously contain its digest.  Runtime records the observed
-        # imageID as provenance; a future lock entry may tighten this further.
-        container_lock_key=None,
+        container_lock_key="srsran_gnb_physical_n320",
     ),
     "benetel1": RadioProfile(
         name="benetel1",
