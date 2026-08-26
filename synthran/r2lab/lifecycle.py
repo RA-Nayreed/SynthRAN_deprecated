@@ -21,7 +21,6 @@ from synthran.r2lab.acceptance import (
     PhysicalRunEvidence,
     R2LabAcceptanceError,
 )
-from synthran.r2lab.cluster_ssh import bind_physical_cluster_ssh
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
 from synthran.r2lab.physical_inventory import load_physical_inventory
 from synthran.r2lab.resources import load_topology
@@ -34,6 +33,7 @@ from synthran.r2lab.ue_activation import (
     activate_physical_ue,
     recover_retryable_transport_failure,
 )
+from synthran.utils.environment import scoped_environment
 
 
 DEFAULT_R2LAB_RUN_ROOT = Path(".synthran/r2lab")
@@ -94,10 +94,7 @@ class PhysicalPathSummary:
 
     @property
     def ready_for_workload(self) -> bool:
-        return (
-            self.failed_stage is None
-            and self.next_stage == PhysicalAcceptanceStage.WORKLOAD.value
-        )
+        return self.failed_stage is None and self.next_stage == PhysicalAcceptanceStage.WORKLOAD.value
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -193,8 +190,7 @@ def continue_physical_path(
             activation_status = activation.status
 
         user_plane_proven = (
-            evidence.acceptance.outcome_for(PhysicalAcceptanceStage.USER_PLANE).value
-            == "passed"
+            evidence.acceptance.outcome_for(PhysicalAcceptanceStage.USER_PLANE).value == "passed"
         )
         if evidence.acceptance.next_stage is PhysicalAcceptanceStage.USER_PLANE:
             if progress is not None:
@@ -221,13 +217,8 @@ def continue_physical_path(
             if progress is not None:
                 print("[synthran] physical-user-plane: OK", file=progress, flush=True)
 
-        if evidence.acceptance.next_stage not in {
-            PhysicalAcceptanceStage.WORKLOAD,
-            None,
-        }:
-            raise R2LabPhysicalLifecycleError(
-                "physical path did not reach the workload boundary"
-            )
+        if evidence.acceptance.next_stage not in {PhysicalAcceptanceStage.WORKLOAD, None}:
+            raise R2LabPhysicalLifecycleError("physical path did not reach the workload boundary")
 
         return PhysicalPathSummary(
             run_id=run_id,
@@ -237,14 +228,7 @@ def continue_physical_path(
             activation_status=activation_status,
             user_plane_proven=user_plane_proven,
         )
-    except (
-        R2LabAcceptanceError,
-        R2LabPhysicalUeError,
-        OSError,
-        ValueError,
-    ) as exc:
-        if isinstance(exc, R2LabPhysicalLifecycleError):
-            raise
+    except (R2LabAcceptanceError, R2LabPhysicalUeError, OSError, ValueError) as exc:
         raise R2LabPhysicalLifecycleError(str(exc)) from exc
 
 
@@ -294,14 +278,18 @@ def run_physical_workload(
             minimum_per_sensor=minimum_per_sensor,
             progress=progress,
         ).validate()
-        with bind_physical_cluster_ssh(known_hosts):
+
+        cluster_known_hosts = known_hosts.expanduser().resolve()
+        if not cluster_known_hosts.is_file():
+            raise R2LabPhysicalLifecycleError("strict SLICES known-hosts file is missing")
+        with scoped_environment({"SYNTHRAN_KNOWN_HOSTS": str(cluster_known_hosts)}):
             state, result = execute_physical_workload_handoff(
                 evidence=evidence,
                 slice_name=slice_name,
                 owner=owner,
                 allocation_id=allocation_id,
                 run_root=run_root,
-                known_hosts=known_hosts,
+                known_hosts=cluster_known_hosts,
                 r2lab_runner=r2lab_runner,
                 cluster_runner=cluster_runner,
                 executor=build_physical_workload_executor(config),
@@ -309,6 +297,7 @@ def run_physical_workload(
                 workload_evidence_path=workload_result_path,
                 timeout_seconds=timeout_seconds,
             )
+
         accepted = (
             result is not None
             and result.accepted
@@ -323,12 +312,5 @@ def run_physical_workload(
             accepted=accepted,
             cleanup_proven=(result.cleanup_proven if result is not None else False),
         )
-    except (
-        R2LabAcceptanceError,
-        R2LabPhysicalUeError,
-        OSError,
-        ValueError,
-    ) as exc:
-        if isinstance(exc, R2LabPhysicalLifecycleError):
-            raise
+    except (R2LabAcceptanceError, R2LabPhysicalUeError, OSError, ValueError) as exc:
         raise R2LabPhysicalLifecycleError(str(exc)) from exc

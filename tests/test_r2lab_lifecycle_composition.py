@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -138,17 +139,20 @@ class PhysicalWorkloadCompositionTests(unittest.TestCase):
             SimpleNamespace(accepted=True, cleanup_proven=True),
         )
 
-        summary = run_physical_workload(
-            run_id="r2lab-run-001",
-            workload_id="physical-iot-001",
-            slice_name="oulu_user",
-            owner="rnayreed",
-            allocation_id=None,
-            known_hosts=Path("known_hosts"),
-            inventory_path=Path("hosts.ini"),
-            r2lab_runner=Mock(),
-            cluster_runner=Mock(),
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            known_hosts = Path(directory) / "known_hosts"
+            known_hosts.write_text("test-host-key\n", encoding="utf-8")
+            summary = run_physical_workload(
+                run_id="r2lab-run-001",
+                workload_id="physical-iot-001",
+                slice_name="oulu_user",
+                owner="rnayreed",
+                allocation_id=None,
+                known_hosts=known_hosts,
+                inventory_path=Path("hosts.ini"),
+                r2lab_runner=Mock(),
+                cluster_runner=Mock(),
+            )
 
         self.assertTrue(summary.accepted)
         self.assertTrue(summary.cleanup_proven)

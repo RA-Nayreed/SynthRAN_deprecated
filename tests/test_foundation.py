@@ -167,9 +167,13 @@ class FoundationTests(unittest.TestCase):
                     "THIRD_PARTY.md",
                 }:
                     content = path.read_text(encoding="utf-8")
-                    if relative == "synthran/r2lab/ue.py":
-                        external_status_key = '"' + forbidden + '"'
-                        content = content.replace(external_status_key, '"kubernetes-status-state"')
+                    if path.suffix.lower() == ".py":
+                        for quote in ('"', "'"):
+                            external_status_key = quote + forbidden + quote
+                            content = content.replace(
+                                external_status_key,
+                                quote + "kubernetes-status-state" + quote,
+                            )
                     self.assertNotIn(forbidden, content.lower(), relative)
 
     def test_interactive_guides_use_direct_commands_after_activation(self) -> None:

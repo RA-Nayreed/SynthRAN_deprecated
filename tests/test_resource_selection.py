@@ -4,8 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from synthran.r2lab.controller import SUPPORTED_QFITS, SUPPORTED_QHATS, SUPPORTED_RADIOS
 from synthran.network.resources import SUPPORTED_NODES
+from synthran.r2lab.hardware import RADIOS, UES
 from synthran.resources import (
     ProviderResourceSnapshot,
     ResourceDescriptor,
@@ -125,9 +125,11 @@ class ResourceSelectionTests(unittest.TestCase):
             for item in descriptors
             if item.provider == "r2lab" and item.kind == "ue"
         }
+        executable_radios = {name for name, profile in RADIOS.items() if profile.executable}
+        executable_ues = {name for name, profile in UES.items() if profile.executable}
         self.assertEqual(compute, set(SUPPORTED_NODES))
-        self.assertEqual(radios, set(SUPPORTED_RADIOS))
-        self.assertEqual(ues, set(SUPPORTED_QHATS | SUPPORTED_QFITS))
+        self.assertEqual(radios, executable_radios)
+        self.assertEqual(ues, executable_ues)
 
     def test_virtual_default_prefers_recommended_compute_pair_without_r2lab(self) -> None:
         desired = ExperimentDesiredState.recommended(intent="virtual-5g")

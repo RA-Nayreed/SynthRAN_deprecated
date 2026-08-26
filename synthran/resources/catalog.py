@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from synthran.r2lab.hardware import RADIOS, UES
 from synthran.resources.model import ResourceDescriptor
 
 
@@ -78,71 +79,46 @@ SLICES_COMPUTE = (
 )
 
 
-R2LAB_RADIOS = (
+R2LAB_RADIOS = tuple(
     ResourceDescriptor(
-        resource_id="n300",
+        resource_id=name,
         provider="r2lab",
         kind="radio",
         capabilities=frozenset(
             {
                 "radio",
                 "backend:r2lab",
-                "hardware:n300",
-                "ran:oai",
+                f"hardware:{name}",
                 "ran:srsran",
             }
         ),
-        role_priority={"radio": 0},
-    ),
-    ResourceDescriptor(
-        resource_id="n320",
-        provider="r2lab",
-        kind="radio",
-        capabilities=frozenset(
-            {
-                "radio",
-                "backend:r2lab",
-                "hardware:n320",
-                "ran:oai",
-                "ran:srsran",
-            }
-        ),
-        role_priority={"radio": 10},
-    ),
+        role_priority={"radio": index * 10},
+    )
+    for index, (name, profile) in enumerate(RADIOS.items())
+    if profile.executable
 )
 
 
-_QHAT_MBIM = ("qhat01", "qhat02", "qhat03", "qhat10", "qhat11")
-_QHAT_QMI = ("qhat20", "qhat21", "qhat22")
-_QFIT_MBIM = ("qfit07", "qfit09", "qfit18", "qfit29", "qfit32", "qfit34")
+def _ue_priority(kind: str, mode: str) -> int:
+    if kind == "qhat" and mode == "mbim":
+        return 10
+    if kind == "qhat" and mode == "qmi":
+        return 20
+    if kind == "qfit" and mode == "mbim":
+        return 30
+    raise ValueError("executable R2Lab UE has an unsupported selection profile")
+
 
 R2LAB_UES = tuple(
     ResourceDescriptor(
         resource_id=name,
         provider="r2lab",
         kind="ue",
-        capabilities=frozenset({"ue", "device:qhat", "mode:mbim"}),
-        role_priority={"ue": 10},
+        capabilities=frozenset({"ue", f"device:{profile.kind}", f"mode:{profile.mode}"}),
+        role_priority={"ue": _ue_priority(profile.kind, profile.mode)},
     )
-    for name in _QHAT_MBIM
-) + tuple(
-    ResourceDescriptor(
-        resource_id=name,
-        provider="r2lab",
-        kind="ue",
-        capabilities=frozenset({"ue", "device:qhat", "mode:qmi"}),
-        role_priority={"ue": 20},
-    )
-    for name in _QHAT_QMI
-) + tuple(
-    ResourceDescriptor(
-        resource_id=name,
-        provider="r2lab",
-        kind="ue",
-        capabilities=frozenset({"ue", "device:qfit", "mode:mbim"}),
-        role_priority={"ue": 30},
-    )
-    for name in _QFIT_MBIM
+    for name, profile in UES.items()
+    if profile.executable
 )
 
 
