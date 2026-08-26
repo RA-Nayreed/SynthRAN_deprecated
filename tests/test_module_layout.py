@@ -10,51 +10,58 @@ SOURCE = REPOSITORY_ROOT / "synthran"
 
 class ModuleLayoutTests(unittest.TestCase):
     def test_domain_code_is_grouped_in_packages(self) -> None:
-        self.assertTrue((SOURCE / "app" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "app" / "model.py").is_file())
-        self.assertTrue((SOURCE / "app" / "controller.py").is_file())
-        self.assertTrue((SOURCE / "app" / "workflows.py").is_file())
-        self.assertTrue((SOURCE / "experiment" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "experiment" / "resources.py").is_file())
-        self.assertTrue((SOURCE / "experiment" / "runtime.py").is_file())
-        self.assertTrue((SOURCE / "network" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "network" / "runtime.py").is_file())
-        self.assertTrue((SOURCE / "network" / "resources.py").is_file())
-        self.assertTrue((SOURCE / "network" / "rfsim.py").is_file())
-        self.assertTrue((SOURCE / "operations" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "operations" / "model.py").is_file())
-        self.assertTrue((SOURCE / "operations" / "journal.py").is_file())
-        self.assertTrue((SOURCE / "operations" / "policy.py").is_file())
-        self.assertTrue((SOURCE / "operations" / "engine.py").is_file())
-        self.assertTrue((SOURCE / "resources" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "resources" / "model.py").is_file())
-        self.assertTrue((SOURCE / "resources" / "catalog.py").is_file())
-        self.assertTrue((SOURCE / "resources" / "requirements.py").is_file())
-        self.assertTrue((SOURCE / "resources" / "selector.py").is_file())
-        self.assertTrue((SOURCE / "resources" / "decision.py").is_file())
-        self.assertTrue((SOURCE / "resources" / "transaction.py").is_file())
-        self.assertTrue((SOURCE / "research" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "research" / "collector.py").is_file())
-        self.assertTrue((SOURCE / "research" / "instrumentation.py").is_file())
-        self.assertTrue((SOURCE / "research" / "iperf.py").is_file())
-        self.assertTrue((SOURCE / "research" / "runtime.py").is_file())
-        self.assertTrue((SOURCE / "research" / "sampling.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "__init__.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "model.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "store.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "registry.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "records.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "access.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "status.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "session.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "initialization.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "context.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "desired.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "desired_store.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "experiment_service.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "observed.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "observed_store.py").is_file())
-        self.assertTrue((SOURCE / "workspace" / "reconciliation.py").is_file())
+        required = (
+            "app/__init__.py",
+            "app/model.py",
+            "app/controller.py",
+            "app/workflows.py",
+            "experiment/__init__.py",
+            "experiment/resources.py",
+            "experiment/runtime.py",
+            "network/__init__.py",
+            "network/runtime.py",
+            "network/resources.py",
+            "network/rfsim.py",
+            "operations/__init__.py",
+            "operations/model.py",
+            "operations/journal.py",
+            "operations/policy.py",
+            "operations/engine.py",
+            "resources/__init__.py",
+            "resources/model.py",
+            "resources/catalog.py",
+            "resources/requirements.py",
+            "resources/selector.py",
+            "resources/decision.py",
+            "resources/transaction.py",
+            "research/__init__.py",
+            "research/collector.py",
+            "research/instrumentation.py",
+            "research/iperf.py",
+            "research/runtime.py",
+            "research/sampling.py",
+            "utils/__init__.py",
+            "utils/environment.py",
+            "utils/ssh.py",
+            "workspace/__init__.py",
+            "workspace/model.py",
+            "workspace/store.py",
+            "workspace/registry.py",
+            "workspace/records.py",
+            "workspace/access.py",
+            "workspace/status.py",
+            "workspace/session.py",
+            "workspace/initialization.py",
+            "workspace/context.py",
+            "workspace/desired.py",
+            "workspace/desired_store.py",
+            "workspace/experiment_service.py",
+            "workspace/observed.py",
+            "workspace/observed_store.py",
+            "workspace/reconciliation.py",
+        )
+        for relative in required:
+            self.assertTrue((SOURCE / relative).is_file(), relative)
 
     def test_flat_duplicate_modules_do_not_return(self) -> None:
         removed = {
@@ -76,6 +83,25 @@ class ModuleLayoutTests(unittest.TestCase):
         }
         present = {path.name for path in SOURCE.iterdir() if path.is_file()}
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
+
+    def test_superseded_r2lab_stack_does_not_return(self) -> None:
+        r2lab = SOURCE / "r2lab"
+        removed = {
+            "authority.py",
+            "cluster_ssh.py",
+            "foundation.py",
+            "gnb.py",
+            "guards.py",
+            "handoff.py",
+            "readiness.py",
+            "ue_overlay.py",
+        }
+        present = {path.name for path in r2lab.iterdir() if path.is_file()}
+        self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
+        self.assertTrue((r2lab / "foundation_topology.py").is_file())
+        self.assertTrue((r2lab / "n3xx.py").is_file())
+        self.assertTrue((r2lab / "resources.py").is_file())
+        self.assertTrue((r2lab / "ue_ansible.py").is_file())
 
     def test_synthran_is_the_only_operator_entrypoint(self) -> None:
         self.assertTrue((SOURCE / "launcher.py").is_file())
