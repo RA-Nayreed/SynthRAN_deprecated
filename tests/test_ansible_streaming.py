@@ -73,7 +73,6 @@ class AnsibleStreamingParserTests(unittest.TestCase):
             parse_ansible_line("PLAY [all] *********************************************************************"),
             "  PLAY: all",
         )
-        # Unmapped routine tasks like 'gather facts' are suppressed during normal execution
         self.assertIsNone(
             parse_ansible_line("TASK [gather facts] ************************************************************"),
         )
@@ -98,7 +97,6 @@ class AnsibleStreamingParserTests(unittest.TestCase):
         )
 
     def test_task_lines_strip_argument_decorations_and_suppress_routine(self) -> None:
-        # Verify friendly_task_name strips argument decorations
         self.assertEqual(
             friendly_task_name("command argv=['helm', 'status']"),
             "command",
@@ -124,7 +122,6 @@ class AnsibleStreamingParserTests(unittest.TestCase):
             "include_tasks",
         )
 
-        # Unmapped routine task lines are suppressed by parse_ansible_line
         self.assertIsNone(
             parse_ansible_line("TASK [command argv=['helm', 'status']] ****************************************"),
         )
@@ -138,7 +135,6 @@ class AnsibleStreamingParserTests(unittest.TestCase):
             parse_ansible_line("TASK [assert that=['result.rc == 0']] ******************************************"),
         )
 
-        # Friendly-mapped tasks with argument decorations remain visible
         self.assertEqual(
             parse_ansible_line("TASK [Attach the run ID to the deployed network resources] **********************"),
             "  TASK: Recording run ownership",
@@ -227,7 +223,6 @@ class AnsibleStreamingRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 0)
-        # Routine host statuses (ok, changed, skipping) and ugly skipped task must NOT be in reported
         self.assertEqual(
             reported,
             [
@@ -235,12 +230,38 @@ class AnsibleStreamingRunnerTests(unittest.TestCase):
                 "  TASK: Pinning locked Open5GS images",
             ],
         )
-        # Verify full raw output is preserved in result.stdout for sanitized logging
         self.assertIn('{"sensitive": "json_data_123"}', result.stdout)
         self.assertIn("PLAY [Deploy the locked Open5GS core", result.stdout)
         self.assertIn("ok: [sopnode-f2]", result.stdout)
         self.assertIn("skipping: [sopnode-f2]", result.stdout)
         self.assertIn("Attempt << error 1 - undefined >>", result.stdout)
+
+    def test_streaming_process_success_suppresses_ignored_failure(self) -> None:
+        script = (
+            "import sys\n"
+            "print('TASK [Check optional mount] ****************************************************')\n"
+            "print('fatal: [sopnode-f3]: FAILED! => {\"rc\": 1}')\n"
+            "print('...ignoring')\n"
+            "print('TASK [Wait for AMF pod to become Ready] ****************************************')\n"
+            "print('ok: [sopnode-f2]')\n"
+            "sys.stdout.flush()\n"
+        )
+        reported: list[str] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            cwd = Path(temporary)
+            result = run_streaming_ansible_command(
+                [sys.executable, "-c", script],
+                cwd=cwd,
+                environment=None,
+                timeout_seconds=10,
+                report=reported.append,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(reported, ["  TASK: Wait for AMF pod to become Ready"])
+        self.assertFalse(any("[FAIL]" in message for message in reported))
+        self.assertIn("fatal: [sopnode-f3]: FAILED!", result.stdout)
+        self.assertIn("...ignoring", result.stdout)
 
     def test_streaming_process_nonzero_exit_shows_failure(self) -> None:
         script = (
@@ -289,7 +310,6 @@ class AnsibleStreamingRunnerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 2)
-        # The TASK header for 'command' is suppressed, but the fatal line reports the failure with task context
         self.assertEqual(len(reported), 1)
         self.assertIn("[FAIL] command", reported[0])
         self.assertIn("host: sopnode-f2", reported[0])
@@ -320,7 +340,6 @@ class AnsibleStreamingRunnerTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("  TASK: Pinning locked Open5GS images", reported)
-        # Should have contextual heartbeats with friendly task name and formatted duration
         heartbeats = [r for r in reported if "Pinning locked Open5GS images ·" in r]
         self.assertTrue(len(heartbeats) >= 2, f"Expected multiple contextual heartbeats, got: {reported}")
 
