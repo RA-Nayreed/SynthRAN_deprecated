@@ -21,6 +21,7 @@ from synthran.r2lab.acceptance import (
     PhysicalRunEvidence,
     R2LabAcceptanceError,
 )
+from synthran.r2lab.cluster_ssh import bind_physical_cluster_ssh
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
 from synthran.r2lab.physical_inventory import load_physical_inventory
 from synthran.r2lab.resources import load_topology
@@ -293,20 +294,21 @@ def run_physical_workload(
             minimum_per_sensor=minimum_per_sensor,
             progress=progress,
         ).validate()
-        state, result = execute_physical_workload_handoff(
-            evidence=evidence,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            run_root=run_root,
-            known_hosts=known_hosts,
-            r2lab_runner=r2lab_runner,
-            cluster_runner=cluster_runner,
-            executor=build_physical_workload_executor(config),
-            evidence_path=evidence_path,
-            workload_evidence_path=workload_result_path,
-            timeout_seconds=timeout_seconds,
-        )
+        with bind_physical_cluster_ssh(known_hosts):
+            state, result = execute_physical_workload_handoff(
+                evidence=evidence,
+                slice_name=slice_name,
+                owner=owner,
+                allocation_id=allocation_id,
+                run_root=run_root,
+                known_hosts=known_hosts,
+                r2lab_runner=r2lab_runner,
+                cluster_runner=cluster_runner,
+                executor=build_physical_workload_executor(config),
+                evidence_path=evidence_path,
+                workload_evidence_path=workload_result_path,
+                timeout_seconds=timeout_seconds,
+            )
         accepted = (
             result is not None
             and result.accepted
