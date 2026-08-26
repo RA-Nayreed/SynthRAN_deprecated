@@ -71,9 +71,12 @@ class R2LabTransportTests(unittest.TestCase):
         command = qfit_gateway_command("oulu_user", "qfit07", "python3", "-c", script)
         outer_remote = command[-1]
         nested = shlex.split(outer_remote)
+        expected_known_hosts = "UserKnownHostsFile=" + str(
+            Path("/", "home", "oulu_user", ".ssh", "known_hosts")
+        )
         self.assertEqual("ssh", nested[0])
         self.assertIn("StrictHostKeyChecking=yes", nested)
-        self.assertIn("UserKnownHostsFile=/home/oulu_user/.ssh/known_hosts", nested)
+        self.assertIn(expected_known_hosts, nested)
         self.assertNotIn("GlobalKnownHostsFile=/dev/null", nested)
         self.assertEqual(["python3", "-c", script], shlex.split(nested[-1]))
 
