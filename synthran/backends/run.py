@@ -700,51 +700,57 @@ def _run_rfsim(
     lock = load_lock(args.lock)
     authority_environment = {"SYNTHRAN_KNOWN_HOSTS": str(known_hosts)}
 
+    network_dir = args.network_run_root.expanduser().resolve() / args.run_id
+    network_manifest = network_dir / "manifest.json"
+    network_deployed = network_manifest.is_file()
     preflight = prep_dir / "live-preflight.json"
-    preflight_ready = False
-    if preflight.is_file():
-        try:
-            load_fresh_live_evidence(
-                path=preflight,
-                inventory=inventory_model,
-                owner=owner,
-                reservation_id=reservation_id,
-                allocation_id=allocation_id,
-                lock=lock,
-                slices_project=project,
-                slices_experiment=experiment,
-            )
-        except LivePreflightError:
-            preflight_ready = False
-        else:
-            preflight_ready = True
 
-    if not preflight_ready:
-        progress.start("preflight", "verify live provider and compute authority")
-        with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
-            rc = command_runtime._doctor(
-                argparse.Namespace(
-                    inventory=inventory,
-                    lock=args.lock,
-                    deps_root=args.deps_root,
-                    offline=False,
-                    slices_project=project,
-                    slices_experiment=experiment,
+    if network_deployed:
+        progress.resumed("preflight", "existing network deployment already consumed preflight authority")
+    else:
+        preflight_ready = False
+        if preflight.is_file():
+            try:
+                load_fresh_live_evidence(
+                    path=preflight,
+                    inventory=inventory_model,
                     owner=owner,
                     reservation_id=reservation_id,
                     allocation_id=allocation_id,
-                    evidence_out=preflight,
-                    timeout=min(args.timeout, 300),
+                    lock=lock,
+                    slices_project=project,
+                    slices_experiment=experiment,
                 )
-            )
-        if rc != 0:
-            raise BackendError("RFSIM live preflight failed")
-        progress.done("preflight", "live authority verified")
-    else:
-        progress.resumed("preflight", "fresh READY preflight evidence present")
+            except LivePreflightError:
+                preflight_ready = False
+            else:
+                preflight_ready = True
 
-    network_dir = args.network_run_root.expanduser().resolve() / args.run_id
-    if not (network_dir / "manifest.json").is_file():
+        if not preflight_ready:
+            progress.start("preflight", "verify live provider and compute authority")
+            with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
+                rc = command_runtime._doctor(
+                    argparse.Namespace(
+                        inventory=inventory,
+                        lock=args.lock,
+                        deps_root=args.deps_root,
+                        offline=False,
+                        slices_project=project,
+                        slices_experiment=experiment,
+                        owner=owner,
+                        reservation_id=reservation_id,
+                        allocation_id=allocation_id,
+                        evidence_out=preflight,
+                        timeout=min(args.timeout, 300),
+                    )
+                )
+            if rc != 0:
+                raise BackendError("RFSIM live preflight failed")
+            progress.done("preflight", "live authority verified")
+        else:
+            progress.resumed("preflight", "fresh READY preflight evidence present")
+
+    if not network_deployed:
         progress.start("network", "deploy RFSIM 5G network")
         with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
             rc = command_runtime._network_deploy(
