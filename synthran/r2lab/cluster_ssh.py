@@ -33,8 +33,6 @@ def strict_cluster_ssh_command(
         "StrictHostKeyChecking=yes",
         "-o",
         f"UserKnownHostsFile={known_hosts}",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
     ]
 
     port = host.variables.get("ansible_port")
