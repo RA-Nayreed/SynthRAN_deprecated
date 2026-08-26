@@ -14,11 +14,15 @@ from typing import Mapping, TextIO
 
 from synthran import command_runtime
 from synthran.backends.base import BackendError
-from synthran.dependencies import DependencyError
+from synthran.dependencies import DependencyError, load_lock
 from synthran.experiment import ExperimentError
 from synthran.experiment.runtime import DEFAULT_COLLECTION_SECONDS, DEFAULT_MINIMUM_PER_SENSOR
-from synthran.fiveg_ansible import FiveGAnsibleError
-from synthran.live_preflight import LivePreflightError, subprocess_runner as cluster_runner
+from synthran.fiveg_ansible import FiveGAnsibleError, parse_inventory
+from synthran.live_preflight import (
+    LivePreflightError,
+    load_fresh_live_evidence,
+    subprocess_runner as cluster_runner,
+)
 from synthran.network.resources import SUPPORTED_NODES, ResourcePreparationError, build_preparation_inventory
 from synthran.network.runtime import NetworkRuntimeError, validate_run_id
 from synthran.privacy import PrivacyError
@@ -37,6 +41,7 @@ from synthran.r2lab.resources import (
 )
 from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.slices_controller import SlicesControllerError
+from synthran.utils.environment import scoped_environment
 from synthran.utils.ssh import strict_ssh_command
 from synthran.workspace.model import WorkspaceError
 
@@ -671,17 +676,52 @@ def _run_rfsim(
         progress.done("resources", "reservation/allocation prepared")
     else:
         progress.resumed("resources", "existing preparation present")
+
     inventory = prep_dir / "hosts.ini"
     authority = _authority(prep_dir / "authority.env")
     reservation_id = authority.get("SYNTHRAN_RESERVATION_ID")
     allocation_id = authority.get("SYNTHRAN_ALLOCATION_ID")
+    known_hosts_value = authority.get("SYNTHRAN_KNOWN_HOSTS")
     if not reservation_id or not allocation_id:
         raise BackendError("prepared RFSIM authority is missing reservation/allocation IDs")
+    if not known_hosts_value:
+        raise BackendError("prepared RFSIM authority is missing strict SSH trust")
+    known_hosts = Path(known_hosts_value).expanduser().resolve()
+    if not known_hosts.is_file():
+        raise BackendError("prepared RFSIM strict known-hosts file is missing")
+
+    try:
+        inventory_model = parse_inventory(
+            inventory.read_text(encoding="utf-8"),
+            source=inventory,
+        )
+    except OSError as exc:
+        raise BackendError("prepared RFSIM inventory is unavailable") from exc
+    lock = load_lock(args.lock)
+    authority_environment = {"SYNTHRAN_KNOWN_HOSTS": str(known_hosts)}
 
     preflight = prep_dir / "live-preflight.json"
-    if not preflight.is_file():
+    preflight_ready = False
+    if preflight.is_file():
+        try:
+            load_fresh_live_evidence(
+                path=preflight,
+                inventory=inventory_model,
+                owner=owner,
+                reservation_id=reservation_id,
+                allocation_id=allocation_id,
+                lock=lock,
+                slices_project=project,
+                slices_experiment=experiment,
+            )
+        except LivePreflightError:
+            preflight_ready = False
+        else:
+            preflight_ready = True
+
+    if not preflight_ready:
         progress.start("preflight", "verify live provider and compute authority")
-        with redirect_stdout(progress.child_stream):
+        with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
             rc = command_runtime._doctor(
                 argparse.Namespace(
                     inventory=inventory,
@@ -701,12 +741,12 @@ def _run_rfsim(
             raise BackendError("RFSIM live preflight failed")
         progress.done("preflight", "live authority verified")
     else:
-        progress.resumed("preflight", "existing preflight evidence present")
+        progress.resumed("preflight", "fresh READY preflight evidence present")
 
     network_dir = args.network_run_root.expanduser().resolve() / args.run_id
     if not (network_dir / "manifest.json").is_file():
         progress.start("network", "deploy RFSIM 5G network")
-        with redirect_stdout(progress.child_stream):
+        with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
             rc = command_runtime._network_deploy(
                 argparse.Namespace(
                     inventory=inventory,
@@ -735,7 +775,7 @@ def _run_rfsim(
     network_evidence = network_dir / "network-evidence.json"
     if not network_evidence.is_file():
         progress.start("path", "prove RFSIM network path")
-        with redirect_stdout(progress.child_stream):
+        with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
             rc = command_runtime._network_verify(
                 argparse.Namespace(
                     inventory=inventory,
@@ -758,7 +798,7 @@ def _run_rfsim(
     experiment_evidence = experiment_dir / "experiment-evidence.json"
     if not experiment_evidence.is_file():
         progress.start("workload", "run deterministic experiment and collect data")
-        with redirect_stdout(progress.child_stream):
+        with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
             rc = command_runtime._experiment_run(
                 argparse.Namespace(
                     inventory=inventory,
