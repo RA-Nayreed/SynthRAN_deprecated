@@ -14,7 +14,6 @@ import ipaddress
 import json
 from pathlib import Path
 import re
-import shlex
 import tempfile
 from typing import Callable, Mapping, Protocol, Sequence
 
@@ -37,6 +36,7 @@ from synthran.r2lab.resources import (
     verify_selected_allocation,
 )
 from synthran.r2lab.runtime import N2State, parse_n2_log_state
+from synthran.utils.ssh import strict_ssh_command
 
 
 Runner = Callable[[Sequence[str], int], CommandResult]
@@ -207,21 +207,16 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> Path:
 
 
 def _cluster_ssh(topology: PhysicalTopology, known_hosts: Path, *remote: str) -> tuple[str, ...]:
-    return (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts}",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        f"root@{topology.core_node}",
-        shlex.join(remote),
-    )
+    try:
+        return strict_ssh_command(
+            f"root@{topology.core_node}",
+            *remote,
+            known_hosts=known_hosts,
+            isolated_config=True,
+            quote_remote=True,
+        )
+    except ValueError as exc:
+        raise R2LabPhysicalUeError(str(exc)) from exc
 
 
 def _checked(
