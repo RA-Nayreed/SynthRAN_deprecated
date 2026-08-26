@@ -99,6 +99,14 @@ class PurgeLayoutTests(unittest.TestCase):
         self.assertTrue((REPOSITORY_ROOT / "synthran" / "utils" / "ssh.py").is_file())
         self.assertTrue((REPOSITORY_ROOT / "docs" / "fiveg-ansible-boundary.md").is_file())
 
+    def test_physical_ue_observation_uses_shared_ssh_policy(self) -> None:
+        source = (REPOSITORY_ROOT / "synthran" / "r2lab" / "ue.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("from synthran.utils.ssh import strict_ssh_command", source)
+        self.assertNotIn("GlobalKnownHostsFile=/dev/null", source)
+        self.assertNotIn("shlex.join(remote)", source)
+
 
 if __name__ == "__main__":
     unittest.main()
