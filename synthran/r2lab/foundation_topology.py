@@ -29,7 +29,6 @@ from synthran.network.runtime import (
     golden_path_image_variables,
     run_command,
     sanitize_deployment_text,
-    tree_sha256,
     validate_run_id,
 )
 from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence, R2LabAcceptanceError
