@@ -13,7 +13,11 @@ from synthran.r2lab.n3xx import (
     R2LabN3xxError,
     _validate_render,
 )
-from synthran.r2lab.ue_overlay import R2LabUeOverlayError, apply_ue_connect_overlay
+from synthran.r2lab.ue_ansible import (
+    R2LabUeAnsibleError,
+    _apply_connect_convergence,
+    _harden_role_tree,
+)
 
 
 UPSTREAM_MBIM_BLOCK = '''        - name: "MBIM: stop.sh + start.sh on {{ ue_item }} if wwan0 not reachable"
@@ -69,7 +73,9 @@ metadata:
         )
         with self.assertRaisesRegex(R2LabN3xxError, "RU network attachment"):
             _validate_render(
-                text=valid.replace(f'"name":"{OPEN5GS_RU_NETWORK}"', '"name":"missing-ru"'),
+                text=valid.replace(
+                    f'"name":"{OPEN5GS_RU_NETWORK}"', '"name":"missing-ru"'
+                ),
                 topology=topology,
                 repository="example/srsran",
                 tag="locked",
@@ -78,15 +84,16 @@ metadata:
             )
 
 
-class MbimConvergenceOverlayTests(unittest.TestCase):
-    def test_overlay_stops_once_and_retries_quiet_start(self) -> None:
+class MbimConvergenceHardeningTests(unittest.TestCase):
+    def test_upstream_connect_copy_is_convergent_and_strict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            roles = Path(directory) / "roles"
-            path = roles / "r2lab" / "ue" / "connect" / "tasks" / "main.yml"
+            role = Path(directory) / "connect"
+            path = role / "tasks" / "main.yml"
             path.parent.mkdir(parents=True)
             path.write_text("---\n" + UPSTREAM_MBIM_BLOCK, encoding="utf-8")
 
-            apply_ue_connect_overlay(roles)
+            _apply_connect_convergence(path)
+            _harden_role_tree(role, slice_name="oulu_user")
             rendered = path.read_text(encoding="utf-8")
 
         self.assertNotIn("stop.sh; start.sh", rendered)
@@ -95,15 +102,17 @@ class MbimConvergenceOverlayTests(unittest.TestCase):
         self.assertIn("until: mbim_start.rc == 0", rendered)
         self.assertIn("retries: 10", rendered)
         self.assertIn("delay: 3", rendered)
+        self.assertIn("StrictHostKeyChecking=yes", rendered)
+        self.assertIn("UserKnownHostsFile=/home/oulu_user/.ssh/known_hosts", rendered)
+        self.assertNotIn("StrictHostKeyChecking=no", rendered)
+        self.assertNotIn("UserKnownHostsFile=/dev/null", rendered)
 
-    def test_overlay_fails_closed_on_upstream_drift(self) -> None:
+    def test_connect_convergence_fails_closed_on_upstream_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            roles = Path(directory) / "roles"
-            path = roles / "r2lab" / "ue" / "connect" / "tasks" / "main.yml"
-            path.parent.mkdir(parents=True)
+            path = Path(directory) / "main.yml"
             path.write_text("---\n# changed upstream\n", encoding="utf-8")
-            with self.assertRaisesRegex(R2LabUeOverlayError, "drifted"):
-                apply_ue_connect_overlay(roles)
+            with self.assertRaisesRegex(R2LabUeAnsibleError, "drifted"):
+                _apply_connect_convergence(path)
 
 
 if __name__ == "__main__":
