@@ -96,6 +96,9 @@ class MbimConvergenceHardeningTests(unittest.TestCase):
             _harden_role_tree(role, slice_name="oulu_user")
             rendered = path.read_text(encoding="utf-8")
 
+        expected_known_hosts = "UserKnownHostsFile=" + str(
+            Path("/", "home", "oulu_user", ".ssh", "known_hosts")
+        )
         self.assertNotIn("stop.sh; start.sh", rendered)
         self.assertEqual(1, rendered.count("'stop.sh'"))
         self.assertEqual(1, rendered.count("start.sh -F {{ current_dnn }} -q"))
@@ -103,7 +106,7 @@ class MbimConvergenceHardeningTests(unittest.TestCase):
         self.assertIn("retries: 10", rendered)
         self.assertIn("delay: 3", rendered)
         self.assertIn("StrictHostKeyChecking=yes", rendered)
-        self.assertIn("UserKnownHostsFile=/home/oulu_user/.ssh/known_hosts", rendered)
+        self.assertIn(expected_known_hosts, rendered)
         self.assertNotIn("StrictHostKeyChecking=no", rendered)
         self.assertNotIn("UserKnownHostsFile=/dev/null", rendered)
 
