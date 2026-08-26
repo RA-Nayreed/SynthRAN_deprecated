@@ -18,7 +18,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import tarfile
 import tempfile
@@ -38,6 +37,7 @@ from synthran.r2lab.resources import (
     verify_selected_allocation,
 )
 from synthran.r2lab.runtime import N2State, parse_n2_log_state
+from synthran.utils.ssh import strict_ssh_command, strict_ssh_options
 
 
 Runner = Callable[[Sequence[str], int], CommandResult]
@@ -362,37 +362,23 @@ def _package_chart(chart_root: Path, destination: Path, run_id: str) -> Path:
 
 
 def _cluster_ssh(topology: PhysicalTopology, known_hosts: Path, *remote: str) -> tuple[str, ...]:
-    return (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts}",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        f"root@{topology.core_node}",
-        shlex.join(remote),
-    )
+    try:
+        return strict_ssh_command(
+            f"root@{topology.core_node}",
+            *remote,
+            known_hosts=known_hosts,
+            isolated_config=True,
+            quote_remote=True,
+        )
+    except ValueError as exc:
+        raise R2LabN3xxError(str(exc)) from exc
 
 
 def _scp_base(known_hosts: Path) -> tuple[str, ...]:
-    return (
-        "scp",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts}",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-    )
+    try:
+        return ("scp", *strict_ssh_options(known_hosts=known_hosts, isolated_config=True))
+    except ValueError as exc:
+        raise R2LabN3xxError(str(exc)) from exc
 
 
 def _checked(runner: Runner, command: Sequence[str], timeout_seconds: int, label: str) -> CommandResult:

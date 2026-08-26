@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -42,6 +41,7 @@ from synthran.r2lab.resources import (
     verify_physical_authority,
 )
 from synthran.upstream_overlay import UpstreamOverlayError, apply_network_overlay
+from synthran.utils.ssh import ansible_ssh_common_args, strict_ssh_command
 
 
 NAMESPACE = "open5gs"
@@ -92,21 +92,16 @@ class TopologyFoundationResult:
 
 
 def _ssh(core_node: str, known_hosts: Path, *remote: str) -> tuple[str, ...]:
-    return (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts}",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        f"root@{core_node}",
-        shlex.join(remote),
-    )
+    try:
+        return strict_ssh_command(
+            f"root@{core_node}",
+            *remote,
+            known_hosts=known_hosts,
+            isolated_config=True,
+            quote_remote=True,
+        )
+    except ValueError as exc:
+        raise R2LabTopologyFoundationError(str(exc)) from exc
 
 
 def _checked(
@@ -241,8 +236,6 @@ def _handoff_namespace(
     cluster_runner: Runner,
     timeout_seconds: int,
 ) -> bool:
-    """Create or transfer the run-owned namespace only with a proven stopped gNB."""
-
     authority = lambda: verify_physical_authority(
         run_id=run_id,
         slice_name=slice_name,
@@ -595,10 +588,8 @@ def reconcile_open5gs_topology(
             "ANSIBLE_HOST_KEY_CHECKING": "True",
             "ANSIBLE_STDOUT_CALLBACK": "ansible.builtin.default",
             "ANSIBLE_SSH_ARGS": (
-                "-o ControlMaster=auto -o ControlPersist=60s "
-                "-o StrictHostKeyChecking=yes "
-                f"-o UserKnownHostsFile={shlex.quote(str(known_hosts))} "
-                "-o GlobalKnownHostsFile=/dev/null"
+                f"{ansible_ssh_common_args(known_hosts=known_hosts, isolated_config=True)} "
+                "-o ControlMaster=auto -o ControlPersist=60s"
             ),
             "ANSIBLE_NOCOLOR": "True",
             "ANSIBLE_RETRY_FILES_ENABLED": "False",

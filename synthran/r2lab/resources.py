@@ -1,8 +1,8 @@
 """Topology-driven R2Lab resource ownership and live authority.
 
 This module owns claims, lease checks, exact hardware power state, and strict
-management reachability.  UE modem/setup mechanics are intentionally delegated
-to the pinned 5g-Ansible roles.
+management reachability. UE modem/setup mechanics are delegated to the pinned
+5g-Ansible roles.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from synthran.r2lab.provider import (
     parse_qfit_status,
     qfit_node_number,
 )
+from synthran.utils.ssh import strict_ssh_command
 
 
 Runner = Callable[[Sequence[str], int], CommandResult]
@@ -119,33 +120,18 @@ def ue_host(profile: UeProfile) -> str:
 
 
 def _nested_ssh(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str, ...]:
-    import shlex
-
     if not remote:
         raise R2LabTopologyResourceError("UE command requires an explicit remote argv")
-
-    # OpenSSH does not preserve argv boundaries for a remote command: it joins
-    # all post-host arguments into shell text.  The R2Lab path has two SSH
-    # hops (operator -> Faraday -> UE), so the UE argv must be shell-quoted
-    # before it becomes the single remote-command argument of the second hop.
-    remote_command = shlex.join(remote)
-
-    return (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile=/home/{slice_name}/.ssh/known_hosts",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        "--",
-        f"root@{ue_host(profile)}",
-        remote_command,
-    )
+    try:
+        return strict_ssh_command(
+            f"root@{ue_host(profile)}",
+            *remote,
+            known_hosts=f"/home/{slice_name}/.ssh/known_hosts",
+            isolated_config=True,
+            quote_remote=True,
+        )
+    except ValueError as exc:
+        raise R2LabTopologyResourceError(str(exc)) from exc
 
 
 def ue_gateway_command(slice_name: str, profile: UeProfile, *remote: str) -> tuple[str, ...]:
@@ -452,8 +438,6 @@ def _prepare_qfit(
     elif usb.state is PowerState.UNKNOWN:
         raise R2LabTopologyResourceError("selected qfit USB power is unknown")
 
-    # The pinned qfit image supplies the UE tooling.  Connection/session
-    # mechanics are deferred to r2lab/ue/connect; no local init script is run.
     _wait_management(
         slice_name=slice_name,
         profile=profile,

@@ -37,6 +37,7 @@ from synthran.r2lab.resources import (
 )
 from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.slices_controller import SlicesControllerError
+from synthran.utils.ssh import strict_ssh_command
 from synthran.workspace.model import WorkspaceError
 
 
@@ -296,31 +297,22 @@ def _provider(args: argparse.Namespace) -> tuple[str, str, bool, object]:
 def _namespace_owner(
     *, topology: PhysicalTopology, known_hosts: Path, timeout_seconds: int
 ) -> str | None:
-    command = (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=10",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts}",
-        "-o",
-        "GlobalKnownHostsFile=/dev/null",
-        f"root@{topology.core_node}",
-        shlex.join(
-            (
-                "kubectl",
-                "get",
-                "namespace",
-                "open5gs",
-                "--ignore-not-found",
-                "-o",
-                "jsonpath={.metadata.labels.synthran\\.run/id}",
-            )
-        ),
-    )
+    try:
+        command = strict_ssh_command(
+            f"root@{topology.core_node}",
+            "kubectl",
+            "get",
+            "namespace",
+            "open5gs",
+            "--ignore-not-found",
+            "-o",
+            "jsonpath={.metadata.labels.synthran\\.run/id}",
+            known_hosts=known_hosts,
+            isolated_config=True,
+            quote_remote=True,
+        )
+    except ValueError as exc:
+        raise BackendError(str(exc)) from exc
     result = cluster_runner(command, min(timeout_seconds, 60))
     if result.returncode != 0:
         raise BackendError("current Open5GS namespace owner could not be observed")
