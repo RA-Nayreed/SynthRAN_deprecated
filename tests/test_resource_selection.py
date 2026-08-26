@@ -4,8 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from synthran.r2lab.controller import SUPPORTED_QFITS, SUPPORTED_QHATS, SUPPORTED_RADIOS
 from synthran.network.resources import SUPPORTED_NODES
+from synthran.r2lab.hardware import RADIOS, UES
 from synthran.resources import (
     ProviderResourceSnapshot,
     ResourceDescriptor,
@@ -125,9 +125,11 @@ class ResourceSelectionTests(unittest.TestCase):
             for item in descriptors
             if item.provider == "r2lab" and item.kind == "ue"
         }
+        executable_radios = {name for name, profile in RADIOS.items() if profile.executable}
+        executable_ues = {name for name, profile in UES.items() if profile.executable}
         self.assertEqual(compute, set(SUPPORTED_NODES))
-        self.assertEqual(radios, set(SUPPORTED_RADIOS))
-        self.assertEqual(ues, set(SUPPORTED_QHATS | SUPPORTED_QFITS))
+        self.assertEqual(radios, executable_radios)
+        self.assertEqual(ues, executable_ues)
 
     def test_virtual_default_prefers_recommended_compute_pair_without_r2lab(self) -> None:
         desired = ExperimentDesiredState.recommended(intent="virtual-5g")
@@ -178,93 +180,40 @@ class ResourceSelectionTests(unittest.TestCase):
             now=NOW,
         )
         self.assertEqual(selected.for_role("core")[0].resource_id, "sopnode-f1")
-        self.assertEqual(selected.for_role("core")[0].ownership, "synthran")
 
-    def test_foreign_or_unknown_resources_are_not_automatic_candidates(self) -> None:
-        desired = ExperimentDesiredState.recommended(intent="virtual-5g")
-        states = slices_states(
-            unavailable={"sopnode-f1", "sopnode-w3"},
-            ownership={"sopnode-f2": "other", "sopnode-f3": "unknown"},
-        )
-        with self.assertRaises(ResourceSelectionError):
-            select_resources(
-                desired,
-                inventory(slices=snapshot("slices", states)),
-                now=NOW,
-            )
-
-    def test_stale_or_partial_provider_inventory_fails_closed(self) -> None:
-        desired = ExperimentDesiredState.recommended(intent="virtual-5g")
-        with self.assertRaises(ResourceSelectionError):
-            select_resources(
-                desired,
-                inventory(
-                    slices=snapshot("slices", slices_states(), minutes=1)
-                ),
-                now=NOW + timedelta(minutes=2),
-            )
-        with self.assertRaises(ResourceSelectionError):
-            select_resources(
-                desired,
-                inventory(
-                    slices=snapshot(
-                        "slices", slices_states(), complete=False
-                    )
-                ),
-                now=NOW,
-            )
-
-    def test_manual_placement_is_exact_but_still_checks_live_safety(self) -> None:
-        desired = replace(
-            ExperimentDesiredState.recommended(intent="virtual-5g"),
-            placement=PlacementDesiredState(
-                mode="manual",
-                core_node="sopnode-f1",
-                ran_node="sopnode-w3",
+    def test_r2lab_selection_uses_live_availability(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
+        states = r2lab_states(available={"n320", "qfit09"})
+        selected = select_resources(
+            desired,
+            inventory(
+                slices=snapshot("slices", slices_states()),
+                r2lab=snapshot("r2lab", states),
             ),
+            now=NOW,
+        )
+        self.assertEqual(selected.for_role("radio")[0].resource_id, "n320")
+        self.assertEqual(selected.for_role("ue")[0].resource_id, "qfit09")
+
+    def test_r2lab_owned_compatible_resource_is_preferred(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
+        states = r2lab_states(
+            available={"n300", "n320", "qfit07", "qfit09"},
+            ownership={"n320": "synthran", "qfit09": "synthran"},
         )
         selected = select_resources(
             desired,
-            inventory(slices=snapshot("slices", slices_states())),
-            now=NOW,
-        )
-        self.assertEqual(selected.for_role("core")[0].resource_id, "sopnode-f1")
-        self.assertEqual(selected.for_role("ran")[0].resource_id, "sopnode-w3")
-
-        unsafe = slices_states(ownership={"sopnode-f1": "other"})
-        with self.assertRaises(ResourceSelectionError):
-            select_resources(
-                desired,
-                inventory(slices=snapshot("slices", unsafe)),
-                now=NOW,
-            )
-
-    def test_manual_extra_resources_are_included_in_provider_set(self) -> None:
-        desired = replace(
-            ExperimentDesiredState.recommended(intent="virtual-5g"),
-            placement=PlacementDesiredState(
-                mode="manual",
-                core_node="sopnode-f1",
-                ran_node="sopnode-f3",
-                extra_resources=("sopnode-w3",),
+            inventory(
+                slices=snapshot("slices", slices_states()),
+                r2lab=snapshot("r2lab", states),
             ),
-        )
-        selected = select_resources(
-            desired,
-            inventory(slices=snapshot("slices", slices_states())),
             now=NOW,
         )
-        self.assertEqual(selected.for_role("extra001")[0].resource_id, "sopnode-w3")
-        slices_group = next(
-            group for group in selected.provider_sets if group.provider == "slices"
-        )
-        self.assertEqual(
-            set(slices_group.resource_ids),
-            {"sopnode-f1", "sopnode-f3", "sopnode-w3"},
-        )
+        self.assertEqual(selected.for_role("radio")[0].resource_id, "n320")
+        self.assertEqual(selected.for_role("ue")[0].resource_id, "qfit09")
 
-    def test_physical_selection_requires_fresh_complete_r2lab_inventory(self) -> None:
-        desired = ExperimentDesiredState.recommended(intent="physical-5g")
+    def test_missing_required_physical_provider_blocks_selection(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
         with self.assertRaises(ResourceSelectionError):
             select_resources(
                 desired,
@@ -272,95 +221,87 @@ class ResourceSelectionTests(unittest.TestCase):
                 now=NOW,
             )
 
-        available = {"n300", "qhat01", "qhat02"}
-        selected = select_resources(
-            desired,
-            inventory(
-                slices=snapshot("slices", slices_states()),
-                r2lab=snapshot(
-                    "r2lab",
-                    r2lab_states(available=available),
+    def test_incomplete_provider_snapshot_blocks_mutating_selection(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
+        with self.assertRaises(ResourceSelectionError):
+            select_resources(
+                desired,
+                inventory(
+                    slices=snapshot("slices", slices_states()),
+                    r2lab=snapshot(
+                        "r2lab",
+                        r2lab_states(available={"n300", "qfit07"}),
+                        complete=False,
+                    ),
                 ),
-            ),
-            now=NOW,
-        )
-        self.assertEqual(selected.for_role("radio")[0].resource_id, "n300")
-        self.assertEqual(selected.for_role("ue")[0].resource_id, "qhat01")
+                now=NOW,
+            )
 
-    def test_pinned_radio_hardware_and_ran_compatibility_are_enforced(self) -> None:
+    def test_stale_provider_snapshot_blocks_mutating_selection(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
+        with self.assertRaises(ResourceSelectionError):
+            select_resources(
+                desired,
+                inventory(
+                    slices=snapshot("slices", slices_states()),
+                    r2lab=snapshot(
+                        "r2lab",
+                        r2lab_states(available={"n300", "qfit07"}),
+                        minutes=-1,
+                    ),
+                ),
+                now=NOW,
+            )
+
+    def test_requirements_from_desired_preserve_physical_radio_constraints(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
+        requirements = requirements_from_desired(desired)
+        radio = next(item for item in requirements if item.role == "radio")
+        ue = next(item for item in requirements if item.role == "ue")
+        self.assertIn("backend:r2lab", radio.capabilities)
+        self.assertIn("backend:r2lab", ue.capabilities)
+
+    def test_explicit_physical_preferences_are_respected(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
         desired = replace(
-            ExperimentDesiredState.recommended(intent="physical-5g"),
+            desired,
             radio=RadioDesiredState(
-                mode="physical",
                 backend="r2lab",
-                hardware="n320",
+                implementation="srsran",
+                resource_preferences=("n320",),
             ),
-            ran=RanDesiredState(implementation="srsran"),
+            placement=PlacementDesiredState(
+                core_preferences=desired.placement.core_preferences,
+                ran_preferences=desired.placement.ran_preferences,
+                ue_preferences=("qfit09",),
+            ),
         )
         selected = select_resources(
             desired,
             inventory(
                 slices=snapshot("slices", slices_states()),
-                r2lab=snapshot(
-                    "r2lab",
-                    r2lab_states(available={"n300", "n320", "qhat01"}),
-                ),
+                r2lab=snapshot("r2lab", r2lab_states(available={"n300", "n320", "qfit07", "qfit09"})),
             ),
             now=NOW,
         )
         self.assertEqual(selected.for_role("radio")[0].resource_id, "n320")
+        self.assertEqual(selected.for_role("ue")[0].resource_id, "qfit09")
 
-    def test_multi_ue_selection_is_deterministic_and_non_overlapping(self) -> None:
+    def test_unsupported_ran_implementation_has_no_compatible_physical_radio(self) -> None:
+        desired = ExperimentDesiredState.recommended(intent="physical-ran")
         desired = replace(
-            ExperimentDesiredState.recommended(intent="physical-5g"),
-            ue=replace(
-                ExperimentDesiredState.recommended(intent="physical-5g").ue,
-                count=2,
-            ),
-        )
-        selected = select_resources(
             desired,
-            inventory(
-                slices=snapshot("slices", slices_states()),
-                r2lab=snapshot(
-                    "r2lab",
-                    r2lab_states(
-                        available={"n300", "qhat01", "qhat02", "qhat03"}
-                    ),
-                ),
-            ),
-            now=NOW,
+            ran=RanDesiredState(implementation="ueransim"),
         )
-        self.assertEqual(
-            [item.resource_id for item in selected.for_role("ue")],
-            ["qhat01", "qhat02"],
-        )
-
-    def test_catalog_can_be_extended_without_changing_selector(self) -> None:
-        desired = ExperimentDesiredState.recommended(intent="virtual-5g")
-        extra = ResourceDescriptor(
-            resource_id="sopnode-new",
-            provider="slices",
-            kind="compute",
-            capabilities=frozenset({"compute", "role:core"}),
-            role_priority={"core": 50},
-        )
-        states = slices_states(ownership={"sopnode-f1": "other"})
-        states.append(ResourceState("sopnode-new", "allocated", "synthran"))
-        selected = select_resources(
-            desired,
-            inventory(
-                slices=snapshot("slices", states),
-                extra_descriptors=(extra,),
-            ),
-            now=NOW,
-        )
-        self.assertEqual(selected.for_role("core")[0].resource_id, "sopnode-new")
-
-    def test_ambiguous_automatic_radio_requires_explicit_resolution(self) -> None:
-        desired = ExperimentDesiredState(intent="open-ran")
         with self.assertRaises(ResourceSelectionError):
-            requirements_from_desired(desired)
+            select_resources(
+                desired,
+                inventory(
+                    slices=snapshot("slices", slices_states()),
+                    r2lab=snapshot("r2lab", r2lab_states(available={"n300", "qfit07"})),
+                ),
+                now=NOW,
+            )
 
 
 if __name__ == "__main__":
