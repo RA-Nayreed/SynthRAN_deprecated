@@ -65,7 +65,6 @@ FRIENDLY_MAPPINGS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
-# Tasks that are always visible even without a friendly mapping.
 VISIBLE_TASK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^Wait for .+ to become Ready$", re.I),
     re.compile(r"^Pin(ning)? locked .+ images?$", re.I),
@@ -111,11 +110,7 @@ def is_ugly_template_task(name: str) -> bool:
 
 
 def _is_visible_task(name: str) -> bool:
-    """Return True if a task name should be visible to the operator.
-
-    A task is visible if it has a friendly mapping or matches a visible pattern.
-    Unmapped internal tasks (gather facts, command, file, assert, etc.) are suppressed.
-    """
+    """Return True if a task name should be visible to the operator."""
     cleaned = _clean_ansible_title(name)
     for pattern, _replacement in FRIENDLY_MAPPINGS:
         if pattern.search(cleaned):
@@ -127,13 +122,7 @@ def _is_visible_task(name: str) -> bool:
 
 
 def parse_ansible_line(line: str, current_task: str | None = None) -> str | None:
-    """Parse one raw Ansible line into a sanitized high-level event or None.
-
-    Routine host lines (OK, CHANGED, SKIPPED) and ugly skipped template errors are suppressed.
-    Unmapped internal TASK names are suppressed during normal execution.
-    Failures (FAILED, FATAL, UNREACHABLE) remain surfaced with task and host context,
-    including the cleaned task name even if the TASK header itself was suppressed.
-    """
+    """Parse one raw Ansible line into a sanitized high-level event or None."""
     stripped = line.strip()
     if not stripped:
         return None
@@ -152,7 +141,6 @@ def parse_ansible_line(line: str, current_task: str | None = None) -> str | None
         name = friendly_task_name(raw_name)
         if _is_visible_task(raw_name):
             return f"  TASK: {name}"
-        # Suppress unmapped internal TASK lines during normal execution
         return None
 
     match = HANDLER_RE.match(stripped)
@@ -167,7 +155,6 @@ def parse_ansible_line(line: str, current_task: str | None = None) -> str | None
         host = match.group(2).strip()
         status = STATUS_MAP.get(raw_status, raw_status.upper())
         if status in ("OK", "CHANGED", "SKIPPED"):
-            # Suppress routine host chatter from normal CLI output
             return None
         if current_task:
             return f"    [FAIL] {current_task}\n           host: {host}\n           state: {status}"
@@ -205,7 +192,7 @@ def run_streaming_ansible_command(
     heartbeat_interval_seconds: float = 30.0,
     poll_interval_seconds: float = 0.5,
 ) -> CommandResult:
-    """Stream sanitized progress for long-running Ansible stages with heartbeats."""
+    """Stream sanitized progress while treating the process exit code as stage truth."""
     process = subprocess.Popen(
         list(command),
         cwd=cwd,
@@ -235,6 +222,7 @@ def run_streaming_ansible_command(
     reader_thread.start()
 
     output_lines: list[str] = []
+    deferred_failures: list[str] = []
     started = monotonic()
     task_started = started
     current_task: str | None = None
@@ -294,13 +282,28 @@ def run_streaming_ansible_command(
                 task_started = monotonic()
                 next_heartbeat = heartbeat_interval_seconds
 
+            if stripped == "...ignoring" and deferred_failures:
+                deferred_failures.pop()
+                continue
+
             if report is not None:
                 parsed = parse_ansible_line(line, current_task=current_task)
                 if parsed is not None:
-                    report(parsed)
+                    status_match = HOST_STATUS_RE.match(stripped)
+                    if status_match and status_match.group(1).lower() in {
+                        "failed",
+                        "fatal",
+                        "unreachable",
+                    }:
+                        deferred_failures.append(parsed)
+                    else:
+                        report(parsed)
 
         returncode = process.wait()
         reader_thread.join(timeout=2.0)
+        if report is not None and returncode != 0:
+            for failure in deferred_failures:
+                report(failure)
         return CommandResult(
             returncode=returncode,
             stdout="".join(output_lines),
