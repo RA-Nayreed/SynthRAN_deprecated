@@ -99,6 +99,8 @@ class LiveResumeEvidenceTests(unittest.TestCase):
 
         self.assertIn("converge_kubernetes_foundation(", source)
         self.assertIn("converge_physical_gnb(", source)
+        self.assertIn("KUBERNETES_OBSERVATION_ATTEMPTS = 3", source)
+        self.assertIn("_observe_ready_nodes(", source)
         self.assertNotIn("_replay_gnb", source)
         self.assertNotIn("physical-render.yaml", source)
         live = run_source.index("reconcile_live_resume(")
@@ -110,6 +112,7 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertIn("name: 5g/srsRAN/config", playbook)
         self.assertIn("name: 5g/srsRAN/deploy", playbook)
         self.assertIn("tasks_from: deploy_gnb.yml", playbook)
+        self.assertIn("existing physical gNB Deployment is not owned by this run", playbook)
         self.assertIn("synthran.io/deployment-authority", playbook)
 
     def test_foundation_reuses_guarded_upstream_preparation_boundary(self) -> None:
