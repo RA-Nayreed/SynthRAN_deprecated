@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import tempfile
+import time
 from time import monotonic
 from typing import Mapping, Sequence, TextIO
 
 from synthran.ansible_streaming import parse_ansible_line, run_streaming_ansible_command
 from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import validate_fiveg_checkout
-from synthran.live_preflight import CommandResult
+from synthran.live_preflight import CommandResult, subprocess_runner
 from synthran.network.resources import build_preparation_inventory, locked_preparation_variables
 from synthran.network.runtime import (
     RunCommand,
@@ -22,7 +24,7 @@ from synthran.network.runtime import (
 )
 from synthran.r2lab.resources import load_topology, verify_physical_authority, verify_selected_allocation
 from synthran.upstream_overlay import UpstreamOverlayError, apply_network_overlay, apply_preparation_overlay
-from synthran.utils.ssh import ansible_ssh_common_args
+from synthran.utils.ssh import ansible_ssh_common_args, strict_ssh_command
 
 
 class R2LabUpstreamRoleError(RuntimeError):
@@ -125,10 +127,12 @@ def _authority(
         run_id=run_id,
         slice_name=slice_name,
         run_root=run_root,
+        runner=subprocess_runner,
         timeout_seconds=min(timeout_seconds, 300),
     )
     verify_selected_allocation(
         topology=authority.topology,
+        runner=subprocess_runner,
         owner=owner,
         allocation_id=allocation_id,
         timeout_seconds=min(timeout_seconds, 300),
@@ -304,6 +308,8 @@ def _run_upstream(
                         "-e",
                         f"synthran_run_id={run_id}",
                         "-e",
+                        f"synthran_fiveg_ansible_commit={fiveg_commit}",
+                        "-e",
                         f"@{variables_path}",
                         str(overlay_directory / "r2lab-srsran-gnb.yml"),
                     ),
@@ -368,6 +374,124 @@ def _run_upstream(
                 min(timeout_seconds, 300),
             )
         shutil.rmtree(worktree_parent, ignore_errors=True)
+
+
+def _cluster_command(topology, known_hosts: Path, *remote: str) -> tuple[str, ...]:
+    try:
+        return strict_ssh_command(
+            f"root@{topology.core_node}",
+            *remote,
+            known_hosts=known_hosts,
+            isolated_config=True,
+            quote_remote=True,
+        )
+    except ValueError as exc:
+        raise R2LabUpstreamRoleError(str(exc)) from exc
+
+
+def stop_role_managed_gnb(
+    *,
+    run_id: str,
+    slice_name: str,
+    owner: str,
+    allocation_id: str | None,
+    known_hosts: Path,
+    lock_path: Path,
+    run_root: Path,
+    timeout_seconds: int,
+) -> dict[str, object]:
+    _authority(
+        run_id=run_id,
+        slice_name=slice_name,
+        owner=owner,
+        allocation_id=allocation_id,
+        run_root=run_root,
+        timeout_seconds=timeout_seconds,
+    )
+    topology = load_topology(run_root=run_root, run_id=run_id).validate()
+    known_hosts = known_hosts.expanduser().resolve()
+    fiveg_commit = _git_commit(load_lock(lock_path), "fiveg_ansible")
+    result = subprocess_runner(
+        _cluster_command(
+            topology,
+            known_hosts,
+            "kubectl",
+            "get",
+            "deployment/srsran-gnb",
+            "-n",
+            "open5gs",
+            "-o",
+            "json",
+        ),
+        min(timeout_seconds, 60),
+    )
+    if result.returncode != 0:
+        raise R2LabUpstreamRoleError("role-managed gNB ownership query returned nonzero")
+    try:
+        deployment = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise R2LabUpstreamRoleError("role-managed gNB ownership query returned malformed JSON") from exc
+    metadata = deployment.get("metadata") if isinstance(deployment, dict) else None
+    labels = metadata.get("labels") if isinstance(metadata, dict) else None
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
+    if (
+        not isinstance(labels, dict)
+        or not isinstance(annotations, dict)
+        or labels.get("synthran.run/id") != run_id
+        or annotations.get("synthran.io/run-id") != run_id
+        or annotations.get("synthran.io/deployment-authority")
+        != f"fiveg_ansible:{fiveg_commit}"
+    ):
+        raise R2LabUpstreamRoleError("role-managed gNB cleanup refuses foreign or unbound state")
+    scaled = subprocess_runner(
+        _cluster_command(
+            topology,
+            known_hosts,
+            "kubectl",
+            "scale",
+            "deployment/srsran-gnb",
+            "-n",
+            "open5gs",
+            "--replicas=0",
+        ),
+        min(timeout_seconds, 60),
+    )
+    if scaled.returncode != 0:
+        raise R2LabUpstreamRoleError("role-managed gNB scale-to-zero returned nonzero")
+    for attempt in range(30):
+        pods = subprocess_runner(
+            _cluster_command(
+                topology,
+                known_hosts,
+                "kubectl",
+                "get",
+                "pods",
+                "-n",
+                "open5gs",
+                "-l",
+                "app=srsran,component=gnb",
+                "-o",
+                "json",
+            ),
+            min(timeout_seconds, 60),
+        )
+        if pods.returncode != 0:
+            raise R2LabUpstreamRoleError("role-managed gNB zero-pod query returned nonzero")
+        try:
+            payload = json.loads(pods.stdout)
+        except json.JSONDecodeError as exc:
+            raise R2LabUpstreamRoleError("role-managed gNB zero-pod query returned malformed JSON") from exc
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if isinstance(items, list) and not items:
+            return {
+                "status": "stopped",
+                "run_id": run_id,
+                "deployment_authority": f"fiveg_ansible:{fiveg_commit}",
+                "gnb_pod_count": 0,
+            }
+        if attempt < 29:
+            time.sleep(2)
+    raise R2LabUpstreamRoleError("role-managed gNB did not reach zero pods")
 
 
 def converge_kubernetes_foundation(
