@@ -575,6 +575,142 @@ def prepare_physical_resources(
         raise
 
 
+def reconcile_physical_resources(
+    *,
+    run_id: str,
+    slice_name: str,
+    lock_path: Path = Path("dependencies.lock.yml"),
+    deps_root: Path = Path(".deps"),
+    run_root: Path = Path(".synthran/r2lab"),
+    runner: Runner = subprocess_runner,
+    sleeper: Sleeper = time.sleep,
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    progress: TextIO | None = None,
+) -> PhysicalAuthority:
+    """Restore one exact claimed physical run to its required live resource state."""
+
+    from synthran.r2lab.ue_ansible import R2LabUeAnsibleError, execute_selected_ue_role
+
+    validate_run_id(run_id)
+    if timeout_seconds < 5 or timeout_seconds > 300:
+        raise R2LabTopologyResourceError("R2Lab command timeout must be between 5 and 300 seconds")
+    run_root = run_root.expanduser().resolve()
+    topology = load_topology(run_root=run_root, run_id=run_id).validate()
+    _require_claim(
+        run_root=run_root,
+        run_id=run_id,
+        slice_name=slice_name,
+        topology=topology,
+    )
+    provider = _remote_runner(slice_name, runner)
+
+    def report(message: str) -> None:
+        if progress is not None:
+            print(f"[synthran] {message}", file=progress, flush=True)
+
+    def require_lease(stage: str) -> None:
+        report(stage)
+        _lease(slice_name, runner, timeout_seconds)
+
+    require_lease("lease-before-radio-reconcile")
+    radio_result = provider(
+        ("rhubarbe", "pdu", "status", topology.radio), timeout_seconds
+    )
+    radio = parse_pdu_status(
+        "\n".join(part for part in (radio_result.stdout, radio_result.stderr) if part),
+        resource=topology.radio,
+    )
+    if radio.state is PowerState.UNKNOWN:
+        raise R2LabTopologyResourceError("selected physical radio power state is unknown")
+    if radio.state is PowerState.OFF:
+        require_lease("lease-before-radio-power-on")
+        transition = execute_verified_pdu_transition(
+            resource=topology.radio,
+            requested_state=PowerState.ON,
+            runner=provider,
+            timeout_seconds=timeout_seconds,
+        )
+        if not transition.confirmed:
+            raise R2LabTopologyResourceError("selected physical radio was not proven on")
+        report(f"{topology.radio}: OFF -> ON")
+    else:
+        report(f"{topology.radio}: already ON")
+
+    profile = topology.ue_profile
+    if profile.kind == "qfit":
+        _prepare_qfit(
+            slice_name=slice_name,
+            profile=profile,
+            provider=provider,
+            runner=runner,
+            require_lease=require_lease,
+            sleeper=sleeper,
+            timeout_seconds=timeout_seconds,
+        )
+    elif profile.kind == "qhat":
+        status = provider(("rhubarbe", "pdu", "status", profile.name), timeout_seconds)
+        observed = parse_pdu_status(
+            "\n".join(part for part in (status.stdout, status.stderr) if part),
+            resource=profile.name,
+        )
+        if observed.state is PowerState.UNKNOWN:
+            raise R2LabTopologyResourceError("selected qhat power state is unknown")
+        management_ready = False
+        if observed.state is PowerState.ON:
+            try:
+                _wait_management(
+                    slice_name=slice_name,
+                    profile=profile,
+                    runner=runner,
+                    sleeper=lambda _: None,
+                    timeout_seconds=min(timeout_seconds, 60),
+                    attempts=1,
+                    interval_seconds=0,
+                )
+            except R2LabTopologyResourceError:
+                management_ready = False
+            else:
+                management_ready = True
+        if not management_ready:
+            require_lease("lease-before-qhat-setup")
+            try:
+                execute_selected_ue_role(
+                    run_id=run_id,
+                    slice_name=slice_name,
+                    topology=topology,
+                    action="setup",
+                    lock_path=lock_path,
+                    deps_root=deps_root,
+                    run_root=run_root,
+                    timeout_seconds=timeout_seconds,
+                )
+            except R2LabUeAnsibleError as exc:
+                raise R2LabTopologyResourceError(str(exc)) from exc
+            require_lease("lease-after-qhat-setup")
+            _prove_qhat_on(profile=profile, provider=provider, timeout_seconds=timeout_seconds)
+            _wait_management(
+                slice_name=slice_name,
+                profile=profile,
+                runner=runner,
+                sleeper=sleeper,
+                timeout_seconds=min(timeout_seconds, 60),
+                attempts=60,
+            )
+    else:
+        raise R2LabTopologyResourceError("selected UE kind is outside the canonical physical path")
+
+    require_lease("lease-final")
+    authority = verify_physical_authority(
+        run_id=run_id,
+        slice_name=slice_name,
+        run_root=run_root,
+        runner=runner,
+        timeout_seconds=timeout_seconds,
+    )
+    report("R2Lab resources RECONCILED")
+    return authority
+
+
 def verify_physical_authority(
     *,
     run_id: str,
