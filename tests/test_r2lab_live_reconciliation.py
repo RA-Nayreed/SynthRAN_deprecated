@@ -93,15 +93,32 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertTrue(payload["user_plane_proven"])
         self.assertEqual("live-resume.json", payload["evidence_path"])
 
-    def test_unified_run_places_live_reproof_before_historical_shortcuts(self) -> None:
-        source = Path("synthran/backends/run.py").read_text(encoding="utf-8")
-        live = source.index("reconcile_live_resume(")
-        foundation_shortcut = source.index(
-            "accepted foundation evidence present; current state re-proven"
-        )
-        workload = source.index("run deterministic ten-sensor experiment and collect data")
-        self.assertLess(live, foundation_shortcut)
+    def test_resume_converges_ephemeral_layers_before_historical_shortcuts(self) -> None:
+        source = Path("synthran/r2lab/reconciliation.py").read_text(encoding="utf-8")
+        run_source = Path("synthran/backends/run.py").read_text(encoding="utf-8")
+
+        self.assertIn("converge_kubernetes_foundation(", source)
+        self.assertIn("converge_physical_gnb(", source)
+        self.assertNotIn("_replay_gnb", source)
+        self.assertNotIn("physical-render.yaml", source)
+        live = run_source.index("reconcile_live_resume(")
+        workload = run_source.index("run deterministic ten-sensor experiment and collect data")
         self.assertLess(live, workload)
+
+    def test_physical_gnb_uses_upstream_srsran_config_and_deploy_role(self) -> None:
+        playbook = Path("deploy/ansible/r2lab-srsran-gnb.yml").read_text(encoding="utf-8")
+        self.assertIn("name: 5g/srsRAN/config", playbook)
+        self.assertIn("name: 5g/srsRAN/deploy", playbook)
+        self.assertIn("tasks_from: deploy_gnb.yml", playbook)
+        self.assertIn("synthran.io/deployment-authority", playbook)
+
+    def test_foundation_reuses_guarded_upstream_preparation_boundary(self) -> None:
+        source = Path("synthran/r2lab/upstream_roles.py").read_text(encoding="utf-8")
+        self.assertIn("apply_preparation_overlay(worktree)", source)
+        self.assertIn('"synthran_prepare_only=true"', source)
+        self.assertIn('str(worktree / "playbooks" / "deploy.yml")', source)
+        self.assertIn('"foundation-network"', source)
+        self.assertIn('"foundation-tools"', source)
 
 
 if __name__ == "__main__":
