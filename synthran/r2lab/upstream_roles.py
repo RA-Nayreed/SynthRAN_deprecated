@@ -133,8 +133,6 @@ def _ansible_environment(*, collections: Path, roles: Path) -> dict[str, str]:
             "ANSIBLE_ROLES_PATH": str(roles),
         }
     )
-    environment.pop("ANSIBLE_SSH_ARGS", None)
-    environment.pop("ANSIBLE_HOST_KEY_CHECKING", None)
     return environment
 
 
