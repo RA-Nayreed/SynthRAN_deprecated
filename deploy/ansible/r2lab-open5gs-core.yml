@@ -56,19 +56,33 @@
       vars:
         ansible_python_interpreter: "{{ ansible_playbook_python }}"
 
-    - name: Verify current Open5GS namespace ownership
+    - name: Observe current Open5GS namespace ownership
       kubernetes.core.k8s_info:
         api_version: v1
         kind: Namespace
         name: open5gs
       register: synthran_open5gs_namespace
 
-    - name: Require the current run to own Open5GS
+    - name: Refuse a foreign Open5GS namespace
       ansible.builtin.assert:
         that:
-          - synthran_open5gs_namespace.resources | length == 1
-          - synthran_open5gs_namespace.resources[0].metadata.labels['synthran.run/id'] == synthran_run_id
-        fail_msg: "Open5GS namespace is not owned by the current run"
+          - >-
+            synthran_open5gs_namespace.resources | length == 0 or
+            synthran_open5gs_namespace.resources[0].metadata.labels is not defined or
+            synthran_open5gs_namespace.resources[0].metadata.labels['synthran.run/id'] is not defined or
+            synthran_open5gs_namespace.resources[0].metadata.labels['synthran.run/id'] == synthran_run_id
+        fail_msg: "Open5GS namespace belongs to another run"
+
+    - name: Establish current-run Open5GS namespace ownership
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: open5gs
+        state: present
+        definition:
+          metadata:
+            labels:
+              synthran.run/id: "{{ synthran_run_id }}"
 
   tasks:
     - name: Remove the deferred second slice
