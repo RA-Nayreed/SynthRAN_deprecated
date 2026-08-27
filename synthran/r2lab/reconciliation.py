@@ -35,6 +35,10 @@ from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.r2lab.ue_activation import observe_functional_ue_runtime
 from synthran.r2lab.ue_ansible import R2LabUeAnsibleError, execute_selected_ue_role
 from synthran.r2lab.upstream_roles import R2LabUpstreamRoleError, converge_physical_gnb
+from synthran.r2lab.workload_retry import (
+    R2LabWorkloadRetryError,
+    recover_failed_workload,
+)
 
 
 RESUME_SCHEMA = "synthran/r2lab-live-resume/v1alpha1"
@@ -507,6 +511,19 @@ def reconcile_live_resume(
             progress=progress,
         )
 
+    try:
+        evidence, workload_failure_recovered = recover_failed_workload(
+            evidence=evidence,
+            run_root=run_root,
+        )
+    except R2LabWorkloadRetryError as exc:
+        raise R2LabLiveReconciliationError(str(exc)) from exc
+    if workload_failure_recovered:
+        _report(
+            progress,
+            "resume-workload: previous failed attempt cleanup proven; reopening workload boundary",
+        )
+
     resume_path = run_root / run_id / "physical" / "live-resume.json"
     atomic_json(
         resume_path,
@@ -514,7 +531,8 @@ def reconcile_live_resume(
             "schema": RESUME_SCHEMA,
             "run_id": run_id,
             "observed_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "historical_acceptance_unchanged": True,
+            "historical_acceptance_unchanged": not workload_failure_recovered,
+            "workload_failure_recovered": workload_failure_recovered,
             "foundation_reconciled": foundation_reconciled,
             "gnb_restarted": gnb_restarted,
             "ue_status": ue_status,
