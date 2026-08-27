@@ -9,20 +9,9 @@ import unittest
 
 from synthran.backends.run import _RunProgress
 from synthran.cli import _parser
-from synthran.dependencies import load_lock
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.foundation_topology import _physical_networks_ready
 from synthran.r2lab.hardware import PhysicalTopology
-from synthran.r2lab.n3xx import (
-    OPEN5GS_AMF_N2_ADDRESS,
-    OPEN5GS_GNB_N2_N3_ADDRESS,
-    OPEN5GS_N3_NETWORK,
-    OPEN5GS_RU_NETWORK,
-    R2LabN3xxError,
-    _generated_values,
-    _locked_image,
-    _validate_render,
-)
 
 
 def _topology() -> PhysicalTopology:
@@ -131,59 +120,17 @@ class UnifiedRunTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-    def test_n300_generated_values_restore_open5gs_runtime_network(self) -> None:
-        lock = load_lock(Path("dependencies.lock.yml"))
-        values = _generated_values(topology=_topology(), lock=lock)
-        self.assertEqual(values["namespace"], "open5gs")
-        self.assertEqual(values["n3networkName"], OPEN5GS_N3_NETWORK)
-        self.assertEqual(values["gnbIp"], OPEN5GS_GNB_N2_N3_ADDRESS)
-        self.assertEqual(
-            values["gnbConfig"]["cu_cp"]["amf"]["addr"],
-            OPEN5GS_AMF_N2_ADDRESS,
+    def test_physical_gnb_uses_upstream_role_boundary(self) -> None:
+        playbook = Path("deploy/ansible/r2lab-srsran-gnb.yml").read_text(encoding="utf-8")
+        self.assertIn("name: 5g/srsRAN/config", playbook)
+        self.assertIn("name: 5g/srsRAN/deploy", playbook)
+        self.assertIn("tasks_from: deploy_gnb.yml", playbook)
+        self.assertIn("rru in [\"n300\", \"n320\"]", playbook)
+        self.assertIn("synthran.run/id={{ synthran_run_id }}", playbook)
+        self.assertIn(
+            "synthran.io/deployment-authority=fiveg_ansible:{{ synthran_fiveg_ansible_commit }}",
+            playbook,
         )
-
-    def test_n3xx_render_rejects_empty_n3_attachment(self) -> None:
-        topology = _topology()
-        lock = load_lock(Path("dependencies.lock.yml"))
-        repository, tag, digest = _locked_image(lock, topology.radio_profile)
-        render = f'''\
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  replicas: 0
-  strategy:
-    type: Recreate
-  template:
-    spec:
-      nodeName: {topology.ran_node}
-      containers:
-        - name: gnb
-          image: {repository}:{tag}@{digest}
-      annotations:
-        k8s.v1.cni.cncf.io/networks: |
-          [
-            {{ "name": "{OPEN5GS_N3_NETWORK}", "interface": "n3", "ips": [ "{OPEN5GS_GNB_N2_N3_ADDRESS}/24" ] }},
-            {{ "name": "{OPEN5GS_RU_NETWORK}", "interface": "ru1", "ips": [ "192.168.235.240/24" ] }}
-          ]
-'''
-        _validate_render(
-            text=render,
-            topology=topology,
-            repository=repository,
-            tag=tag,
-            digest=digest,
-            ru_pod_address="192.168.235.240",
-        )
-        broken = render.replace(f'"{OPEN5GS_N3_NETWORK}"', '""', 1)
-        with self.assertRaisesRegex(R2LabN3xxError, "Open5GS N3 network attachment"):
-            _validate_render(
-                text=broken,
-                topology=topology,
-                repository=repository,
-                tag=tag,
-                digest=digest,
-                ru_pod_address="192.168.235.240",
-            )
 
     def test_foundation_requires_only_open5gs_n3network(self) -> None:
         topology = _topology()
