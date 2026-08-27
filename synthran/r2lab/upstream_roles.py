@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import tempfile
 import time
@@ -25,15 +25,10 @@ from synthran.network.runtime import (
 )
 from synthran.r2lab.resources import load_topology
 from synthran.upstream_overlay import UpstreamOverlayError, apply_network_overlay
-from synthran.utils.ssh import ansible_ssh_common_args, strict_ssh_command
 
 
 class R2LabUpstreamRoleError(RuntimeError):
     pass
-
-
-POST_POS_SSH_ATTEMPTS = 36
-POST_POS_SSH_INTERVAL_SECONDS = 5.0
 
 
 def _git_commit(lock, name: str) -> str:
@@ -127,217 +122,78 @@ def _run_stage(
     return result
 
 
-def _short_hostname(value: str) -> str:
-    return value.strip().lower().split(".", 1)[0]
-
-
-def _keyscan_exact_host(
-    *,
-    host: str,
-    cwd: Path,
-    runner: RunCommand,
-    log_parts: list[str],
-) -> str:
-    result = runner(
-        ("ssh-keyscan", "-T", "5", "-t", "ed25519", host),
-        cwd,
-        None,
-        15,
-    )
-    log_parts.extend(
-        (
-            f"=== post-pos-keyscan:{host} ===",
-            result.stdout,
-            result.stderr,
-        )
-    )
-    if result.returncode != 0:
-        raise R2LabUpstreamRoleError(
-            f"post-POS SSH host-key scan failed for {host}"
-        )
-    candidates = []
-    for raw in result.stdout.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split()
-        if len(fields) != 3:
-            continue
-        names, algorithm, key = fields
-        if algorithm != "ssh-ed25519":
-            continue
-        if host not in names.split(","):
-            continue
-        if not key:
-            continue
-        candidates.append(line)
-    unique = tuple(dict.fromkeys(candidates))
-    if len(unique) != 1:
-        raise R2LabUpstreamRoleError(
-            f"post-POS SSH host-key scan for {host} was not unambiguous"
-        )
-    return unique[0]
-
-
-def _strict_post_pos_ready(
-    *,
-    host: str,
-    known_hosts: Path,
-    cwd: Path,
-    runner: RunCommand,
-    log_parts: list[str],
-    timeout_seconds: int,
-) -> None:
-    last_error = ""
-    for attempt in range(1, POST_POS_SSH_ATTEMPTS + 1):
-        command = strict_ssh_command(
-            f"root@{host}",
-            "hostname",
-            known_hosts=known_hosts,
-            isolated_config=True,
-            connect_timeout=10,
-        )
-        result = runner(command, cwd, None, min(timeout_seconds, 30))
-        if result.returncode == 0:
-            observed = result.stdout.splitlines()[0] if result.stdout.splitlines() else ""
-            if _short_hostname(observed) == _short_hostname(host):
-                log_parts.extend(
-                    (
-                        f"=== post-pos-strict-ssh:{host} ===",
-                        f"ready on attempt {attempt}",
-                        "",
-                    )
-                )
-                return
-            last_error = "remote hostname did not match the selected node"
-        else:
-            last_error = (
-                result.stderr.strip().splitlines()[-1]
-                if result.stderr.strip()
-                else "SSH returned nonzero"
-            )
-        if attempt < POST_POS_SSH_ATTEMPTS:
-            time.sleep(POST_POS_SSH_INTERVAL_SECONDS)
-    log_parts.extend(
-        (
-            f"=== post-pos-strict-ssh:{host} ===",
-            "",
-            last_error,
-        )
-    )
-    raise R2LabUpstreamRoleError(
-        f"post-POS strict SSH did not become ready for {host}"
-    )
-
-
-def _establish_post_pos_ssh(
-    *,
-    topology,
-    known_hosts: Path,
-    output_directory: Path,
-    cwd: Path,
-    runner: RunCommand,
-    log_parts: list[str],
-    progress: TextIO | None,
-    timeout_seconds: int,
-) -> None:
-    hosts = (topology.core_node, topology.ran_node)
-    if progress is not None:
-        print(
-            "[synthran] foundation-ssh: establishing post-POS strict SSH identities",
-            file=progress,
-            flush=True,
-        )
-
-    lines = tuple(
-        _keyscan_exact_host(
-            host=host,
-            cwd=cwd,
-            runner=runner,
-            log_parts=log_parts,
-        )
-        for host in hosts
-    )
-
-    previous_text = known_hosts.read_text(encoding="utf-8")
-    preserved: list[str] = []
-    for raw in previous_text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            preserved.append(raw)
-            continue
-        names = stripped.split(maxsplit=1)[0].split(",")
-        if any(host in names for host in hosts):
-            continue
-        preserved.append(raw)
-
-    backup = output_directory / "pre-pos-known-hosts"
-    backup.write_text(previous_text, encoding="utf-8", newline="\n")
-    os.chmod(backup, 0o600)
-
-    known_hosts.parent.mkdir(parents=True, exist_ok=True)
-    temporary = known_hosts.with_name(f".{known_hosts.name}.post-pos")
-    merged = [*preserved, *lines]
-    temporary.write_text("\n".join(merged) + "\n", encoding="utf-8", newline="\n")
-    os.chmod(temporary, 0o600)
-    temporary.replace(known_hosts)
-    os.chmod(known_hosts, 0o600)
-
-    evidence = {
-        "schema": "synthran/r2lab-post-pos-ssh/v1alpha1",
-        "hosts": {
-            host: {
-                "algorithm": "ssh-ed25519",
-                "key_line_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
-            }
-            for host, line in zip(hosts, lines, strict=True)
-        },
-    }
-    atomic_json(output_directory / "post-pos-ssh.json", evidence)
-
-    for host in hosts:
-        _strict_post_pos_ready(
-            host=host,
-            known_hosts=known_hosts,
-            cwd=cwd,
-            runner=runner,
-            log_parts=log_parts,
-            timeout_seconds=timeout_seconds,
-        )
-
-    if progress is not None:
-        print(
-            "[synthran] foundation-ssh: strict host identity and root SSH proven",
-            file=progress,
-            flush=True,
-        )
-
-
-def _ansible_environment(
-    *,
-    collections: Path,
-    roles: Path,
-    known_hosts: Path,
-) -> dict[str, str]:
+def _ansible_environment(*, collections: Path, roles: Path) -> dict[str, str]:
+    """Keep only non-SSH execution settings; upstream ansible.cfg owns SSH behavior."""
     environment = dict(os.environ)
     environment.update(
         {
             "ANSIBLE_COLLECTIONS_PATH": str(collections),
-            "ANSIBLE_HOST_KEY_CHECKING": "True",
             "ANSIBLE_NOCOLOR": "True",
             "ANSIBLE_RETRY_FILES_ENABLED": "False",
             "ANSIBLE_ROLES_PATH": str(roles),
-            "ANSIBLE_SSH_ARGS": (
-                f"{ansible_ssh_common_args(known_hosts=known_hosts, isolated_config=True)} "
-                "-o ControlMaster=auto -o ControlPersist=60s"
-            ),
         }
     )
+    environment.pop("ANSIBLE_SSH_ARGS", None)
+    environment.pop("ANSIBLE_HOST_KEY_CHECKING", None)
     return environment
 
 
 def _syntax_command(command: Sequence[str]) -> tuple[str, ...]:
     return (*command[:-1], "--syntax-check", command[-1])
+
+
+def _prepare_worktree(
+    *,
+    checkout: Path,
+    commit: str,
+    output_directory: Path,
+    prefix: str,
+    repository_root: Path,
+    timeout_seconds: int,
+    log_parts: list[str],
+    progress: TextIO | None,
+    runner: RunCommand,
+) -> tuple[Path, Path]:
+    worktree_parent = Path(tempfile.mkdtemp(prefix=prefix, dir=output_directory))
+    worktree = worktree_parent / "fiveg_ansible"
+    _run_stage(
+        name=f"{prefix.rstrip('-')}-worktree",
+        command=(
+            "git",
+            "-C",
+            str(checkout),
+            "worktree",
+            "add",
+            "--detach",
+            str(worktree),
+            commit,
+        ),
+        cwd=repository_root,
+        environment=None,
+        timeout_seconds=min(timeout_seconds, 300),
+        log_parts=log_parts,
+        progress=progress,
+        runner=runner,
+    )
+    return worktree_parent, worktree
+
+
+def _remove_worktree(
+    *,
+    checkout: Path,
+    worktree_parent: Path,
+    worktree: Path,
+    repository_root: Path,
+    timeout_seconds: int,
+    runner: RunCommand,
+) -> None:
+    runner(
+        ("git", "-C", str(checkout), "worktree", "remove", "--force", str(worktree)),
+        repository_root,
+        None,
+        min(timeout_seconds, 300),
+    )
+    shutil.rmtree(worktree_parent, ignore_errors=True)
 
 
 def _run_foundation(
@@ -355,6 +211,7 @@ def _run_foundation(
     progress: TextIO | None,
     runner: RunCommand,
 ) -> None:
+    del slice_name, owner, allocation_id, known_hosts
     lock = load_lock(lock_path)
     checkout = validate_fiveg_checkout(lock, deps_root)
     fiveg_commit = _git_commit(lock, "fiveg_ansible")
@@ -375,30 +232,20 @@ def _run_foundation(
     log_path = output_directory / "foundation.log"
     log_parts: list[str] = []
 
-    worktree_parent = Path(tempfile.mkdtemp(prefix="foundation-", dir=output_directory))
-    worktree = worktree_parent / "fiveg_ansible"
-    added = False
+    worktree_parent: Path | None = None
+    worktree: Path | None = None
     try:
-        _run_stage(
-            name="foundation-worktree",
-            command=(
-                "git",
-                "-C",
-                str(checkout),
-                "worktree",
-                "add",
-                "--detach",
-                str(worktree),
-                fiveg_commit,
-            ),
-            cwd=repository_root,
-            environment=None,
-            timeout_seconds=min(timeout_seconds, 300),
+        worktree_parent, worktree = _prepare_worktree(
+            checkout=checkout,
+            commit=fiveg_commit,
+            output_directory=output_directory,
+            prefix="foundation-",
+            repository_root=repository_root,
+            timeout_seconds=timeout_seconds,
             log_parts=log_parts,
             progress=progress,
             runner=runner,
         )
-        added = True
         overlay_directory = worktree / ".synthran"
         shutil.copytree(overlay_source, overlay_directory)
 
@@ -406,7 +253,6 @@ def _run_foundation(
         environment = _ansible_environment(
             collections=collections,
             roles=worktree / "roles",
-            known_hosts=known_hosts,
         )
         _run_stage(
             name="foundation-collections",
@@ -505,22 +351,6 @@ def _run_foundation(
                 runner=runner,
             )
 
-        _establish_post_pos_ssh(
-            topology=topology,
-            known_hosts=known_hosts,
-            output_directory=output_directory,
-            cwd=worktree,
-            runner=runner,
-            log_parts=log_parts,
-            progress=progress,
-            timeout_seconds=timeout_seconds,
-        )
-        environment = _ansible_environment(
-            collections=collections,
-            roles=worktree / "roles",
-            known_hosts=known_hosts,
-        )
-
         for stage_name, command in (
             ("foundation-cluster", cluster_command),
             ("foundation-network", network_command),
@@ -543,19 +373,20 @@ def _run_foundation(
         log_path.write_text(
             sanitize_deployment_text(
                 "\n".join(log_parts),
-                (known_hosts, lock_path, deps_root, repository_root, output_directory),
+                (lock_path, deps_root, repository_root, output_directory),
             ),
             encoding="utf-8",
             newline="\n",
         )
-        if added:
-            runner(
-                ("git", "-C", str(checkout), "worktree", "remove", "--force", str(worktree)),
-                repository_root,
-                None,
-                min(timeout_seconds, 300),
+        if worktree_parent is not None and worktree is not None:
+            _remove_worktree(
+                checkout=checkout,
+                worktree_parent=worktree_parent,
+                worktree=worktree,
+                repository_root=repository_root,
+                timeout_seconds=timeout_seconds,
+                runner=runner,
             )
-        shutil.rmtree(worktree_parent, ignore_errors=True)
 
 
 def _run_gnb(
@@ -573,6 +404,7 @@ def _run_gnb(
     progress: TextIO | None,
     runner: RunCommand,
 ) -> None:
+    del slice_name, owner, allocation_id, known_hosts
     lock = load_lock(lock_path)
     checkout = validate_fiveg_checkout(lock, deps_root)
     fiveg_commit = _git_commit(lock, "fiveg_ansible")
@@ -594,30 +426,20 @@ def _run_gnb(
     log_path = output_directory / "gnb.log"
     log_parts: list[str] = []
 
-    worktree_parent = Path(tempfile.mkdtemp(prefix="gnb-", dir=output_directory))
-    worktree = worktree_parent / "fiveg_ansible"
-    added = False
+    worktree_parent: Path | None = None
+    worktree: Path | None = None
     try:
-        _run_stage(
-            name="gnb-worktree",
-            command=(
-                "git",
-                "-C",
-                str(checkout),
-                "worktree",
-                "add",
-                "--detach",
-                str(worktree),
-                fiveg_commit,
-            ),
-            cwd=repository_root,
-            environment=None,
-            timeout_seconds=min(timeout_seconds, 300),
+        worktree_parent, worktree = _prepare_worktree(
+            checkout=checkout,
+            commit=fiveg_commit,
+            output_directory=output_directory,
+            prefix="gnb-",
+            repository_root=repository_root,
+            timeout_seconds=timeout_seconds,
             log_parts=log_parts,
             progress=progress,
             runner=runner,
         )
-        added = True
         overlay_directory = worktree / ".synthran"
         shutil.copytree(overlay_source, overlay_directory)
         apply_network_overlay(worktree, subscriber_name=topology.ue)
@@ -626,7 +448,6 @@ def _run_gnb(
         environment = _ansible_environment(
             collections=collections,
             roles=worktree / "roles",
-            known_hosts=known_hosts,
         )
         _run_stage(
             name="gnb-collections",
@@ -690,19 +511,20 @@ def _run_gnb(
         log_path.write_text(
             sanitize_deployment_text(
                 "\n".join(log_parts),
-                (known_hosts, lock_path, deps_root, repository_root, output_directory),
+                (lock_path, deps_root, repository_root, output_directory),
             ),
             encoding="utf-8",
             newline="\n",
         )
-        if added:
-            runner(
-                ("git", "-C", str(checkout), "worktree", "remove", "--force", str(worktree)),
-                repository_root,
-                None,
-                min(timeout_seconds, 300),
+        if worktree_parent is not None and worktree is not None:
+            _remove_worktree(
+                checkout=checkout,
+                worktree_parent=worktree_parent,
+                worktree=worktree,
+                repository_root=repository_root,
+                timeout_seconds=timeout_seconds,
+                runner=runner,
             )
-        shutil.rmtree(worktree_parent, ignore_errors=True)
 
 
 def _run_upstream(
@@ -723,52 +545,25 @@ def _run_upstream(
     if mode not in {"foundation", "gnb"}:
         raise R2LabUpstreamRoleError("unsupported physical upstream convergence mode")
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
-    known_hosts = known_hosts.expanduser().resolve()
-    if not known_hosts.is_file():
-        raise R2LabUpstreamRoleError("strict SLICES known-hosts file is missing")
-    if mode == "foundation":
-        _run_foundation(
-            topology=topology,
-            run_id=run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            known_hosts=known_hosts,
-            lock_path=lock_path,
-            deps_root=deps_root,
-            run_root=run_root,
-            timeout_seconds=timeout_seconds,
-            progress=progress,
-            runner=runner,
-        )
-    else:
-        _run_gnb(
-            topology=topology,
-            run_id=run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            known_hosts=known_hosts,
-            lock_path=lock_path,
-            deps_root=deps_root,
-            run_root=run_root,
-            timeout_seconds=timeout_seconds,
-            progress=progress,
-            runner=runner,
-        )
+    target = _run_foundation if mode == "foundation" else _run_gnb
+    target(
+        topology=topology,
+        run_id=run_id,
+        slice_name=slice_name,
+        owner=owner,
+        allocation_id=allocation_id,
+        known_hosts=known_hosts,
+        lock_path=lock_path,
+        deps_root=deps_root,
+        run_root=run_root,
+        timeout_seconds=timeout_seconds,
+        progress=progress,
+        runner=runner,
+    )
 
 
-def _cluster_command(topology, known_hosts: Path, *remote: str) -> tuple[str, ...]:
-    try:
-        return strict_ssh_command(
-            f"root@{topology.core_node}",
-            *remote,
-            known_hosts=known_hosts,
-            isolated_config=True,
-            quote_remote=True,
-        )
-    except ValueError as exc:
-        raise R2LabUpstreamRoleError(str(exc)) from exc
+def _cluster_command(topology, *remote: str) -> tuple[str, ...]:
+    return ("ssh", f"root@{topology.core_node}", shlex.join(remote))
 
 
 def stop_role_managed_gnb(
@@ -782,13 +577,12 @@ def stop_role_managed_gnb(
     run_root: Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
+    del slice_name, owner, allocation_id, known_hosts
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
-    known_hosts = known_hosts.expanduser().resolve()
     fiveg_commit = _git_commit(load_lock(lock_path), "fiveg_ansible")
     result = subprocess_runner(
         _cluster_command(
             topology,
-            known_hosts,
             "kubectl",
             "get",
             "deployment/srsran-gnb",
@@ -804,7 +598,9 @@ def stop_role_managed_gnb(
     try:
         deployment = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise R2LabUpstreamRoleError("role-managed gNB ownership query returned malformed JSON") from exc
+        raise R2LabUpstreamRoleError(
+            "role-managed gNB ownership query returned malformed JSON"
+        ) from exc
     metadata = deployment.get("metadata") if isinstance(deployment, dict) else None
     labels = metadata.get("labels") if isinstance(metadata, dict) else None
     annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
@@ -816,11 +612,13 @@ def stop_role_managed_gnb(
         or annotations.get("synthran.io/deployment-authority")
         != f"fiveg_ansible:{fiveg_commit}"
     ):
-        raise R2LabUpstreamRoleError("role-managed gNB cleanup refuses foreign or unbound state")
+        raise R2LabUpstreamRoleError(
+            "role-managed gNB cleanup refuses foreign or unbound state"
+        )
+
     scaled = subprocess_runner(
         _cluster_command(
             topology,
-            known_hosts,
             "kubectl",
             "scale",
             "deployment/srsran-gnb",
@@ -832,11 +630,11 @@ def stop_role_managed_gnb(
     )
     if scaled.returncode != 0:
         raise R2LabUpstreamRoleError("role-managed gNB scale-to-zero returned nonzero")
+
     for attempt in range(30):
         pods = subprocess_runner(
             _cluster_command(
                 topology,
-                known_hosts,
                 "kubectl",
                 "get",
                 "pods",
@@ -854,7 +652,9 @@ def stop_role_managed_gnb(
         try:
             payload = json.loads(pods.stdout)
         except json.JSONDecodeError as exc:
-            raise R2LabUpstreamRoleError("role-managed gNB zero-pod query returned malformed JSON") from exc
+            raise R2LabUpstreamRoleError(
+                "role-managed gNB zero-pod query returned malformed JSON"
+            ) from exc
         items = payload.get("items") if isinstance(payload, dict) else None
         if isinstance(items, list) and not items:
             return {
