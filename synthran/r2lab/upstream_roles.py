@@ -1,0 +1,426 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import re
+import shutil
+import tempfile
+from time import monotonic
+from typing import Mapping, Sequence, TextIO
+
+from synthran.ansible_streaming import parse_ansible_line, run_streaming_ansible_command
+from synthran.dependencies import load_lock
+from synthran.fiveg_ansible import validate_fiveg_checkout
+from synthran.live_preflight import CommandResult
+from synthran.network.resources import build_preparation_inventory, locked_preparation_variables
+from synthran.network.runtime import (
+    RunCommand,
+    atomic_json,
+    golden_path_image_variables,
+    run_command,
+    sanitize_deployment_text,
+)
+from synthran.r2lab.resources import load_topology, verify_physical_authority, verify_selected_allocation
+from synthran.upstream_overlay import UpstreamOverlayError, apply_network_overlay, apply_preparation_overlay
+from synthran.utils.ssh import ansible_ssh_common_args
+
+
+class R2LabUpstreamRoleError(RuntimeError):
+    pass
+
+
+def _git_commit(lock, name: str) -> str:
+    dependency = next((item for item in lock.git if item.name == name), None)
+    if dependency is None:
+        raise R2LabUpstreamRoleError(f"dependency lock is missing {name}")
+    return dependency.commit
+
+
+def _container_reference(lock, name: str) -> str:
+    containers = lock.raw.get("containers")
+    entry = containers.get(name) if isinstance(containers, dict) else None
+    image = entry.get("image") if isinstance(entry, dict) else None
+    digest = entry.get("digest") if isinstance(entry, dict) else None
+    if (
+        not isinstance(image, str)
+        or not image
+        or not isinstance(digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+    ):
+        raise R2LabUpstreamRoleError(f"container lock {name} is not digest-addressed")
+    return f"{image}@{digest}"
+
+
+def _physical_variables(lock) -> dict[str, object]:
+    images = golden_path_image_variables(lock)
+    images.update(
+        {
+            "srsran_gnb_physical": _container_reference(lock, "srsran_gnb_physical"),
+            "srsran_gnb_physical_n320": _container_reference(
+                lock, "srsran_gnb_physical_n320"
+            ),
+        }
+    )
+    return {
+        "synthran_images": images,
+        **locked_preparation_variables(lock),
+    }
+
+
+def _run_stage(
+    *,
+    name: str,
+    command: Sequence[str],
+    cwd: Path,
+    environment: Mapping[str, str] | None,
+    timeout_seconds: int,
+    log_parts: list[str],
+    progress: TextIO | None,
+    streaming: bool = False,
+    runner: RunCommand = run_command,
+) -> CommandResult:
+    started = monotonic()
+    if progress is not None:
+        print(f"[synthran] {name}: running...", file=progress, flush=True)
+    try:
+        if streaming and runner is run_command:
+            result = run_streaming_ansible_command(
+                command,
+                cwd,
+                environment,
+                timeout_seconds,
+                report=(
+                    (lambda message: print(f"[synthran] {message}", file=progress, flush=True))
+                    if progress is not None
+                    else None
+                ),
+            )
+        else:
+            result = runner(command, cwd, environment, timeout_seconds)
+            if streaming and progress is not None:
+                for line in result.stdout.splitlines():
+                    message = parse_ansible_line(line)
+                    if message is not None:
+                        print(f"[synthran] {message}", file=progress, flush=True)
+    except Exception as exc:
+        raise R2LabUpstreamRoleError(f"{name} could not complete") from exc
+    log_parts.extend((f"=== {name} ===", result.stdout, result.stderr))
+    if result.returncode != 0:
+        raise R2LabUpstreamRoleError(f"{name} failed; see sanitized upstream log")
+    if progress is not None:
+        print(f"[synthran] {name}: OK ({monotonic() - started:.1f}s)", file=progress, flush=True)
+    return result
+
+
+def _authority(
+    *,
+    run_id: str,
+    slice_name: str,
+    owner: str,
+    allocation_id: str | None,
+    run_root: Path,
+    timeout_seconds: int,
+) -> None:
+    authority = verify_physical_authority(
+        run_id=run_id,
+        slice_name=slice_name,
+        run_root=run_root,
+        timeout_seconds=min(timeout_seconds, 300),
+    )
+    verify_selected_allocation(
+        topology=authority.topology,
+        owner=owner,
+        allocation_id=allocation_id,
+        timeout_seconds=min(timeout_seconds, 300),
+    )
+
+
+def _run_upstream(
+    *,
+    run_id: str,
+    slice_name: str,
+    owner: str,
+    allocation_id: str | None,
+    known_hosts: Path,
+    lock_path: Path,
+    deps_root: Path,
+    run_root: Path,
+    mode: str,
+    timeout_seconds: int,
+    progress: TextIO | None,
+    runner: RunCommand = run_command,
+) -> None:
+    if mode not in {"foundation", "gnb"}:
+        raise R2LabUpstreamRoleError("unsupported physical upstream convergence mode")
+    topology = load_topology(run_root=run_root, run_id=run_id).validate()
+    known_hosts = known_hosts.expanduser().resolve()
+    if not known_hosts.is_file():
+        raise R2LabUpstreamRoleError("strict SLICES known-hosts file is missing")
+    _authority(
+        run_id=run_id,
+        slice_name=slice_name,
+        owner=owner,
+        allocation_id=allocation_id,
+        run_root=run_root,
+        timeout_seconds=timeout_seconds,
+    )
+
+    lock = load_lock(lock_path)
+    checkout = validate_fiveg_checkout(lock, deps_root)
+    fiveg_commit = _git_commit(lock, "fiveg_ansible")
+    srsran_commit = _git_commit(lock, "srsran_helm")
+    repository_root = Path(".").resolve()
+    overlay_source = repository_root / "deploy" / "ansible"
+    output_directory = run_root.expanduser().resolve() / run_id / "physical" / "upstream"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    inventory_path = output_directory / f"{mode}-hosts.ini"
+    inventory_text, _ = build_preparation_inventory(
+        core_node=topology.core_node,
+        ran_node=topology.ran_node,
+        source=inventory_path,
+    )
+    inventory_text = inventory_text.replace('rru="rfsim"', f'rru="{topology.radio}"', 1)
+    inventory_path.write_text(inventory_text, encoding="utf-8", newline="\n")
+    variables_path = output_directory / f"{mode}-variables.json"
+    atomic_json(variables_path, _physical_variables(lock))
+    log_path = output_directory / f"{mode}.log"
+    log_parts: list[str] = []
+
+    worktree_parent = Path(tempfile.mkdtemp(prefix=f"{mode}-", dir=output_directory))
+    worktree = worktree_parent / "fiveg_ansible"
+    added = False
+    try:
+        _run_stage(
+            name=f"{mode}-worktree",
+            command=(
+                "git",
+                "-C",
+                str(checkout),
+                "worktree",
+                "add",
+                "--detach",
+                str(worktree),
+                fiveg_commit,
+            ),
+            cwd=repository_root,
+            environment=None,
+            timeout_seconds=min(timeout_seconds, 300),
+            log_parts=log_parts,
+            progress=progress,
+            runner=runner,
+        )
+        added = True
+        overlay_directory = worktree / ".synthran"
+        shutil.copytree(overlay_source, overlay_directory)
+        if mode == "foundation":
+            apply_preparation_overlay(worktree)
+        else:
+            apply_network_overlay(worktree, subscriber_name=topology.ue)
+
+        collections = output_directory / "collections"
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "ANSIBLE_COLLECTIONS_PATH": str(collections),
+                "ANSIBLE_HOST_KEY_CHECKING": "True",
+                "ANSIBLE_NOCOLOR": "True",
+                "ANSIBLE_RETRY_FILES_ENABLED": "False",
+                "ANSIBLE_ROLES_PATH": str(worktree / "roles"),
+                "ANSIBLE_SSH_ARGS": (
+                    f"{ansible_ssh_common_args(known_hosts=known_hosts, isolated_config=True)} "
+                    "-o ControlMaster=auto -o ControlPersist=60s"
+                ),
+            }
+        )
+        _run_stage(
+            name=f"{mode}-collections",
+            command=(
+                "ansible-galaxy",
+                "collection",
+                "install",
+                "-r",
+                str(overlay_directory / "preparation-requirements.yml"),
+                "-p",
+                str(collections),
+            ),
+            cwd=worktree,
+            environment=environment,
+            timeout_seconds=min(timeout_seconds, 600),
+            log_parts=log_parts,
+            progress=progress,
+            runner=runner,
+        )
+
+        if mode == "foundation":
+            commands = (
+                (
+                    "foundation-upstream",
+                    (
+                        "ansible-playbook",
+                        "-i",
+                        str(inventory_path),
+                        "-e",
+                        "fiveg_profile=default",
+                        "-e",
+                        "synthran_prepare_only=true",
+                        "-e",
+                        "no_boot=false",
+                        str(worktree / "playbooks" / "deploy.yml"),
+                    ),
+                ),
+                (
+                    "foundation-network",
+                    (
+                        "ansible-playbook",
+                        "-i",
+                        str(inventory_path),
+                        str(overlay_directory / "prepare-network.yml"),
+                    ),
+                ),
+                (
+                    "foundation-tools",
+                    (
+                        "ansible-playbook",
+                        "-i",
+                        str(inventory_path),
+                        "-e",
+                        f"@{variables_path}",
+                        str(overlay_directory / "prepare-tools.yml"),
+                    ),
+                ),
+            )
+        else:
+            commands = (
+                (
+                    "physical-gnb-role",
+                    (
+                        "ansible-playbook",
+                        "-i",
+                        str(inventory_path),
+                        "-e",
+                        "fiveg_profile=default",
+                        "-e",
+                        f"version={srsran_commit}",
+                        "-e",
+                        f"synthran_run_id={run_id}",
+                        "-e",
+                        f"@{variables_path}",
+                        str(overlay_directory / "r2lab-srsran-gnb.yml"),
+                    ),
+                ),
+            )
+
+        for stage_name, command in commands:
+            _run_stage(
+                name=f"{stage_name}-syntax",
+                command=(*command[:-1], "--syntax-check", command[-1]),
+                cwd=worktree,
+                environment=environment,
+                timeout_seconds=min(timeout_seconds, 600),
+                log_parts=log_parts,
+                progress=progress,
+                runner=runner,
+            )
+        _authority(
+            run_id=run_id,
+            slice_name=slice_name,
+            owner=owner,
+            allocation_id=allocation_id,
+            run_root=run_root,
+            timeout_seconds=timeout_seconds,
+        )
+        for stage_name, command in commands:
+            _run_stage(
+                name=stage_name,
+                command=command,
+                cwd=worktree,
+                environment=environment,
+                timeout_seconds=timeout_seconds,
+                log_parts=log_parts,
+                progress=progress,
+                streaming=True,
+                runner=runner,
+            )
+            _authority(
+                run_id=run_id,
+                slice_name=slice_name,
+                owner=owner,
+                allocation_id=allocation_id,
+                run_root=run_root,
+                timeout_seconds=timeout_seconds,
+            )
+    except UpstreamOverlayError as exc:
+        raise R2LabUpstreamRoleError(str(exc)) from exc
+    finally:
+        log_path.write_text(
+            sanitize_deployment_text(
+                "\n".join(log_parts),
+                (known_hosts, lock_path, deps_root, repository_root, output_directory),
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        if added:
+            runner(
+                ("git", "-C", str(checkout), "worktree", "remove", "--force", str(worktree)),
+                repository_root,
+                None,
+                min(timeout_seconds, 300),
+            )
+        shutil.rmtree(worktree_parent, ignore_errors=True)
+
+
+def converge_kubernetes_foundation(
+    *,
+    run_id: str,
+    slice_name: str,
+    owner: str,
+    allocation_id: str | None,
+    known_hosts: Path,
+    lock_path: Path,
+    deps_root: Path,
+    run_root: Path,
+    timeout_seconds: int,
+    progress: TextIO | None = None,
+) -> None:
+    _run_upstream(
+        run_id=run_id,
+        slice_name=slice_name,
+        owner=owner,
+        allocation_id=allocation_id,
+        known_hosts=known_hosts,
+        lock_path=lock_path,
+        deps_root=deps_root,
+        run_root=run_root,
+        mode="foundation",
+        timeout_seconds=timeout_seconds,
+        progress=progress,
+    )
+
+
+def converge_physical_gnb(
+    *,
+    run_id: str,
+    slice_name: str,
+    owner: str,
+    allocation_id: str | None,
+    known_hosts: Path,
+    lock_path: Path,
+    deps_root: Path,
+    run_root: Path,
+    timeout_seconds: int,
+    progress: TextIO | None = None,
+) -> None:
+    _run_upstream(
+        run_id=run_id,
+        slice_name=slice_name,
+        owner=owner,
+        allocation_id=allocation_id,
+        known_hosts=known_hosts,
+        lock_path=lock_path,
+        deps_root=deps_root,
+        run_root=run_root,
+        mode="gnb",
+        timeout_seconds=timeout_seconds,
+        progress=progress,
+    )
