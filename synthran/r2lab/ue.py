@@ -1,9 +1,8 @@
-"""Strict observation and evidence boundary for the physical R2Lab UE path.
+"""Observation and evidence boundary for the physical R2Lab UE path.
 
-UE modem mechanics are deliberately not implemented here.  The pinned
-``5g_ansible`` UE roles own MBIM/QMI actuation; this module owns live authority,
-gNB/N2 revalidation, selected-UE observation, user-plane proof, workload handoff,
-and sanitized evidence types.
+UE modem mechanics are delegated to the pinned 5g-Ansible UE roles. This
+module owns gNB/N2 revalidation, selected-UE observation, user-plane proof,
+workload handoff, and sanitized evidence types.
 """
 
 from __future__ import annotations
@@ -29,12 +28,7 @@ from synthran.r2lab.radio import (
     UserPlaneProbeEvidence,
     execute_user_plane_probe,
 )
-from synthran.r2lab.resources import (
-    load_topology,
-    ue_gateway_command,
-    verify_physical_authority,
-    verify_selected_allocation,
-)
+from synthran.r2lab.resources import load_topology, ue_gateway_command, verify_physical_authority
 from synthran.r2lab.runtime import N2State, parse_n2_log_state
 from synthran.utils.ssh import strict_ssh_command
 
@@ -51,7 +45,7 @@ _SAFE_POD = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
 
 
 class R2LabPhysicalUeError(RuntimeError):
-    """Raised when the selected physical UE path cannot be proven safely."""
+    """Raised when the selected physical UE path cannot be proven."""
 
 
 @dataclass(frozen=True)
@@ -276,8 +270,6 @@ def verify_current_n3xx_n2(
     runner: Runner = subprocess_runner,
     timeout_seconds: int = 30,
 ) -> bool:
-    """Fresh current-state proof used immediately before UE mutation/traffic."""
-
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
     known_hosts = known_hosts.expanduser().resolve()
     if not known_hosts.is_file():
@@ -362,10 +354,18 @@ def verify_current_n3xx_n2(
     pod_status = pod.get("status")
     name = pod_metadata.get("name") if isinstance(pod_metadata, dict) else None
     statuses = pod_status.get("containerStatuses") if isinstance(pod_status, dict) else None
-    gnb = next(
-        (item for item in statuses if isinstance(item, dict) and item.get("name") == "gnb"),
-        None,
-    ) if isinstance(statuses, list) else None
+    gnb = (
+        next(
+            (
+                item
+                for item in statuses
+                if isinstance(item, dict) and item.get("name") == "gnb"
+            ),
+            None,
+        )
+        if isinstance(statuses, list)
+        else None
+    )
     if (
         not isinstance(name, str)
         or not _SAFE_POD.fullmatch(name)
@@ -461,13 +461,6 @@ def _refresh_boundary(
         timeout_seconds=min(timeout_seconds, 300),
     )
     topology = authority.topology
-    verify_selected_allocation(
-        topology=topology,
-        runner=cluster_runner,
-        owner=owner,
-        allocation_id=allocation_id,
-        timeout_seconds=min(timeout_seconds, 300),
-    )
     if not verify_current_n3xx_n2(
         run_id=run_id,
         known_hosts=known_hosts,
@@ -550,8 +543,6 @@ def execute_physical_workload_handoff(
     workload_evidence_path: Path | None = None,
     timeout_seconds: int = 30,
 ) -> tuple[PhysicalRunEvidence, PhysicalWorkloadResult | None]:
-    """Run one deterministic physical workload after refreshing the entire path."""
-
     if evidence.acceptance.next_stage is not PhysicalAcceptanceStage.WORKLOAD:
         raise R2LabPhysicalUeError("physical workload is not the next lifecycle boundary")
     topology = _refresh_boundary(
