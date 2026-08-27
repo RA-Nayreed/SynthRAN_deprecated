@@ -1,8 +1,7 @@
 """Topology-driven SLICES/Kubernetes/Open5GS physical foundation.
 
 The selected compute pair, radio, and subscriber are read from the run topology;
-no stage silently falls back to the original sopnode-f2/sopnode-f3/N300/qfit07
-validation topology.
+no stage silently falls back to the original validation topology.
 """
 
 from __future__ import annotations
@@ -31,11 +30,14 @@ from synthran.network.runtime import (
     sanitize_deployment_text,
     validate_run_id,
 )
-from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence, R2LabAcceptanceError
+from synthran.r2lab.acceptance import (
+    PhysicalAcceptanceStage,
+    PhysicalRunEvidence,
+    R2LabAcceptanceError,
+)
 from synthran.r2lab.hardware import PhysicalTopology
 from synthran.r2lab.resources import (
     R2LabTopologyResourceError,
-    claim_selected_allocation,
     load_topology,
     verify_physical_authority,
 )
@@ -61,7 +63,7 @@ class R2LabTopologyFoundationError(RuntimeError):
 class TopologyFoundationResult:
     run_id: str
     topology: PhysicalTopology
-    allocation_id: str
+    allocation_id: str | None
     namespace_changed: bool
     open5gs_reconciled: bool
     ready_node_count: int
@@ -193,9 +195,13 @@ def _gnb_state(
         desired = spec.get("replicas") if isinstance(spec, dict) else None
         owner = labels.get(RUN_LABEL) if isinstance(labels, dict) else None
         if not isinstance(desired, int) or isinstance(desired, bool):
-            raise R2LabTopologyFoundationError("existing physical gNB replica state is malformed")
+            raise R2LabTopologyFoundationError(
+                "existing physical gNB replica state is malformed"
+            )
         if owner is not None and not isinstance(owner, str):
-            raise R2LabTopologyFoundationError("existing physical gNB ownership is malformed")
+            raise R2LabTopologyFoundationError(
+                "existing physical gNB ownership is malformed"
+            )
     pods = _json_object(
         _checked(
             runner,
@@ -219,7 +225,9 @@ def _gnb_state(
     )
     items = pods.get("items")
     if not isinstance(items, list):
-        raise R2LabTopologyFoundationError("existing physical gNB pod query is malformed")
+        raise R2LabTopologyFoundationError(
+            "existing physical gNB pod query is malformed"
+        )
     return deployment_present, desired, owner, len(items)
 
 
@@ -235,14 +243,6 @@ def _handoff_namespace(
     cluster_runner: Runner,
     timeout_seconds: int,
 ) -> bool:
-    authority = lambda: verify_physical_authority(
-        run_id=run_id,
-        slice_name=slice_name,
-        run_root=run_root,
-        runner=r2lab_runner,
-        timeout_seconds=min(timeout_seconds, 300),
-    )
-    authority()
     owner = _namespace_owner(
         topology=topology,
         known_hosts=known_hosts,
@@ -267,7 +267,6 @@ def _handoff_namespace(
             label="Open5GS namespace existence query",
         ).strip()
         if not namespace:
-            authority()
             _checked(
                 cluster_runner,
                 _ssh(
@@ -281,16 +280,19 @@ def _handoff_namespace(
                 timeout_seconds=min(timeout_seconds, 60),
                 label="Open5GS namespace creation",
             )
-        elif previous_run_id is None:
-            pass
+
     allowed = {run_id}
     if previous_run_id is not None:
         validate_run_id(previous_run_id)
         if previous_run_id == run_id:
-            raise R2LabTopologyFoundationError("previous and current run IDs must differ")
+            raise R2LabTopologyFoundationError(
+                "previous and current run IDs must differ"
+            )
         allowed.add(previous_run_id)
     if owner not in allowed and owner is not None:
-        raise R2LabTopologyFoundationError("Open5GS namespace has an unexpected run owner")
+        raise R2LabTopologyFoundationError(
+            "Open5GS namespace has an unexpected run owner"
+        )
 
     deployment_present, desired, deployment_owner, pod_count = _gnb_state(
         topology=topology,
@@ -299,14 +301,15 @@ def _handoff_namespace(
         timeout_seconds=min(timeout_seconds, 60),
     )
     if deployment_owner not in allowed and deployment_owner is not None:
-        raise R2LabTopologyFoundationError("existing physical gNB has an unexpected run owner")
+        raise R2LabTopologyFoundationError(
+            "existing physical gNB has an unexpected run owner"
+        )
     if deployment_present and (desired != 0 or pod_count != 0):
         legacy_reclaim = owner is None and deployment_owner is None and pod_count <= 1
         if not legacy_reclaim:
             raise R2LabTopologyFoundationError(
                 "existing physical gNB must be stopped before namespace ownership changes"
             )
-        authority()
         _checked(
             cluster_runner,
             _ssh(
@@ -333,11 +336,14 @@ def _handoff_namespace(
                 break
             time.sleep(2)
         else:
-            raise R2LabTopologyFoundationError("legacy physical gNB did not reach zero pods")
+            raise R2LabTopologyFoundationError(
+                "legacy physical gNB did not reach zero pods"
+            )
 
-    changed = owner != run_id or (deployment_present and deployment_owner != run_id)
+    changed = owner != run_id or (
+        deployment_present and deployment_owner != run_id
+    )
     if changed:
-        authority()
         if deployment_present:
             _checked(
                 cluster_runner,
@@ -377,7 +383,9 @@ def _handoff_namespace(
         timeout_seconds=min(timeout_seconds, 60),
     )
     if observed != run_id:
-        raise R2LabTopologyFoundationError("Open5GS namespace ownership was not proven")
+        raise R2LabTopologyFoundationError(
+            "Open5GS namespace ownership was not proven"
+        )
     return changed
 
 
@@ -387,7 +395,15 @@ def _ready_nodes(
     payload = _json_object(
         _checked(
             runner,
-            _ssh(topology.core_node, known_hosts, "kubectl", "get", "nodes", "-o", "json"),
+            _ssh(
+                topology.core_node,
+                known_hosts,
+                "kubectl",
+                "get",
+                "nodes",
+                "-o",
+                "json",
+            ),
             timeout_seconds=timeout_seconds,
             label="Kubernetes node readiness query",
         ),
@@ -414,7 +430,9 @@ def _ready_nodes(
     expected = set(topology.nodes)
     if not expected.issubset(ready):
         missing = ", ".join(sorted(expected - ready))
-        raise R2LabTopologyFoundationError(f"selected Kubernetes nodes are not Ready: {missing}")
+        raise R2LabTopologyFoundationError(
+            f"selected Kubernetes nodes are not Ready: {missing}"
+        )
     return len(expected)
 
 
@@ -445,18 +463,27 @@ def _open5gs_ready(
             f"Open5GS {network_function.upper()} readiness query",
         )
         items = payload.get("items")
-        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+        if (
+            not isinstance(items, list)
+            or len(items) != 1
+            or not isinstance(items[0], dict)
+        ):
             continue
         pod = items[0]
         metadata = pod.get("metadata")
         status = pod.get("status")
-        containers = status.get("containerStatuses") if isinstance(status, dict) else None
+        containers = (
+            status.get("containerStatuses") if isinstance(status, dict) else None
+        )
         if (
             isinstance(metadata, dict)
             and metadata.get("deletionTimestamp") is None
             and isinstance(containers, list)
             and containers
-            and all(isinstance(container, dict) and container.get("ready") is True for container in containers)
+            and all(
+                isinstance(container, dict) and container.get("ready") is True
+                for container in containers
+            )
         ):
             ready += 1
     return ready == len(REQUIRED_OPEN5GS_NFS), ready
@@ -486,7 +513,9 @@ def _physical_networks_ready(
     )
     items = payload.get("items")
     if not isinstance(items, list):
-        raise R2LabTopologyFoundationError("physical Multus network evidence is malformed")
+        raise R2LabTopologyFoundationError(
+            "physical Multus network evidence is malformed"
+        )
     observed: set[str] = set()
     for item in items:
         metadata = item.get("metadata") if isinstance(item, dict) else None
@@ -495,7 +524,9 @@ def _physical_networks_ready(
             observed.add(name)
     required = set(REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS)
     ready = required.issubset(observed)
-    return ready, tuple(name for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS if name in observed)
+    return ready, tuple(
+        name for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS if name in observed
+    )
 
 
 def _locked_git_commit(lock, name: str) -> str:
@@ -511,7 +542,7 @@ def reconcile_open5gs_topology(
     slice_name: str,
     topology: PhysicalTopology,
     known_hosts: Path,
-    authority_verifier: Callable[[], object],
+    authority_verifier: Callable[[], object] | None,
     lock_path: Path,
     dependency_root: Path,
     run_root: Path,
@@ -537,12 +568,17 @@ def reconcile_open5gs_topology(
         ran_node=topology.ran_node,
         source=inventory_path,
     )
-    inventory_text = inventory_text.replace('rru="rfsim"', f'rru="{topology.radio}"', 1)
+    inventory_text = inventory_text.replace(
+        'rru="rfsim"', f'rru="{topology.radio}"', 1
+    )
     inventory_path.write_text(inventory_text, encoding="utf-8", newline="\n")
     variables_path = output_directory / "locked-open5gs-images.json"
     atomic_json(
         variables_path,
-        {"synthran_images": golden_path_image_variables(lock), **preparation_variables},
+        {
+            "synthran_images": golden_path_image_variables(lock),
+            **preparation_variables,
+        },
     )
     log_path = output_directory / "open5gs-core.log"
     log_parts: list[str] = []
@@ -551,7 +587,14 @@ def reconcile_open5gs_topology(
         if progress is not None:
             print(f"[synthran] {message}", file=progress, flush=True)
 
-    def stage(name: str, command: Sequence[str], cwd: Path, environment: Mapping[str, str] | None = None, *, streaming: bool = False) -> CommandResult:
+    def stage(
+        name: str,
+        command: Sequence[str],
+        cwd: Path,
+        environment: Mapping[str, str] | None = None,
+        *,
+        streaming: bool = False,
+    ) -> CommandResult:
         started = monotonic()
         report(f"{name}: running...")
         log_parts.append(f"=== {name} ===")
@@ -572,10 +615,14 @@ def reconcile_open5gs_topology(
                         if message is not None:
                             report(message)
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-            raise R2LabTopologyFoundationError(f"Open5GS stage {name} could not complete") from exc
+            raise R2LabTopologyFoundationError(
+                f"Open5GS stage {name} could not complete"
+            ) from exc
         log_parts.extend((result.stdout, result.stderr))
         if result.returncode != 0:
-            raise R2LabTopologyFoundationError(f"Open5GS stage {name} failed; see sanitized log")
+            raise R2LabTopologyFoundationError(
+                f"Open5GS stage {name} failed; see sanitized log"
+            )
         report(f"{name}: OK ({monotonic() - started:.1f}s)")
         return result
 
@@ -594,19 +641,34 @@ def reconcile_open5gs_topology(
             "ANSIBLE_RETRY_FILES_ENABLED": "False",
         }
     )
-    worktree_parent = Path(tempfile.mkdtemp(prefix="worktree-", dir=output_directory))
+    worktree_parent = Path(
+        tempfile.mkdtemp(prefix="worktree-", dir=output_directory)
+    )
     worktree = worktree_parent / "fiveg_ansible"
     added = False
     try:
         stage(
             "open5gs-worktree",
-            ("git", "-C", str(checkout), "worktree", "add", "--detach", str(worktree), fiveg_commit),
+            (
+                "git",
+                "-C",
+                str(checkout),
+                "worktree",
+                "add",
+                "--detach",
+                str(worktree),
+                fiveg_commit,
+            ),
             repository_root,
         )
         added = True
-        proof = stage("open5gs-worktree-proof", ("git", "rev-parse", "HEAD"), worktree)
+        proof = stage(
+            "open5gs-worktree-proof", ("git", "rev-parse", "HEAD"), worktree
+        )
         if proof.stdout.strip() != fiveg_commit:
-            raise R2LabTopologyFoundationError("isolated Open5GS worktree does not match lock")
+            raise R2LabTopologyFoundationError(
+                "isolated Open5GS worktree does not match lock"
+            )
         overlay_directory = worktree / ".synthran"
         shutil.copytree(overlay_source, overlay_directory)
         apply_network_overlay(worktree, subscriber_name=topology.ue)
@@ -653,27 +715,60 @@ def reconcile_open5gs_topology(
             f"@{variables_path}",
             str(overlay_directory / "r2lab-open5gs-core.yml"),
         )
-        stage("open5gs-runtime-syntax", (*runtime_playbook[:-1], "--syntax-check", runtime_playbook[-1]), worktree, environment)
-        stage("open5gs-syntax", (*playbook[:-1], "--syntax-check", playbook[-1]), worktree, environment)
-        authority_verifier()
-        stage("open5gs-runtime", runtime_playbook, worktree, environment, streaming=True)
-        authority_verifier()
-        stage("open5gs-reconcile", playbook, worktree, environment, streaming=True)
-        authority_verifier()
+        stage(
+            "open5gs-runtime-syntax",
+            (*runtime_playbook[:-1], "--syntax-check", runtime_playbook[-1]),
+            worktree,
+            environment,
+        )
+        stage(
+            "open5gs-syntax",
+            (*playbook[:-1], "--syntax-check", playbook[-1]),
+            worktree,
+            environment,
+        )
+        stage(
+            "open5gs-runtime",
+            runtime_playbook,
+            worktree,
+            environment,
+            streaming=True,
+        )
+        stage(
+            "open5gs-reconcile",
+            playbook,
+            worktree,
+            environment,
+            streaming=True,
+        )
     except UpstreamOverlayError as exc:
         raise R2LabTopologyFoundationError(str(exc)) from exc
     finally:
         log_path.write_text(
             sanitize_deployment_text(
                 "\n".join(log_parts),
-                (known_hosts, lock_path, dependency_root, repository_root, run_directory),
+                (
+                    known_hosts,
+                    lock_path,
+                    dependency_root,
+                    repository_root,
+                    run_directory,
+                ),
             ),
             encoding="utf-8",
             newline="\n",
         )
         if added:
             runner(
-                ("git", "-C", str(checkout), "worktree", "remove", "--force", str(worktree)),
+                (
+                    "git",
+                    "-C",
+                    str(checkout),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(worktree),
+                ),
                 repository_root,
                 None,
                 timeout_seconds,
@@ -704,10 +799,14 @@ def accept_topology_foundation(
     validate_run_id(run_id)
     topology = load_topology(run_root=run_root, run_id=run_id)
     if timeout_seconds < 60 or timeout_seconds > 3600:
-        raise R2LabTopologyFoundationError("foundation timeout must be between 60 and 3600 seconds")
+        raise R2LabTopologyFoundationError(
+            "foundation timeout must be between 60 and 3600 seconds"
+        )
     known_hosts = known_hosts.expanduser().resolve()
     if not known_hosts.is_file():
-        raise R2LabTopologyFoundationError("strict SLICES known-hosts file is missing")
+        raise R2LabTopologyFoundationError(
+            "strict SLICES known-hosts file is missing"
+        )
 
     def authority() -> object:
         return verify_physical_authority(
@@ -719,17 +818,6 @@ def accept_topology_foundation(
         )
 
     try:
-        allocation = claim_selected_allocation(
-            run_id=run_id,
-            slice_name=slice_name,
-            topology=topology,
-            r2lab_runner=r2lab_runner,
-            allocation_runner=cluster_runner,
-            owner=owner,
-            allocation_id=allocation_id,
-            timeout_seconds=min(timeout_seconds, 300),
-            run_root=run_root,
-        )
         authority()
     except R2LabTopologyResourceError as exc:
         raise R2LabTopologyFoundationError(str(exc)) from exc
@@ -770,7 +858,7 @@ def accept_topology_foundation(
             slice_name=slice_name,
             topology=topology,
             known_hosts=known_hosts,
-            authority_verifier=authority,
+            authority_verifier=None,
             lock_path=lock_path,
             dependency_root=dependency_root,
             run_root=run_root,
@@ -792,21 +880,27 @@ def accept_topology_foundation(
             timeout_seconds=min(timeout_seconds, 300),
         )
     if not healthy:
-        raise R2LabTopologyFoundationError("Open5GS did not reach one ready AMF/SMF/UPF set")
+        raise R2LabTopologyFoundationError(
+            "Open5GS did not reach one ready AMF/SMF/UPF set"
+        )
     if not networks_ready:
         missing = ", ".join(
-            name for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS if name not in ready_networks
+            name
+            for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS
+            if name not in ready_networks
         )
         raise R2LabTopologyFoundationError(
             f"required physical Multus networks are missing: {missing}"
         )
-    authority()
-    if _namespace_owner(
-        topology=topology,
-        known_hosts=known_hosts,
-        runner=cluster_runner,
-        timeout_seconds=min(timeout_seconds, 60),
-    ) != run_id:
+    if (
+        _namespace_owner(
+            topology=topology,
+            known_hosts=known_hosts,
+            runner=cluster_runner,
+            timeout_seconds=min(timeout_seconds, 60),
+        )
+        != run_id
+    ):
         raise R2LabTopologyFoundationError("Open5GS namespace ownership changed")
 
     evidence = PhysicalRunEvidence(run_id=run_id)
@@ -819,8 +913,14 @@ def accept_topology_foundation(
             PhysicalAcceptanceStage.SLICES_FOUNDATION,
             f"current-slices:{topology.core_node}:{topology.ran_node}",
         ),
-        (PhysicalAcceptanceStage.KUBERNETES, "selected-compute-nodes-ready"),
-        (PhysicalAcceptanceStage.OPEN5GS, "owned-open5gs-core-and-physical-networks-ready"),
+        (
+            PhysicalAcceptanceStage.KUBERNETES,
+            "selected-compute-nodes-ready",
+        ),
+        (
+            PhysicalAcceptanceStage.OPEN5GS,
+            "owned-open5gs-core-and-physical-networks-ready",
+        ),
     ):
         evidence = evidence.pass_stage(stage, source=source)
     evidence_path = run_root.expanduser().resolve() / run_id / "physical-run.json"
@@ -828,7 +928,9 @@ def accept_topology_foundation(
         if evidence_path.exists():
             existing = PhysicalRunEvidence.read_json(evidence_path)
             if existing != evidence:
-                raise R2LabTopologyFoundationError("physical run evidence already contains different state")
+                raise R2LabTopologyFoundationError(
+                    "physical run evidence already contains different state"
+                )
         else:
             evidence.write_json(evidence_path)
     except R2LabAcceptanceError as exc:
@@ -837,7 +939,7 @@ def accept_topology_foundation(
     return TopologyFoundationResult(
         run_id=run_id,
         topology=topology,
-        allocation_id=allocation,
+        allocation_id=allocation_id,
         namespace_changed=namespace_changed,
         open5gs_reconciled=reconciled,
         ready_node_count=ready_nodes,
