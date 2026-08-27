@@ -44,6 +44,8 @@ from synthran.r2lab.upstream_roles import (
 
 
 RESUME_SCHEMA = "synthran/r2lab-live-resume/v1alpha1"
+KUBERNETES_OBSERVATION_ATTEMPTS = 3
+KUBERNETES_OBSERVATION_INTERVAL_SECONDS = 5.0
 
 
 class R2LabLiveReconciliationError(RuntimeError):
@@ -76,6 +78,28 @@ class LiveResumeResult:
 def _report(progress: TextIO | None, message: str) -> None:
     if progress is not None:
         print(f"[synthran] {message}", file=progress, flush=True)
+
+
+def _observe_ready_nodes(
+    *,
+    topology,
+    known_hosts: Path,
+    cluster_runner: Runner,
+    timeout: int,
+) -> bool:
+    for attempt in range(1, KUBERNETES_OBSERVATION_ATTEMPTS + 1):
+        try:
+            _ready_nodes(
+                topology=topology,
+                known_hosts=known_hosts,
+                runner=cluster_runner,
+                timeout_seconds=min(timeout, 300),
+            )
+            return True
+        except R2LabTopologyFoundationError:
+            if attempt < KUBERNETES_OBSERVATION_ATTEMPTS:
+                time.sleep(KUBERNETES_OBSERVATION_INTERVAL_SECONDS)
+    return False
 
 
 def _foundation(
@@ -114,17 +138,15 @@ def _foundation(
     )
 
     kubernetes_reconciled = False
-    try:
-        _ready_nodes(
-            topology=topology,
-            known_hosts=known_hosts,
-            runner=cluster_runner,
-            timeout_seconds=min(timeout, 300),
-        )
-    except R2LabTopologyFoundationError:
+    if not _observe_ready_nodes(
+        topology=topology,
+        known_hosts=known_hosts,
+        cluster_runner=cluster_runner,
+        timeout=timeout,
+    ):
         _report(
             progress,
-            "resume-foundation: Kubernetes unavailable; converging pinned upstream foundation",
+            "resume-foundation: Kubernetes unavailable after bounded observation; converging pinned upstream foundation",
         )
         try:
             converge_kubernetes_foundation(
@@ -141,12 +163,15 @@ def _foundation(
             )
         except R2LabUpstreamRoleError as exc:
             raise R2LabLiveReconciliationError(str(exc)) from exc
-        _ready_nodes(
+        if not _observe_ready_nodes(
             topology=topology,
             known_hosts=known_hosts,
-            runner=cluster_runner,
-            timeout_seconds=min(timeout, 300),
-        )
+            cluster_runner=cluster_runner,
+            timeout=timeout,
+        ):
+            raise R2LabLiveReconciliationError(
+                "Kubernetes foundation remained unavailable after upstream convergence"
+            )
         kubernetes_reconciled = True
         _report(progress, "resume-foundation: Kubernetes foundation converged")
 
