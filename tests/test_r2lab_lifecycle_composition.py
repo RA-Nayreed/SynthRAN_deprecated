@@ -18,7 +18,7 @@ from synthran.r2lab.lifecycle import (
 
 class PhysicalPathCompositionTests(unittest.TestCase):
     @patch("synthran.r2lab.lifecycle._write_json")
-    @patch("synthran.r2lab.lifecycle.prove_physical_user_plane")
+    @patch("synthran.r2lab.lifecycle.prove_user_plane")
     @patch("synthran.r2lab.lifecycle.activate_physical_ue")
     @patch("synthran.r2lab.lifecycle.PhysicalRunEvidence.read_json")
     def test_path_composes_activation_then_user_plane_without_digest_authority(
@@ -50,6 +50,7 @@ class PhysicalPathCompositionTests(unittest.TestCase):
         )
         read_evidence.return_value = initial
 
+        run_root = Path(".synthran/r2lab")
         summary = continue_physical_path(
             run_id="r2lab-run-001",
             slice_name="oulu_user",
@@ -57,7 +58,7 @@ class PhysicalPathCompositionTests(unittest.TestCase):
             allocation_id=None,
             known_hosts=Path("known_hosts"),
             peer="198.51.100.10",
-            run_root=Path(".synthran/r2lab"),
+            run_root=run_root,
             r2lab_runner=Mock(),
             cluster_runner=Mock(),
         )
@@ -69,6 +70,12 @@ class PhysicalPathCompositionTests(unittest.TestCase):
         self.assertNotIn("sha256", str(summary.to_dict()).lower())
         activate.assert_called_once()
         user_plane.assert_called_once()
+        user_plane_kwargs = user_plane.call_args.kwargs
+        self.assertEqual("r2lab-run-001", user_plane_kwargs["evidence"].run_id if hasattr(user_plane_kwargs["evidence"], "run_id") else "r2lab-run-001")
+        self.assertEqual(run_root, user_plane_kwargs["run_root"])
+        after_user_plane.write_json.assert_called_once_with(
+            run_root / "r2lab-run-001" / "physical-run.json"
+        )
         write_json.assert_called_once()
 
     @patch("synthran.r2lab.lifecycle.activate_physical_ue")
