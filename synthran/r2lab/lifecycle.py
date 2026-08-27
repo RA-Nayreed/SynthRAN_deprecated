@@ -22,9 +22,10 @@ from synthran.r2lab.acceptance import (
     R2LabAcceptanceError,
 )
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
+from synthran.r2lab.live_cluster import prove_user_plane
 from synthran.r2lab.physical_inventory import load_physical_inventory
 from synthran.r2lab.resources import load_topology
-from synthran.r2lab.ue import R2LabPhysicalUeError, prove_physical_user_plane
+from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.r2lab.ue_activation import (
     activate_physical_ue,
     recover_retryable_transport_failure,
@@ -192,20 +193,17 @@ def continue_physical_path(
         if evidence.acceptance.next_stage is PhysicalAcceptanceStage.USER_PLANE:
             if progress is not None:
                 print("[synthran] physical-user-plane: running...", file=progress, flush=True)
-            user_plane = prove_physical_user_plane(
+            user_plane = prove_user_plane(
                 evidence=evidence,
                 slice_name=slice_name,
-                owner=owner,
-                allocation_id=allocation_id,
-                known_hosts=known_hosts,
                 peer=peer,
                 run_root=run_root,
                 r2lab_runner=r2lab_runner,
                 cluster_runner=cluster_runner,
-                evidence_path=evidence_path,
                 timeout_seconds=timeout_seconds,
             )
             evidence = user_plane.evidence
+            evidence.write_json(evidence_path)
             user_plane_proven = user_plane.probe.proven
             _write_json(
                 physical_directory / "physical-user-plane.json",
