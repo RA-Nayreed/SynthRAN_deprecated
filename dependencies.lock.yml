@@ -170,7 +170,7 @@
     },
     "iperf3_linux_amd64_source": {
       "version": "3.21",
-      "sha256": "sha256:6564405ebd620121de7ceca3eaf43a88f79ea1b857d041a6a0b1314801acdd8",
+      "sha256": "sha256:656e4405ebd620121de7ceca3eaf43a88f79ea1b857d041a6a0b1314801acdd8",
       "url": "https://downloads.es.net/pub/iperf/iperf-3.21.tar.gz",
       "path": "/tmp/synthran-tools/iperf-3.21/bin/iperf3",
       "platform": "linux/amd64",
@@ -228,7 +228,7 @@
       },
       "pyarrow": {
         "version": "21.0.0",
-        "role": "runtime",
+        "role": "deterministic JSONL-to-Parquet conversion",
         "license": "Apache-2.0"
       },
       "ansible-core": {
