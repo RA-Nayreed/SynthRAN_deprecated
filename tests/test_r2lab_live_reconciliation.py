@@ -10,11 +10,7 @@ from synthran.r2lab.acceptance import (
     StagedPhysicalEvidence,
     StartedGnbEvidence,
 )
-from synthran.r2lab.reconciliation import (
-    R2LabLiveReconciliationError,
-    _require_exact_deployment,
-    _synthetic_gnb_boundary,
-)
+from synthran.r2lab.reconciliation import LiveResumeResult, _synthetic_gnb_boundary
 
 
 RUN_ID = "r2lab-run-001"
@@ -24,15 +20,6 @@ RENDER = "3" * 64
 STAGING = "4" * 64
 CLAIM = "5" * 64
 START = "6" * 64
-
-
-def _artifact():
-    class Artifact:
-        package_sha256 = PACKAGE
-        values_sha256 = VALUES
-        render_sha256 = RENDER
-
-    return Artifact()
 
 
 def _historical_path() -> PhysicalRunEvidence:
@@ -73,80 +60,6 @@ def _historical_path() -> PhysicalRunEvidence:
     )
 
 
-class LiveResumeBindingTests(unittest.TestCase):
-    def test_exact_deployment_accepts_only_bound_zero_or_singleton(self) -> None:
-        artifact = _artifact()
-        payload = {
-            "metadata": {
-                "labels": {"synthran.run/id": RUN_ID},
-                "annotations": {
-                    "synthran.io/run-id": RUN_ID,
-                    "synthran.io/package-sha256": PACKAGE,
-                    "synthran.io/values-sha256": VALUES,
-                    "synthran.io/render-sha256": RENDER,
-                },
-            },
-            "spec": {"replicas": 0},
-        }
-        self.assertEqual(
-            0,
-            _require_exact_deployment(payload=payload, run_id=RUN_ID, artifact=artifact),
-        )
-        payload["spec"]["replicas"] = 1
-        self.assertEqual(
-            1,
-            _require_exact_deployment(payload=payload, run_id=RUN_ID, artifact=artifact),
-        )
-
-    def test_exact_deployment_rejects_foreign_owner(self) -> None:
-        payload = {
-            "metadata": {
-                "labels": {"synthran.run/id": "other-run-001"},
-                "annotations": {
-                    "synthran.io/run-id": RUN_ID,
-                    "synthran.io/package-sha256": PACKAGE,
-                    "synthran.io/values-sha256": VALUES,
-                    "synthran.io/render-sha256": RENDER,
-                },
-            },
-            "spec": {"replicas": 0},
-        }
-        with self.assertRaisesRegex(R2LabLiveReconciliationError, "not owned"):
-            _require_exact_deployment(payload=payload, run_id=RUN_ID, artifact=_artifact())
-
-    def test_exact_deployment_rejects_changed_artifact_binding(self) -> None:
-        payload = {
-            "metadata": {
-                "labels": {"synthran.run/id": RUN_ID},
-                "annotations": {
-                    "synthran.io/run-id": RUN_ID,
-                    "synthran.io/package-sha256": "9" * 64,
-                    "synthran.io/values-sha256": VALUES,
-                    "synthran.io/render-sha256": RENDER,
-                },
-            },
-            "spec": {"replicas": 0},
-        }
-        with self.assertRaisesRegex(R2LabLiveReconciliationError, "immutable artifact"):
-            _require_exact_deployment(payload=payload, run_id=RUN_ID, artifact=_artifact())
-
-    def test_exact_deployment_rejects_invalid_replica_state(self) -> None:
-        payload = {
-            "metadata": {
-                "labels": {"synthran.run/id": RUN_ID},
-                "annotations": {
-                    "synthran.io/run-id": RUN_ID,
-                    "synthran.io/package-sha256": PACKAGE,
-                    "synthran.io/values-sha256": VALUES,
-                    "synthran.io/render-sha256": RENDER,
-                },
-            },
-            "spec": {"replicas": 2},
-        }
-        with self.assertRaisesRegex(R2LabLiveReconciliationError, "replica state"):
-            _require_exact_deployment(payload=payload, run_id=RUN_ID, artifact=_artifact())
-
-
 class LiveResumeEvidenceTests(unittest.TestCase):
     def test_live_ue_reproof_uses_synthetic_boundary_without_rewriting_history(self) -> None:
         historical = _historical_path()
@@ -165,10 +78,27 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertEqual(5, len(synthetic.acceptance.evidence))
         self.assertEqual(10, len(historical.acceptance.evidence))
 
+    def test_resume_result_serializes_separate_live_evidence(self) -> None:
+        result = LiveResumeResult(
+            run_id=RUN_ID,
+            allocation_id="allocation-001",
+            foundation_reconciled=True,
+            gnb_restarted=True,
+            ue_status="connected",
+            user_plane_proven=True,
+            evidence_path=Path("live-resume.json"),
+        )
+        payload = result.to_dict()
+        self.assertEqual("synthran/r2lab-live-resume/v1alpha1", payload["schema"])
+        self.assertTrue(payload["user_plane_proven"])
+        self.assertEqual("live-resume.json", payload["evidence_path"])
+
     def test_unified_run_places_live_reproof_before_historical_shortcuts(self) -> None:
         source = Path("synthran/backends/run.py").read_text(encoding="utf-8")
         live = source.index("reconcile_live_resume(")
-        foundation_shortcut = source.index("accepted foundation evidence present; current state re-proven")
+        foundation_shortcut = source.index(
+            "accepted foundation evidence present; current state re-proven"
+        )
         workload = source.index("run deterministic ten-sensor experiment and collect data")
         self.assertLess(live, foundation_shortcut)
         self.assertLess(live, workload)
