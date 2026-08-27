@@ -68,9 +68,7 @@
         that:
           - >-
             synthran_open5gs_namespace.resources | length == 0 or
-            synthran_open5gs_namespace.resources[0].metadata.labels is not defined or
-            synthran_open5gs_namespace.resources[0].metadata.labels['synthran.run/id'] is not defined or
-            synthran_open5gs_namespace.resources[0].metadata.labels['synthran.run/id'] == synthran_run_id
+            (synthran_open5gs_namespace.resources[0].metadata.labels | default({})).get('synthran.run/id') in [none, synthran_run_id]
         fail_msg: "Open5GS namespace belongs to another run"
 
     - name: Establish current-run Open5GS namespace ownership
