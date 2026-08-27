@@ -8,40 +8,40 @@ from typing import TextIO
 
 from synthran.live_preflight import Runner, subprocess_runner
 from synthran.network.resources import SUPPORTED_NODES
-from synthran.network.runtime import atomic_json, run_command
+from synthran.network.runtime import atomic_json
 from synthran.r2lab.acceptance import (
     AcceptanceOutcome,
     PhysicalAcceptance,
     PhysicalAcceptanceStage,
     PhysicalRunEvidence,
 )
-from synthran.r2lab.foundation_topology import (
-    REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS,
-    R2LabTopologyFoundationError,
-    _handoff_namespace,
-    _namespace_owner,
-    _open5gs_ready,
-    _physical_networks_ready,
-    _ready_nodes,
-    reconcile_open5gs_topology,
-)
-from synthran.r2lab.resources import load_topology, verify_physical_authority
-from synthran.r2lab.ue import (
-    R2LabPhysicalUeError,
-    prove_physical_user_plane,
-    verify_current_n3xx_n2,
-)
-from synthran.r2lab.ue_activation import activate_physical_ue
-from synthran.r2lab.upstream_roles import (
-    R2LabUpstreamRoleError,
+from synthran.r2lab.foundation_convergence import (
     converge_kubernetes_foundation,
-    converge_physical_gnb,
+    converge_open5gs,
 )
+from synthran.r2lab.live_cluster import (
+    REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS,
+    R2LabLiveClusterError,
+    bind_namespace_owner,
+    namespace_owner,
+    open5gs_ready,
+    physical_networks_ready,
+    prove_user_plane,
+    ready_nodes,
+    verify_n2,
+)
+from synthran.r2lab.resources import load_topology
+from synthran.r2lab.ue import R2LabPhysicalUeError
+from synthran.r2lab.ue_activation import observe_functional_ue_runtime
+from synthran.r2lab.ue_ansible import R2LabUeAnsibleError, execute_selected_ue_role
+from synthran.r2lab.upstream_roles import R2LabUpstreamRoleError, converge_physical_gnb
 
 
 RESUME_SCHEMA = "synthran/r2lab-live-resume/v1alpha1"
 KUBERNETES_OBSERVATION_ATTEMPTS = 3
 KUBERNETES_OBSERVATION_INTERVAL_SECONDS = 5.0
+UE_POSTCONDITION_SECONDS = 45
+UE_POLL_SECONDS = 2.0
 
 
 class R2LabLiveReconciliationError(RuntimeError):
@@ -76,23 +76,16 @@ def _report(progress: TextIO | None, message: str) -> None:
         print(f"[synthran] {message}", file=progress, flush=True)
 
 
-def _observe_ready_nodes(
-    *,
-    topology,
-    known_hosts: Path,
-    cluster_runner: Runner,
-    timeout: int,
-) -> bool:
+def _observe_ready_nodes(*, topology, cluster_runner: Runner, timeout: int) -> bool:
     for attempt in range(1, KUBERNETES_OBSERVATION_ATTEMPTS + 1):
         try:
-            _ready_nodes(
+            ready_nodes(
                 topology=topology,
-                known_hosts=known_hosts,
                 runner=cluster_runner,
                 timeout_seconds=min(timeout, 300),
             )
             return True
-        except R2LabTopologyFoundationError:
+        except R2LabLiveClusterError:
             if attempt < KUBERNETES_OBSERVATION_ATTEMPTS:
                 time.sleep(KUBERNETES_OBSERVATION_INTERVAL_SECONDS)
     return False
@@ -108,30 +101,23 @@ def _foundation(
     lock_path: Path,
     deps_root: Path,
     run_root: Path,
-    r2lab_runner: Runner,
     cluster_runner: Runner,
     timeout: int,
     progress: TextIO | None,
 ) -> bool:
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
-    verify_physical_authority(
-        run_id=run_id,
-        slice_name=slice_name,
-        run_root=run_root,
-        runner=r2lab_runner,
-        timeout_seconds=min(timeout, 300),
-    )
-
     kubernetes_reconciled = False
-    if not _observe_ready_nodes(
+
+    if _observe_ready_nodes(
         topology=topology,
-        known_hosts=known_hosts,
         cluster_runner=cluster_runner,
         timeout=timeout,
     ):
+        _report(progress, "resume-foundation: existing Kubernetes foundation is Ready; reusing sopnodes")
+    else:
         _report(
             progress,
-            "resume-foundation: Kubernetes unavailable after bounded observation; converging pinned upstream foundation",
+            "resume-foundation: Kubernetes unavailable; reconciling software before any POS fallback",
         )
         try:
             converge_kubernetes_foundation(
@@ -150,7 +136,6 @@ def _foundation(
             raise R2LabLiveReconciliationError(str(exc)) from exc
         if not _observe_ready_nodes(
             topology=topology,
-            known_hosts=known_hosts,
             cluster_runner=cluster_runner,
             timeout=timeout,
         ):
@@ -160,12 +145,14 @@ def _foundation(
         kubernetes_reconciled = True
         _report(progress, "resume-foundation: Kubernetes foundation converged")
 
-    current_owner = _namespace_owner(
-        topology=topology,
-        known_hosts=known_hosts,
-        runner=cluster_runner,
-        timeout_seconds=min(timeout, 60),
-    )
+    try:
+        current_owner = namespace_owner(
+            topology=topology,
+            runner=cluster_runner,
+            timeout_seconds=min(timeout, 60),
+        )
+    except R2LabLiveClusterError as exc:
+        raise R2LabLiveReconciliationError(str(exc)) from exc
     if current_owner not in {None, run_id}:
         raise R2LabLiveReconciliationError("current Open5GS namespace belongs to another run")
 
@@ -173,101 +160,80 @@ def _foundation(
     networks_ready = False
     ready_networks: tuple[str, ...] = ()
     try:
-        healthy, _ = _open5gs_ready(
+        healthy, _ = open5gs_ready(
             topology=topology,
-            known_hosts=known_hosts,
             runner=cluster_runner,
             timeout_seconds=min(timeout, 300),
         )
-        networks_ready, ready_networks = _physical_networks_ready(
+        networks_ready, ready_networks = physical_networks_ready(
             topology=topology,
-            known_hosts=known_hosts,
             runner=cluster_runner,
             timeout_seconds=min(timeout, 300),
         )
-    except R2LabTopologyFoundationError:
+    except R2LabLiveClusterError:
         pass
 
     open5gs_reconciled = not (healthy and networks_ready)
     if open5gs_reconciled:
         _report(progress, "resume-foundation: converging Open5GS through pinned upstream roles")
-
-        def authority() -> object:
-            return verify_physical_authority(
+        try:
+            converge_open5gs(
                 run_id=run_id,
                 slice_name=slice_name,
+                owner=owner,
+                allocation_id=allocation_id,
+                known_hosts=known_hosts,
+                lock_path=lock_path,
+                deps_root=deps_root,
                 run_root=run_root,
-                runner=r2lab_runner,
+                timeout_seconds=timeout,
+                progress=progress,
+            )
+        except R2LabUpstreamRoleError as exc:
+            raise R2LabLiveReconciliationError(str(exc)) from exc
+        try:
+            healthy, _ = open5gs_ready(
+                topology=topology,
+                runner=cluster_runner,
                 timeout_seconds=min(timeout, 300),
             )
+            networks_ready, ready_networks = physical_networks_ready(
+                topology=topology,
+                runner=cluster_runner,
+                timeout_seconds=min(timeout, 300),
+            )
+        except R2LabLiveClusterError as exc:
+            raise R2LabLiveReconciliationError(str(exc)) from exc
 
-        reconcile_open5gs_topology(
+    try:
+        ownership_changed = bind_namespace_owner(
             run_id=run_id,
-            slice_name=slice_name,
             topology=topology,
-            known_hosts=known_hosts,
-            authority_verifier=authority,
-            lock_path=lock_path,
-            dependency_root=deps_root,
-            run_root=run_root,
-            repository_root=Path("."),
-            runner=run_command,
-            timeout_seconds=timeout,
-            progress=progress,
-        )
-        healthy, _ = _open5gs_ready(
-            topology=topology,
-            known_hosts=known_hosts,
             runner=cluster_runner,
-            timeout_seconds=min(timeout, 300),
+            timeout_seconds=min(timeout, 60),
         )
-        networks_ready, ready_networks = _physical_networks_ready(
-            topology=topology,
-            known_hosts=known_hosts,
-            runner=cluster_runner,
-            timeout_seconds=min(timeout, 300),
-        )
+    except R2LabLiveClusterError as exc:
+        raise R2LabLiveReconciliationError(str(exc)) from exc
 
-    current_owner = _namespace_owner(
-        topology=topology,
-        known_hosts=known_hosts,
-        runner=cluster_runner,
-        timeout_seconds=min(timeout, 60),
-    )
-    ownership_changed = False
-    if current_owner != run_id:
-        ownership_changed = _handoff_namespace(
-            run_id=run_id,
-            previous_run_id=None,
-            slice_name=slice_name,
-            topology=topology,
-            run_root=run_root,
-            known_hosts=known_hosts,
-            r2lab_runner=r2lab_runner,
-            cluster_runner=cluster_runner,
-            timeout_seconds=min(timeout, 300),
-        )
     if not healthy:
         raise R2LabLiveReconciliationError("current Open5GS AMF/SMF/UPF set is not ready")
     if not networks_ready:
         missing = ", ".join(
-            name
-            for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS
-            if name not in ready_networks
+            name for name in REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS if name not in ready_networks
         )
         raise R2LabLiveReconciliationError(
             f"current physical Multus networks are missing: {missing}"
         )
-    if (
-        _namespace_owner(
+    try:
+        if namespace_owner(
             topology=topology,
-            known_hosts=known_hosts,
             runner=cluster_runner,
             timeout_seconds=min(timeout, 60),
-        )
-        != run_id
-    ):
-        raise R2LabLiveReconciliationError("current Open5GS namespace ownership is not proven")
+        ) != run_id:
+            raise R2LabLiveReconciliationError("current Open5GS namespace ownership is not proven")
+    except R2LabLiveClusterError as exc:
+        raise R2LabLiveReconciliationError(str(exc)) from exc
+
     _report(progress, "resume-foundation: current Kubernetes/Open5GS foundation proven")
     return bool(kubernetes_reconciled or open5gs_reconciled or ownership_changed)
 
@@ -294,22 +260,18 @@ def _n2(
         raise R2LabLiveReconciliationError("N2 resume proof counts are invalid")
 
     try:
-        if verify_current_n3xx_n2(
+        if verify_n2(
             run_id=run_id,
-            known_hosts=known_hosts,
             run_root=run_root,
             runner=cluster_runner,
             timeout_seconds=min(timeout, 60),
         ):
             _report(progress, "resume-gNB/N2: current path already proven")
             return False
-    except R2LabPhysicalUeError:
+    except R2LabLiveClusterError:
         pass
 
-    _report(
-        progress,
-        "resume-gNB/N2: converging physical gNB through pinned 5g-Ansible roles",
-    )
+    _report(progress, "resume-gNB/N2: converging physical gNB through pinned 5g-Ansible roles")
     try:
         converge_physical_gnb(
             run_id=run_id,
@@ -329,21 +291,17 @@ def _n2(
     consecutive = 0
     for attempt in range(1, total + 1):
         try:
-            proven = verify_current_n3xx_n2(
+            proven = verify_n2(
                 run_id=run_id,
-                known_hosts=known_hosts,
                 run_root=run_root,
                 runner=cluster_runner,
                 timeout_seconds=min(timeout, 60),
             )
-        except R2LabPhysicalUeError:
+        except R2LabLiveClusterError:
             proven = False
         consecutive = consecutive + 1 if proven else 0
         if consecutive >= n2_attempts:
-            _report(
-                progress,
-                f"resume-gNB/N2: stable N2 proven ({attempt} observations)",
-            )
+            _report(progress, f"resume-gNB/N2: stable N2 proven ({attempt} observations)")
             return True
         if attempt < total:
             time.sleep(n2_interval)
@@ -368,12 +326,22 @@ def _synthetic_gnb_boundary(evidence: PhysicalRunEvidence) -> PhysicalRunEvidenc
     )
 
 
+def _pass_current_ue_path(state: PhysicalRunEvidence, ue: str) -> PhysicalRunEvidence:
+    source = f"current-{ue}:wwan0:open5gs-upf"
+    for stage, detail in (
+        (PhysicalAcceptanceStage.CELL_ACQUISITION, "nr-sa-functional"),
+        (PhysicalAcceptanceStage.REGISTRATION, "core-path-registered"),
+        (PhysicalAcceptanceStage.PDU_SESSION, "ipv4-upf-reachable"),
+    ):
+        if state.acceptance.next_stage is stage:
+            state = state.pass_stage(stage, source=f"{source}:{detail}")
+    return state
+
+
 def _ue_path(
     *,
     evidence: PhysicalRunEvidence,
     slice_name: str,
-    owner: str,
-    allocation_id: str | None,
     known_hosts: Path,
     lock_path: Path,
     deps_root: Path,
@@ -383,39 +351,83 @@ def _ue_path(
     timeout: int,
     progress: TextIO | None,
 ) -> tuple[str, bool]:
-    state, activation = activate_physical_ue(
-        evidence=_synthetic_gnb_boundary(evidence),
+    del known_hosts
+    topology = load_topology(run_root=run_root, run_id=evidence.run_id).validate()
+    try:
+        if not verify_n2(
+            run_id=evidence.run_id,
+            run_root=run_root,
+            runner=cluster_runner,
+            timeout_seconds=min(timeout, 60),
+        ):
+            raise R2LabLiveReconciliationError("current singleton gNB/N2 path is not proven")
+    except R2LabLiveClusterError as exc:
+        raise R2LabLiveReconciliationError(str(exc)) from exc
+
+    state = _synthetic_gnb_boundary(evidence)
+    if state.acceptance.next_stage is PhysicalAcceptanceStage.UE_MANAGEMENT:
+        state = state.pass_stage(
+            PhysicalAcceptanceStage.UE_MANAGEMENT,
+            source=f"current-management:{topology.ue}:{topology.ue_profile.mode}",
+        )
+
+    runtime = observe_functional_ue_runtime(
+        run_id=evidence.run_id,
         slice_name=slice_name,
-        owner=owner,
-        allocation_id=allocation_id,
-        known_hosts=known_hosts,
-        lock_path=lock_path,
-        deps_root=deps_root,
         run_root=run_root,
-        r2lab_runner=r2lab_runner,
-        cluster_runner=cluster_runner,
-        timeout_seconds=min(timeout, 300),
-        progress=progress,
+        runner=r2lab_runner,
     )
+    status = "already-ready"
+    if not runtime.pdu_session_established:
+        try:
+            execute_selected_ue_role(
+                run_id=evidence.run_id,
+                slice_name=slice_name,
+                topology=topology,
+                action="connect",
+                lock_path=lock_path,
+                deps_root=deps_root,
+                run_root=run_root,
+                timeout_seconds=min(timeout, 180),
+                progress=progress,
+            )
+        except R2LabUeAnsibleError as exc:
+            raise R2LabLiveReconciliationError(str(exc)) from exc
+        deadline = time.monotonic() + min(UE_POSTCONDITION_SECONDS, max(10, int(timeout)))
+        while True:
+            runtime = observe_functional_ue_runtime(
+                run_id=evidence.run_id,
+                slice_name=slice_name,
+                run_root=run_root,
+                runner=r2lab_runner,
+            )
+            if runtime.pdu_session_established or time.monotonic() >= deadline:
+                break
+            time.sleep(UE_POLL_SECONDS)
+        status = "activated"
+
+    if not runtime.pdu_session_established:
+        raise R2LabLiveReconciliationError("current UE registration/PDU path was not re-established")
+    state = _pass_current_ue_path(state, topology.ue)
     if state.acceptance.next_stage is not PhysicalAcceptanceStage.USER_PLANE:
         raise R2LabLiveReconciliationError("current UE registration/PDU path was not re-established")
-    topology = load_topology(run_root=run_root, run_id=evidence.run_id).validate()
-    proof = prove_physical_user_plane(
-        evidence=state,
-        slice_name=slice_name,
-        owner=owner,
-        allocation_id=allocation_id,
-        known_hosts=known_hosts,
-        peer=SUPPORTED_NODES[topology.ran_node].ip,
-        run_root=run_root,
-        r2lab_runner=r2lab_runner,
-        cluster_runner=cluster_runner,
-        timeout_seconds=min(timeout, 300),
-    )
+
+    try:
+        proof = prove_user_plane(
+            evidence=state,
+            slice_name=slice_name,
+            peer=SUPPORTED_NODES[topology.ran_node].ip,
+            run_root=run_root,
+            r2lab_runner=r2lab_runner,
+            cluster_runner=cluster_runner,
+            timeout_seconds=min(timeout, 300),
+        )
+    except (R2LabPhysicalUeError, R2LabLiveClusterError) as exc:
+        raise R2LabLiveReconciliationError(str(exc)) from exc
     if not proof.probe.proven:
         raise R2LabLiveReconciliationError("current physical user plane was not re-proven")
     _report(progress, "resume-UE path: registration, PDU and user plane re-proven")
-    return activation.status, True
+    return status, True
 
 
 def reconcile_live_resume(
@@ -442,13 +454,8 @@ def reconcile_live_resume(
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.acceptance.accepted:
         raise R2LabLiveReconciliationError("accepted physical run does not require live resume")
-    if (
-        evidence.acceptance.outcome_for(PhysicalAcceptanceStage.OPEN5GS)
-        is not AcceptanceOutcome.PASSED
-    ):
-        raise R2LabLiveReconciliationError(
-            "live resume requires previously accepted Open5GS history"
-        )
+    if evidence.acceptance.outcome_for(PhysicalAcceptanceStage.OPEN5GS) is not AcceptanceOutcome.PASSED:
+        raise R2LabLiveReconciliationError("live resume requires previously accepted Open5GS history")
 
     _report(progress, "resume: reconciling current state behind historical acceptance")
     foundation_reconciled = _foundation(
@@ -460,16 +467,13 @@ def reconcile_live_resume(
         lock_path=lock_path,
         deps_root=deps_root,
         run_root=run_root,
-        r2lab_runner=r2lab_runner,
         cluster_runner=cluster_runner,
         timeout=timeout_seconds,
         progress=progress,
     )
+
     gnb_restarted = False
-    if (
-        evidence.acceptance.outcome_for(PhysicalAcceptanceStage.GNB_N2)
-        is AcceptanceOutcome.PASSED
-    ):
+    if evidence.acceptance.outcome_for(PhysicalAcceptanceStage.GNB_N2) is AcceptanceOutcome.PASSED:
         gnb_restarted = _n2(
             run_id=run_id,
             slice_name=slice_name,
@@ -489,15 +493,10 @@ def reconcile_live_resume(
 
     ue_status = None
     user_plane_proven = False
-    if (
-        evidence.acceptance.outcome_for(PhysicalAcceptanceStage.USER_PLANE)
-        is AcceptanceOutcome.PASSED
-    ):
+    if evidence.acceptance.outcome_for(PhysicalAcceptanceStage.USER_PLANE) is AcceptanceOutcome.PASSED:
         ue_status, user_plane_proven = _ue_path(
             evidence=evidence,
             slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
             known_hosts=known_hosts,
             lock_path=lock_path,
             deps_root=deps_root,
