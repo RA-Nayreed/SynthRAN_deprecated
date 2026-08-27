@@ -32,6 +32,7 @@ from synthran.r2lab.foundation_topology import R2LabTopologyFoundationError, acc
 from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology, R2LabHardwareError
 from synthran.r2lab.lifecycle import R2LabPhysicalLifecycleError, continue_physical_path, run_physical_workload
 from synthran.r2lab.n3xx import R2LabN3xxError, stage_n3xx_gnb, start_n3xx_gnb, stop_n3xx_gnb
+from synthran.r2lab.reconciliation import R2LabLiveReconciliationError, reconcile_live_resume
 from synthran.r2lab.resources import (
     R2LabTopologyResourceError,
     load_topology,
@@ -385,8 +386,9 @@ def _run_r2lab(
 
     run_root = args.r2lab_run_root.expanduser().resolve()
     run_directory = run_root / args.run_id
+    resumed_physical_run = run_directory.exists()
 
-    if run_directory.exists():
+    if resumed_physical_run:
         progress.start("resources", f"reconcile existing {topology.radio} + {topology.ue} claim")
         stored = load_topology(run_root=run_root, run_id=args.run_id).validate()
         if stored != topology:
@@ -419,6 +421,33 @@ def _run_r2lab(
 
     evidence_path = run_directory / "physical-run.json"
     evidence = PhysicalRunEvidence.read_json(evidence_path) if evidence_path.is_file() else None
+    live_resume_status: Mapping[str, object] | None = None
+    if (
+        resumed_physical_run
+        and evidence is not None
+        and not evidence.acceptance.accepted
+        and evidence.acceptance.outcome_for(PhysicalAcceptanceStage.OPEN5GS).value == "passed"
+    ):
+        progress.start("live resume", "re-prove current foundation, gNB/N2 and UE path")
+        live_resume = reconcile_live_resume(
+            run_id=args.run_id,
+            slice_name=slice_name,
+            owner=owner,
+            allocation_id=allocation_id,
+            known_hosts=known_hosts,
+            lock_path=args.lock,
+            deps_root=args.deps_root,
+            run_root=run_root,
+            timeout_seconds=args.timeout,
+            n2_attempts=args.n2_attempts,
+            n2_convergence_attempts=args.n2_convergence_attempts,
+            n2_interval=args.n2_interval,
+            progress=progress.child_stream,
+        )
+        allocation_id = live_resume.allocation_id
+        live_resume_status = live_resume.to_dict()
+        progress.resumed("live resume", "current physical prerequisites re-proven")
+
     if evidence is None or (
         evidence.acceptance.outcome_for(PhysicalAcceptanceStage.OPEN5GS).value != "passed"
     ):
@@ -451,7 +480,7 @@ def _run_r2lab(
             "status": "resumed",
             "next_stage": evidence.acceptance.next_stage.value if evidence.acceptance.next_stage else None,
         }
-        progress.resumed("foundation", "accepted foundation evidence present")
+        progress.resumed("foundation", "accepted foundation evidence present; current state re-proven")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.staged is None:
@@ -471,7 +500,7 @@ def _run_r2lab(
         progress.done("gNB staging", "artifact rendered and network attachments validated")
     else:
         staging_status = {"status": "resumed-staged"}
-        progress.resumed("gNB staging", "staged artifact already accepted")
+        progress.resumed("gNB staging", "immutable staged artifact retained")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.gnb_start is None:
@@ -492,7 +521,7 @@ def _run_r2lab(
         progress.done("gNB/N2", "stable N2 established")
     else:
         gnb_status = {"status": "resumed-gnb-n2"}
-        progress.resumed("gNB/N2", "accepted gNB/N2 evidence present")
+        progress.resumed("gNB/N2", "historical gNB/N2 evidence retained; current N2 re-proven")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     peer = SUPPORTED_NODES[topology.ran_node].ip
@@ -528,7 +557,7 @@ def _run_r2lab(
         progress.done("UE path", "registration, PDU and user-plane proof accepted")
     else:
         path_status = {"status": "resumed", "measurement_peer": peer}
-        progress.resumed("UE path", "accepted path evidence present")
+        progress.resumed("UE path", "historical path evidence retained; current path re-proven")
 
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.acceptance.next_stage is PhysicalAcceptanceStage.WORKLOAD:
@@ -607,6 +636,7 @@ def _run_r2lab(
         "measurement_peer": peer,
         "stages": {
             "resources": resource_status,
+            "live_resume": dict(live_resume_status) if live_resume_status is not None else None,
             "foundation": dict(foundation_status),
             "gnb_staging": dict(staging_status),
             "gnb_n2": dict(gnb_status),
@@ -901,6 +931,7 @@ class RunCommandAdapter:
             ResourcePreparationError,
             R2LabAcceptanceError,
             R2LabHardwareError,
+            R2LabLiveReconciliationError,
             R2LabN3xxError,
             R2LabPhysicalLifecycleError,
             R2LabPhysicalUeError,
