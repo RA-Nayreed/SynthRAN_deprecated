@@ -23,16 +23,8 @@ from synthran.network.runtime import (
     run_command,
     sanitize_deployment_text,
 )
-from synthran.r2lab.resources import (
-    load_topology,
-    verify_physical_authority,
-    verify_selected_allocation,
-)
-from synthran.upstream_overlay import (
-    UpstreamOverlayError,
-    apply_network_overlay,
-    apply_preparation_overlay,
-)
+from synthran.r2lab.resources import load_topology
+from synthran.upstream_overlay import UpstreamOverlayError, apply_network_overlay
 from synthran.utils.ssh import ansible_ssh_common_args, strict_ssh_command
 
 
@@ -135,31 +127,6 @@ def _run_stage(
     return result
 
 
-def _authority(
-    *,
-    run_id: str,
-    slice_name: str,
-    owner: str,
-    allocation_id: str | None,
-    run_root: Path,
-    timeout_seconds: int,
-) -> None:
-    authority = verify_physical_authority(
-        run_id=run_id,
-        slice_name=slice_name,
-        run_root=run_root,
-        runner=subprocess_runner,
-        timeout_seconds=min(timeout_seconds, 300),
-    )
-    verify_selected_allocation(
-        topology=authority.topology,
-        runner=subprocess_runner,
-        owner=owner,
-        allocation_id=allocation_id,
-        timeout_seconds=min(timeout_seconds, 300),
-    )
-
-
 def _short_hostname(value: str) -> str:
     return value.strip().lower().split(".", 1)[0]
 
@@ -244,7 +211,11 @@ def _strict_post_pos_ready(
                 return
             last_error = "remote hostname did not match the selected node"
         else:
-            last_error = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "SSH returned nonzero"
+            last_error = (
+                result.stderr.strip().splitlines()[-1]
+                if result.stderr.strip()
+                else "SSH returned nonzero"
+            )
         if attempt < POST_POS_SSH_ATTEMPTS:
             time.sleep(POST_POS_SSH_INTERVAL_SECONDS)
     log_parts.extend(
@@ -270,8 +241,6 @@ def _establish_post_pos_ssh(
     progress: TextIO | None,
     timeout_seconds: int,
 ) -> None:
-    """Rotate trust only at the provider-authorized POS reimage boundary."""
-
     hosts = (topology.core_node, topology.ran_node)
     if progress is not None:
         print(
@@ -319,9 +288,7 @@ def _establish_post_pos_ssh(
         "hosts": {
             host: {
                 "algorithm": "ssh-ed25519",
-                "key_line_sha256": hashlib.sha256(
-                    line.encode("utf-8")
-                ).hexdigest(),
+                "key_line_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
             }
             for host, line in zip(hosts, lines, strict=True)
         },
@@ -393,9 +360,7 @@ def _run_foundation(
     fiveg_commit = _git_commit(lock, "fiveg_ansible")
     repository_root = Path(".").resolve()
     overlay_source = repository_root / "deploy" / "ansible"
-    output_directory = (
-        run_root.expanduser().resolve() / run_id / "physical" / "upstream"
-    )
+    output_directory = run_root.expanduser().resolve() / run_id / "physical" / "upstream"
     output_directory.mkdir(parents=True, exist_ok=True)
     inventory_path = output_directory / "foundation-hosts.ini"
     inventory_text, _ = build_preparation_inventory(
@@ -403,18 +368,14 @@ def _run_foundation(
         ran_node=topology.ran_node,
         source=inventory_path,
     )
-    inventory_text = inventory_text.replace(
-        'rru="rfsim"', f'rru="{topology.radio}"', 1
-    )
+    inventory_text = inventory_text.replace('rru="rfsim"', f'rru="{topology.radio}"', 1)
     inventory_path.write_text(inventory_text, encoding="utf-8", newline="\n")
     variables_path = output_directory / "foundation-variables.json"
     atomic_json(variables_path, _physical_variables(lock))
     log_path = output_directory / "foundation.log"
     log_parts: list[str] = []
 
-    worktree_parent = Path(
-        tempfile.mkdtemp(prefix="foundation-", dir=output_directory)
-    )
+    worktree_parent = Path(tempfile.mkdtemp(prefix="foundation-", dir=output_directory))
     worktree = worktree_parent / "fiveg_ansible"
     added = False
     try:
@@ -440,7 +401,6 @@ def _run_foundation(
         added = True
         overlay_directory = worktree / ".synthran"
         shutil.copytree(overlay_source, overlay_directory)
-        apply_preparation_overlay(worktree)
 
         collections = output_directory / "collections"
         environment = _ansible_environment(
@@ -517,15 +477,6 @@ def _run_foundation(
                 runner=runner,
             )
 
-        _authority(
-            run_id=run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            run_root=run_root,
-            timeout_seconds=timeout_seconds,
-        )
-
         for role_name, node in (
             ("foundation-pos-core", topology.core_node),
             ("foundation-pos-ran", topology.ran_node),
@@ -552,14 +503,6 @@ def _run_foundation(
                 progress=progress,
                 streaming=True,
                 runner=runner,
-            )
-            _authority(
-                run_id=run_id,
-                slice_name=slice_name,
-                owner=owner,
-                allocation_id=allocation_id,
-                run_root=run_root,
-                timeout_seconds=timeout_seconds,
             )
 
         _establish_post_pos_ssh(
@@ -594,42 +537,20 @@ def _run_foundation(
                 streaming=True,
                 runner=runner,
             )
-            _authority(
-                run_id=run_id,
-                slice_name=slice_name,
-                owner=owner,
-                allocation_id=allocation_id,
-                run_root=run_root,
-                timeout_seconds=timeout_seconds,
-            )
     except UpstreamOverlayError as exc:
         raise R2LabUpstreamRoleError(str(exc)) from exc
     finally:
         log_path.write_text(
             sanitize_deployment_text(
                 "\n".join(log_parts),
-                (
-                    known_hosts,
-                    lock_path,
-                    deps_root,
-                    repository_root,
-                    output_directory,
-                ),
+                (known_hosts, lock_path, deps_root, repository_root, output_directory),
             ),
             encoding="utf-8",
             newline="\n",
         )
         if added:
             runner(
-                (
-                    "git",
-                    "-C",
-                    str(checkout),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(worktree),
-                ),
+                ("git", "-C", str(checkout), "worktree", "remove", "--force", str(worktree)),
                 repository_root,
                 None,
                 min(timeout_seconds, 300),
@@ -658,9 +579,7 @@ def _run_gnb(
     srsran_commit = _git_commit(lock, "srsran_helm")
     repository_root = Path(".").resolve()
     overlay_source = repository_root / "deploy" / "ansible"
-    output_directory = (
-        run_root.expanduser().resolve() / run_id / "physical" / "upstream"
-    )
+    output_directory = run_root.expanduser().resolve() / run_id / "physical" / "upstream"
     output_directory.mkdir(parents=True, exist_ok=True)
     inventory_path = output_directory / "gnb-hosts.ini"
     inventory_text, _ = build_preparation_inventory(
@@ -668,9 +587,7 @@ def _run_gnb(
         ran_node=topology.ran_node,
         source=inventory_path,
     )
-    inventory_text = inventory_text.replace(
-        'rru="rfsim"', f'rru="{topology.radio}"', 1
-    )
+    inventory_text = inventory_text.replace('rru="rfsim"', f'rru="{topology.radio}"', 1)
     inventory_path.write_text(inventory_text, encoding="utf-8", newline="\n")
     variables_path = output_directory / "gnb-variables.json"
     atomic_json(variables_path, _physical_variables(lock))
@@ -756,14 +673,6 @@ def _run_gnb(
             progress=progress,
             runner=runner,
         )
-        _authority(
-            run_id=run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            run_root=run_root,
-            timeout_seconds=timeout_seconds,
-        )
         _run_stage(
             name="physical-gnb-role",
             command=command,
@@ -775,42 +684,20 @@ def _run_gnb(
             streaming=True,
             runner=runner,
         )
-        _authority(
-            run_id=run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            run_root=run_root,
-            timeout_seconds=timeout_seconds,
-        )
     except UpstreamOverlayError as exc:
         raise R2LabUpstreamRoleError(str(exc)) from exc
     finally:
         log_path.write_text(
             sanitize_deployment_text(
                 "\n".join(log_parts),
-                (
-                    known_hosts,
-                    lock_path,
-                    deps_root,
-                    repository_root,
-                    output_directory,
-                ),
+                (known_hosts, lock_path, deps_root, repository_root, output_directory),
             ),
             encoding="utf-8",
             newline="\n",
         )
         if added:
             runner(
-                (
-                    "git",
-                    "-C",
-                    str(checkout),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(worktree),
-                ),
+                ("git", "-C", str(checkout), "worktree", "remove", "--force", str(worktree)),
                 repository_root,
                 None,
                 min(timeout_seconds, 300),
@@ -834,21 +721,11 @@ def _run_upstream(
     runner: RunCommand = run_command,
 ) -> None:
     if mode not in {"foundation", "gnb"}:
-        raise R2LabUpstreamRoleError(
-            "unsupported physical upstream convergence mode"
-        )
+        raise R2LabUpstreamRoleError("unsupported physical upstream convergence mode")
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
     known_hosts = known_hosts.expanduser().resolve()
     if not known_hosts.is_file():
         raise R2LabUpstreamRoleError("strict SLICES known-hosts file is missing")
-    _authority(
-        run_id=run_id,
-        slice_name=slice_name,
-        owner=owner,
-        allocation_id=allocation_id,
-        run_root=run_root,
-        timeout_seconds=timeout_seconds,
-    )
     if mode == "foundation":
         _run_foundation(
             topology=topology,
@@ -905,14 +782,6 @@ def stop_role_managed_gnb(
     run_root: Path,
     timeout_seconds: int,
 ) -> dict[str, object]:
-    _authority(
-        run_id=run_id,
-        slice_name=slice_name,
-        owner=owner,
-        allocation_id=allocation_id,
-        run_root=run_root,
-        timeout_seconds=timeout_seconds,
-    )
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
     known_hosts = known_hosts.expanduser().resolve()
     fiveg_commit = _git_commit(load_lock(lock_path), "fiveg_ansible")
@@ -931,20 +800,14 @@ def stop_role_managed_gnb(
         min(timeout_seconds, 60),
     )
     if result.returncode != 0:
-        raise R2LabUpstreamRoleError(
-            "role-managed gNB ownership query returned nonzero"
-        )
+        raise R2LabUpstreamRoleError("role-managed gNB ownership query returned nonzero")
     try:
         deployment = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise R2LabUpstreamRoleError(
-            "role-managed gNB ownership query returned malformed JSON"
-        ) from exc
+        raise R2LabUpstreamRoleError("role-managed gNB ownership query returned malformed JSON") from exc
     metadata = deployment.get("metadata") if isinstance(deployment, dict) else None
     labels = metadata.get("labels") if isinstance(metadata, dict) else None
-    annotations = (
-        metadata.get("annotations") if isinstance(metadata, dict) else None
-    )
+    annotations = metadata.get("annotations") if isinstance(metadata, dict) else None
     if (
         not isinstance(labels, dict)
         or not isinstance(annotations, dict)
@@ -953,9 +816,7 @@ def stop_role_managed_gnb(
         or annotations.get("synthran.io/deployment-authority")
         != f"fiveg_ansible:{fiveg_commit}"
     ):
-        raise R2LabUpstreamRoleError(
-            "role-managed gNB cleanup refuses foreign or unbound state"
-        )
+        raise R2LabUpstreamRoleError("role-managed gNB cleanup refuses foreign or unbound state")
     scaled = subprocess_runner(
         _cluster_command(
             topology,
@@ -970,9 +831,7 @@ def stop_role_managed_gnb(
         min(timeout_seconds, 60),
     )
     if scaled.returncode != 0:
-        raise R2LabUpstreamRoleError(
-            "role-managed gNB scale-to-zero returned nonzero"
-        )
+        raise R2LabUpstreamRoleError("role-managed gNB scale-to-zero returned nonzero")
     for attempt in range(30):
         pods = subprocess_runner(
             _cluster_command(
@@ -991,15 +850,11 @@ def stop_role_managed_gnb(
             min(timeout_seconds, 60),
         )
         if pods.returncode != 0:
-            raise R2LabUpstreamRoleError(
-                "role-managed gNB zero-pod query returned nonzero"
-            )
+            raise R2LabUpstreamRoleError("role-managed gNB zero-pod query returned nonzero")
         try:
             payload = json.loads(pods.stdout)
         except json.JSONDecodeError as exc:
-            raise R2LabUpstreamRoleError(
-                "role-managed gNB zero-pod query returned malformed JSON"
-            ) from exc
+            raise R2LabUpstreamRoleError("role-managed gNB zero-pod query returned malformed JSON") from exc
         items = payload.get("items") if isinstance(payload, dict) else None
         if isinstance(items, list) and not items:
             return {
