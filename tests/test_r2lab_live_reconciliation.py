@@ -65,16 +65,10 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         historical = _historical_path()
         synthetic = _synthetic_gnb_boundary(historical)
 
-        self.assertEqual(
-            PhysicalAcceptanceStage.UE_MANAGEMENT,
-            synthetic.acceptance.next_stage,
-        )
+        self.assertEqual(PhysicalAcceptanceStage.UE_MANAGEMENT, synthetic.acceptance.next_stage)
         self.assertEqual(historical.staged, synthetic.staged)
         self.assertEqual(historical.gnb_start, synthetic.gnb_start)
-        self.assertEqual(
-            PhysicalAcceptanceStage.WORKLOAD,
-            historical.acceptance.next_stage,
-        )
+        self.assertEqual(PhysicalAcceptanceStage.WORKLOAD, historical.acceptance.next_stage)
         self.assertEqual(5, len(synthetic.acceptance.evidence))
         self.assertEqual(10, len(historical.acceptance.evidence))
 
@@ -116,11 +110,9 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertIn("synthran.io/deployment-authority", playbook)
 
     def test_foundation_is_dedicated_and_stops_before_5g_roles(self) -> None:
-        source = Path("synthran/r2lab/upstream_roles.py").read_text(encoding="utf-8")
         playbook = Path("deploy/ansible/r2lab-foundation.yml").read_text(encoding="utf-8")
+        source = Path("synthran/r2lab/foundation_convergence.py").read_text(encoding="utf-8")
 
-        self.assertIn('"foundation-pos-core"', source)
-        self.assertIn('"foundation-pos-ran"', source)
         self.assertIn('str(overlay_directory / "r2lab-foundation.yml")', source)
         self.assertNotIn('str(worktree / "playbooks" / "deploy.yml")', source)
         self.assertIn("role: setup/k8s/cluster_create", playbook)
@@ -130,19 +122,39 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertNotIn("5g/srsRAN", playbook)
         self.assertNotIn("ueransim", playbook.lower())
 
-    def test_sopnode_ssh_is_left_to_upstream_ansible_and_normal_openssh(self) -> None:
-        source = Path("synthran/r2lab/upstream_roles.py").read_text(encoding="utf-8")
+    def test_pos_is_only_used_for_nodes_upstream_ansible_cannot_reach(self) -> None:
+        source = Path("synthran/r2lab/foundation_convergence.py").read_text(encoding="utf-8")
 
-        self.assertNotIn("strict_ssh_command", source)
-        self.assertNotIn("ansible_ssh_common_args", source)
-        self.assertNotIn("ssh-keyscan", source)
-        self.assertNotIn("post-pos-ssh", source)
-        self.assertNotIn("pre-pos-known-hosts", source)
-        self.assertNotIn("POST_POS_SSH_ATTEMPTS", source)
-        self.assertNotIn("ANSIBLE_SSH_ARGS", source)
-        self.assertNotIn("ANSIBLE_HOST_KEY_CHECKING", source)
-        self.assertNotIn("-F /dev/null", source)
+        reachability = source.index("_ansible_reachable(")
+        unreachable = source.index("unreachable = [")
+        pos_loop = source.index("for node in unreachable:")
+        cluster = source.index('(\"foundation-cluster\", cluster_command)')
+        self.assertLess(reachability, unreachable)
+        self.assertLess(unreachable, pos_loop)
+        self.assertLess(pos_loop, cluster)
+        self.assertIn("foundation-pos: skipped; selected sopnodes already reachable through upstream Ansible", source)
+        self.assertIn("ansible.builtin.ping", source)
+
+    def test_active_live_cluster_uses_normal_openssh_without_synthran_ssh_policy(self) -> None:
+        source = Path("synthran/r2lab/live_cluster.py").read_text(encoding="utf-8")
+        reconciliation = Path("synthran/r2lab/reconciliation.py").read_text(encoding="utf-8")
+
         self.assertIn('return ("ssh", f"root@{topology.core_node}", shlex.join(remote))', source)
+        for forbidden in (
+            "strict_ssh_command",
+            "ansible_ssh_common_args",
+            "isolated_config",
+            "ssh-keyscan",
+            "ANSIBLE_SSH_ARGS",
+            "ANSIBLE_HOST_KEY_CHECKING",
+            "-F /dev/null",
+            "UserKnownHostsFile",
+            "StrictHostKeyChecking",
+        ):
+            self.assertNotIn(forbidden, source)
+        self.assertNotIn("foundation_topology", reconciliation)
+        self.assertNotIn("verify_current_n3xx_n2", reconciliation)
+        self.assertNotIn("prove_physical_user_plane", reconciliation)
 
 
 if __name__ == "__main__":
