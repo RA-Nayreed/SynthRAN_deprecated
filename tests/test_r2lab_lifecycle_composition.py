@@ -80,7 +80,7 @@ class PhysicalPathCompositionTests(unittest.TestCase):
         self.assertIs(r2lab_runner, user_plane_kwargs["r2lab_runner"])
         self.assertIs(cluster_runner, user_plane_kwargs["cluster_runner"])
         after_user_plane.write_json.assert_called_once_with(
-            run_root / "r2lab-run-001" / "physical-run.json"
+            run_root.resolve() / "r2lab-run-001" / "physical-run.json"
         )
         write_json.assert_called_once()
 
