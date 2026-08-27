@@ -36,8 +36,8 @@ from synthran.r2lab.resources import (
     R2LabTopologyResourceError,
     load_topology,
     prepare_physical_resources,
+    reconcile_physical_resources,
     release_physical_resources,
-    verify_physical_authority,
 )
 from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.slices_controller import SlicesControllerError
@@ -387,18 +387,21 @@ def _run_r2lab(
     run_directory = run_root / args.run_id
 
     if run_directory.exists():
-        progress.start("resources", f"verify existing {topology.radio} + {topology.ue} claim")
+        progress.start("resources", f"reconcile existing {topology.radio} + {topology.ue} claim")
         stored = load_topology(run_root=run_root, run_id=args.run_id).validate()
         if stored != topology:
             raise BackendError("existing physical run topology does not match requested run")
-        verify_physical_authority(
+        reconcile_physical_resources(
             run_id=args.run_id,
             slice_name=slice_name,
+            lock_path=args.lock,
+            deps_root=args.deps_root,
             run_root=run_root,
             timeout_seconds=min(args.timeout, 300),
+            progress=progress.child_stream,
         )
-        resource_status = "resumed"
-        progress.resumed("resources", "existing physical authority verified")
+        resource_status = "reconciled"
+        progress.resumed("resources", "existing physical authority reconciled")
     else:
         progress.start("resources", f"prepare {topology.radio} + {topology.ue}")
         prepare_physical_resources(
