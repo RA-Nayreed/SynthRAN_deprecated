@@ -25,11 +25,7 @@ from synthran.r2lab.foundation_topology import (
     _ready_nodes,
     reconcile_open5gs_topology,
 )
-from synthran.r2lab.resources import (
-    claim_selected_allocation,
-    load_topology,
-    verify_physical_authority,
-)
+from synthran.r2lab.resources import load_topology, verify_physical_authority
 from synthran.r2lab.ue import (
     R2LabPhysicalUeError,
     prove_physical_user_plane,
@@ -55,7 +51,7 @@ class R2LabLiveReconciliationError(RuntimeError):
 @dataclass(frozen=True)
 class LiveResumeResult:
     run_id: str
-    allocation_id: str
+    allocation_id: str | None
     foundation_reconciled: bool
     gnb_restarted: bool
     ue_status: str | None
@@ -116,19 +112,8 @@ def _foundation(
     cluster_runner: Runner,
     timeout: int,
     progress: TextIO | None,
-) -> tuple[str, bool]:
+) -> bool:
     topology = load_topology(run_root=run_root, run_id=run_id).validate()
-    allocation = claim_selected_allocation(
-        run_id=run_id,
-        slice_name=slice_name,
-        topology=topology,
-        r2lab_runner=r2lab_runner,
-        allocation_runner=cluster_runner,
-        owner=owner,
-        allocation_id=allocation_id,
-        timeout_seconds=min(timeout, 300),
-        run_root=run_root,
-    )
     verify_physical_authority(
         run_id=run_id,
         slice_name=slice_name,
@@ -153,7 +138,7 @@ def _foundation(
                 run_id=run_id,
                 slice_name=slice_name,
                 owner=owner,
-                allocation_id=allocation,
+                allocation_id=allocation_id,
                 known_hosts=known_hosts,
                 lock_path=lock_path,
                 deps_root=deps_root,
@@ -182,9 +167,7 @@ def _foundation(
         timeout_seconds=min(timeout, 60),
     )
     if current_owner not in {None, run_id}:
-        raise R2LabLiveReconciliationError(
-            "current Open5GS namespace belongs to another run"
-        )
+        raise R2LabLiveReconciliationError("current Open5GS namespace belongs to another run")
 
     healthy = False
     networks_ready = False
@@ -265,9 +248,7 @@ def _foundation(
             timeout_seconds=min(timeout, 300),
         )
     if not healthy:
-        raise R2LabLiveReconciliationError(
-            "current Open5GS AMF/SMF/UPF set is not ready"
-        )
+        raise R2LabLiveReconciliationError("current Open5GS AMF/SMF/UPF set is not ready")
     if not networks_ready:
         missing = ", ".join(
             name
@@ -286,16 +267,9 @@ def _foundation(
         )
         != run_id
     ):
-        raise R2LabLiveReconciliationError(
-            "current Open5GS namespace ownership is not proven"
-        )
-    _report(
-        progress,
-        "resume-foundation: current Kubernetes/Open5GS foundation proven",
-    )
-    return allocation, bool(
-        kubernetes_reconciled or open5gs_reconciled or ownership_changed
-    )
+        raise R2LabLiveReconciliationError("current Open5GS namespace ownership is not proven")
+    _report(progress, "resume-foundation: current Kubernetes/Open5GS foundation proven")
+    return bool(kubernetes_reconciled or open5gs_reconciled or ownership_changed)
 
 
 def _n2(
@@ -303,7 +277,7 @@ def _n2(
     run_id: str,
     slice_name: str,
     owner: str,
-    allocation_id: str,
+    allocation_id: str | None,
     known_hosts: Path,
     lock_path: Path,
     deps_root: Path,
@@ -373,25 +347,19 @@ def _n2(
             return True
         if attempt < total:
             time.sleep(n2_interval)
-    raise R2LabLiveReconciliationError(
-        "stable current gNB/N2 proof was not re-established"
-    )
+    raise R2LabLiveReconciliationError("stable current gNB/N2 proof was not re-established")
 
 
 def _synthetic_gnb_boundary(evidence: PhysicalRunEvidence) -> PhysicalRunEvidence:
     if evidence.staged is None or evidence.gnb_start is None:
-        raise R2LabLiveReconciliationError(
-            "accepted UE history is missing immutable gNB evidence"
-        )
+        raise R2LabLiveReconciliationError("accepted UE history is missing immutable gNB evidence")
     prefix = evidence.acceptance.evidence[:5]
     if (
         len(prefix) != 5
         or prefix[-1].stage is not PhysicalAcceptanceStage.GNB_N2
         or any(item.outcome is not AcceptanceOutcome.PASSED for item in prefix)
     ):
-        raise R2LabLiveReconciliationError(
-            "accepted UE history has no valid gNB/N2 boundary"
-        )
+        raise R2LabLiveReconciliationError("accepted UE history has no valid gNB/N2 boundary")
     return PhysicalRunEvidence(
         run_id=evidence.run_id,
         staged=evidence.staged,
@@ -405,7 +373,7 @@ def _ue_path(
     evidence: PhysicalRunEvidence,
     slice_name: str,
     owner: str,
-    allocation_id: str,
+    allocation_id: str | None,
     known_hosts: Path,
     lock_path: Path,
     deps_root: Path,
@@ -430,9 +398,7 @@ def _ue_path(
         progress=progress,
     )
     if state.acceptance.next_stage is not PhysicalAcceptanceStage.USER_PLANE:
-        raise R2LabLiveReconciliationError(
-            "current UE registration/PDU path was not re-established"
-        )
+        raise R2LabLiveReconciliationError("current UE registration/PDU path was not re-established")
     topology = load_topology(run_root=run_root, run_id=evidence.run_id).validate()
     proof = prove_physical_user_plane(
         evidence=state,
@@ -447,13 +413,8 @@ def _ue_path(
         timeout_seconds=min(timeout, 300),
     )
     if not proof.probe.proven:
-        raise R2LabLiveReconciliationError(
-            "current physical user plane was not re-proven"
-        )
-    _report(
-        progress,
-        "resume-UE path: registration, PDU and user plane re-proven",
-    )
+        raise R2LabLiveReconciliationError("current physical user plane was not re-proven")
+    _report(progress, "resume-UE path: registration, PDU and user plane re-proven")
     return activation.status, True
 
 
@@ -480,9 +441,7 @@ def reconcile_live_resume(
     evidence_path = run_root / run_id / "physical-run.json"
     evidence = PhysicalRunEvidence.read_json(evidence_path)
     if evidence.acceptance.accepted:
-        raise R2LabLiveReconciliationError(
-            "accepted physical run does not require live resume"
-        )
+        raise R2LabLiveReconciliationError("accepted physical run does not require live resume")
     if (
         evidence.acceptance.outcome_for(PhysicalAcceptanceStage.OPEN5GS)
         is not AcceptanceOutcome.PASSED
@@ -492,7 +451,7 @@ def reconcile_live_resume(
         )
 
     _report(progress, "resume: reconciling current state behind historical acceptance")
-    allocation, foundation_reconciled = _foundation(
+    foundation_reconciled = _foundation(
         run_id=run_id,
         slice_name=slice_name,
         owner=owner,
@@ -515,7 +474,7 @@ def reconcile_live_resume(
             run_id=run_id,
             slice_name=slice_name,
             owner=owner,
-            allocation_id=allocation,
+            allocation_id=allocation_id,
             known_hosts=known_hosts,
             lock_path=lock_path,
             deps_root=deps_root,
@@ -538,7 +497,7 @@ def reconcile_live_resume(
             evidence=evidence,
             slice_name=slice_name,
             owner=owner,
-            allocation_id=allocation,
+            allocation_id=allocation_id,
             known_hosts=known_hosts,
             lock_path=lock_path,
             deps_root=deps_root,
@@ -555,9 +514,7 @@ def reconcile_live_resume(
         {
             "schema": RESUME_SCHEMA,
             "run_id": run_id,
-            "observed_at_utc": datetime.now(timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z"),
+            "observed_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "historical_acceptance_unchanged": True,
             "foundation_reconciled": foundation_reconciled,
             "gnb_restarted": gnb_restarted,
@@ -568,7 +525,7 @@ def reconcile_live_resume(
     _report(progress, "resume: current live prerequisites re-proven")
     return LiveResumeResult(
         run_id=run_id,
-        allocation_id=allocation,
+        allocation_id=allocation_id,
         foundation_reconciled=foundation_reconciled,
         gnb_restarted=gnb_restarted,
         ue_status=ue_status,
