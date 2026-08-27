@@ -121,7 +121,6 @@ class LiveResumeEvidenceTests(unittest.TestCase):
 
         self.assertIn('"foundation-pos-core"', source)
         self.assertIn('"foundation-pos-ran"', source)
-        self.assertIn("_establish_post_pos_ssh(", source)
         self.assertIn('str(overlay_directory / "r2lab-foundation.yml")', source)
         self.assertNotIn('str(worktree / "playbooks" / "deploy.yml")', source)
         self.assertIn("role: setup/k8s/cluster_create", playbook)
@@ -131,17 +130,19 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertNotIn("5g/srsRAN", playbook)
         self.assertNotIn("ueransim", playbook.lower())
 
-    def test_post_pos_barrier_rotates_trust_then_requires_strict_ssh(self) -> None:
+    def test_sopnode_ssh_is_left_to_upstream_ansible_and_normal_openssh(self) -> None:
         source = Path("synthran/r2lab/upstream_roles.py").read_text(encoding="utf-8")
 
-        self.assertIn('"ssh-keyscan", "-T", "5", "-t", "ed25519"', source)
-        self.assertIn("strict_ssh_command(", source)
-        self.assertIn("post-pos-ssh.json", source)
-        self.assertIn("pre-pos-known-hosts", source)
-        self.assertIn("POST_POS_SSH_ATTEMPTS = 36", source)
-        key_barrier = source.index("_establish_post_pos_ssh(")
-        cluster = source.index('("foundation-cluster", cluster_command)')
-        self.assertLess(key_barrier, cluster)
+        self.assertNotIn("strict_ssh_command", source)
+        self.assertNotIn("ansible_ssh_common_args", source)
+        self.assertNotIn("ssh-keyscan", source)
+        self.assertNotIn("post-pos-ssh", source)
+        self.assertNotIn("pre-pos-known-hosts", source)
+        self.assertNotIn("POST_POS_SSH_ATTEMPTS", source)
+        self.assertNotIn("ANSIBLE_SSH_ARGS", source)
+        self.assertNotIn("ANSIBLE_HOST_KEY_CHECKING", source)
+        self.assertNotIn("-F /dev/null", source)
+        self.assertIn('return ("ssh", f"root@{topology.core_node}", shlex.join(remote))', source)
 
 
 if __name__ == "__main__":
