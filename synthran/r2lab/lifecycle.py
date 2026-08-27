@@ -24,15 +24,12 @@ from synthran.r2lab.acceptance import (
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
 from synthran.r2lab.physical_inventory import load_physical_inventory
 from synthran.r2lab.resources import load_topology
-from synthran.r2lab.ue import (
-    R2LabPhysicalUeError,
-    execute_physical_workload_handoff,
-    prove_physical_user_plane,
-)
+from synthran.r2lab.ue import R2LabPhysicalUeError, prove_physical_user_plane
 from synthran.r2lab.ue_activation import (
     activate_physical_ue,
     recover_retryable_transport_failure,
 )
+from synthran.r2lab.workload_boundary import execute_physical_workload_handoff
 from synthran.utils.environment import scoped_environment
 
 
