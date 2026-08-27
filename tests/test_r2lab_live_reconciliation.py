@@ -140,7 +140,7 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertIn("pre-pos-known-hosts", source)
         self.assertIn("POST_POS_SSH_ATTEMPTS = 36", source)
         key_barrier = source.index("_establish_post_pos_ssh(")
-        cluster = source.index('(\"foundation-cluster\", cluster_command)')
+        cluster = source.index('("foundation-cluster", cluster_command)')
         self.assertLess(key_barrier, cluster)
 
 
