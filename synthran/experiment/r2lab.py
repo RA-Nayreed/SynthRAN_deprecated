@@ -235,6 +235,10 @@ def render_physical_central_objects(
             )
         },
     }
+    listener_probe = (
+        f"awk '$2 ~ /:{CENTRAL_PORT:04X}$/ && $4 == \"0A\" "
+        "{ found=1 } END { exit !found }' /proc/net/tcp"
+    )
     deployment = {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -283,9 +287,12 @@ def render_physical_central_objects(
                                 }
                             ],
                             "readinessProbe": {
-                                "tcpSocket": {"port": CENTRAL_PORT},
+                                "exec": {
+                                    "command": ["/bin/sh", "-ec", listener_probe],
+                                },
                                 "initialDelaySeconds": 2,
                                 "periodSeconds": 2,
+                                "timeoutSeconds": 2,
                             },
                         }
                     ],
@@ -678,14 +685,56 @@ def _save_physical_manifest(path: Path, payload: Mapping[str, object]) -> None:
 
 
 def _central_rollout(inventory: NetworkInventory, deployment: str) -> None:
-    _remote(
+    try:
+        _remote(
+            inventory,
+            "sh",
+            "-c",
+            "KUBECONFIG=/etc/kubernetes/admin.conf kubectl rollout status deployment/"
+            f"{shlex.quote(deployment)} -n {KUBERNETES_NAMESPACE} --timeout=180s",
+            label="physical central MQTT rollout",
+            timeout_seconds=200,
+        )
+    except Exception as exc:
+        diagnostics: list[str] = []
+        for label, command in (
+            (
+                "deployment",
+                "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get deployment/"
+                f"{shlex.quote(deployment)} -n {KUBERNETES_NAMESPACE} "
+                "-o jsonpath='{.status.readyReplicas}/{.status.replicas} ready; "
+                "{.status.unavailableReplicas} unavailable'",
+            ),
+            (
+                "broker-log",
+                "KUBECONFIG=/etc/kubernetes/admin.conf kubectl logs -n "
+                f"{KUBERNETES_NAMESPACE} deployment/{shlex.quote(deployment)} "
+                "-c central-mqtt --tail=40",
+            ),
+        ):
+            try:
+                output = _remote(
+                    inventory,
+                    "sh",
+                    "-c",
+                    command,
+                    label=f"physical central MQTT {label} diagnostics",
+                    timeout_seconds=20,
+                ).strip()
+            except Exception:
+                continue
+            if output:
+                diagnostics.append(f"{label}: {' '.join(output.split())[:800]}")
+        detail = "; ".join(diagnostics) or "no broker diagnostics were available"
+        raise R2LabPhysicalExperimentError(
+            f"physical central MQTT rollout failed: {detail}"
+        ) from exc
+
+    _wait_remote_tcp(
         inventory,
-        "sh",
-        "-c",
-        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl rollout status deployment/"
-        f"{shlex.quote(deployment)} -n {KUBERNETES_NAMESPACE} --timeout=180s",
-        label="physical central MQTT rollout",
-        timeout_seconds=200,
+        host="127.0.0.1",
+        port=CENTRAL_PORT,
+        timeout_seconds=15,
     )
 
 
@@ -1139,6 +1188,7 @@ def execute_physical_iot_workload(
         data_ready = True
     except Exception as exc:
         failure = str(exc)
+        report(f"physical workload failed: {failure}")
         report("physical workload failed; preserving run-scoped evidence")
     finally:
         for process in reversed(processes):
