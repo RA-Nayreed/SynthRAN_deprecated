@@ -27,6 +27,27 @@
         file: "{{ playbook_dir }}/../group_vars/all/5g_profile_default.yaml"
       no_log: true
 
+    - name: Observe any existing physical gNB Deployment
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: open5gs
+        name: srsran-gnb
+      environment:
+        KUBECONFIG: /root/.kube/config
+      register: synthran_existing_gnb
+
+    - name: Refuse to replace a foreign or unbound gNB Deployment
+      ansible.builtin.assert:
+        that:
+          - >-
+            synthran_existing_gnb.resources | length == 0 or
+            (
+              (synthran_existing_gnb.resources[0].metadata.labels | default({})).get('synthran.run/id') == synthran_run_id and
+              (synthran_existing_gnb.resources[0].metadata.annotations | default({})).get('synthran.io/run-id') == synthran_run_id
+            )
+        fail_msg: "existing physical gNB Deployment is not owned by this run"
+
   tasks:
     - name: Prepare the upstream physical srsRAN configuration
       ansible.builtin.include_role:
