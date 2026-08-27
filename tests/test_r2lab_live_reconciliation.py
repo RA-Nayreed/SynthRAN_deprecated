@@ -115,13 +115,33 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertIn("existing physical gNB Deployment is not owned by this run", playbook)
         self.assertIn("synthran.io/deployment-authority", playbook)
 
-    def test_foundation_reuses_guarded_upstream_preparation_boundary(self) -> None:
+    def test_foundation_is_dedicated_and_stops_before_5g_roles(self) -> None:
         source = Path("synthran/r2lab/upstream_roles.py").read_text(encoding="utf-8")
-        self.assertIn("apply_preparation_overlay(worktree)", source)
-        self.assertIn('"synthran_prepare_only=true"', source)
-        self.assertIn('str(worktree / "playbooks" / "deploy.yml")', source)
-        self.assertIn('"foundation-network"', source)
-        self.assertIn('"foundation-tools"', source)
+        playbook = Path("deploy/ansible/r2lab-foundation.yml").read_text(encoding="utf-8")
+
+        self.assertIn('"foundation-pos-core"', source)
+        self.assertIn('"foundation-pos-ran"', source)
+        self.assertIn("_establish_post_pos_ssh(", source)
+        self.assertIn('str(overlay_directory / "r2lab-foundation.yml")', source)
+        self.assertNotIn('str(worktree / "playbooks" / "deploy.yml")', source)
+        self.assertIn("role: setup/k8s/cluster_create", playbook)
+        self.assertIn("role: setup/k8s/cluster_join", playbook)
+        self.assertIn("role: setup/cni", playbook)
+        self.assertNotIn("5g/open5gs", playbook)
+        self.assertNotIn("5g/srsRAN", playbook)
+        self.assertNotIn("ueransim", playbook.lower())
+
+    def test_post_pos_barrier_rotates_trust_then_requires_strict_ssh(self) -> None:
+        source = Path("synthran/r2lab/upstream_roles.py").read_text(encoding="utf-8")
+
+        self.assertIn('"ssh-keyscan", "-T", "5", "-t", "ed25519"', source)
+        self.assertIn("strict_ssh_command(", source)
+        self.assertIn("post-pos-ssh.json", source)
+        self.assertIn("pre-pos-known-hosts", source)
+        self.assertIn("POST_POS_SSH_ATTEMPTS = 36", source)
+        key_barrier = source.index("_establish_post_pos_ssh(")
+        cluster = source.index('(\"foundation-cluster\", cluster_command)')
+        self.assertLess(key_barrier, cluster)
 
 
 if __name__ == "__main__":
