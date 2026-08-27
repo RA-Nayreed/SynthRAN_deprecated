@@ -31,6 +31,10 @@ from synthran.r2lab.ue_activation import (
     recover_retryable_transport_failure,
 )
 from synthran.r2lab.workload_boundary import execute_physical_workload_handoff
+from synthran.r2lab.workload_retry import (
+    R2LabWorkloadRetryError,
+    next_workload_attempt_id,
+)
 from synthran.utils.environment import scoped_environment
 
 
@@ -258,6 +262,12 @@ def run_physical_workload(
                 "physical workload requires an accepted UE/PDU/user-plane path"
             )
 
+        effective_workload_id = next_workload_attempt_id(
+            workload_id,
+            physical_run_id=run_id,
+            physical_run_root=run_root,
+            experiment_root=experiment_root,
+        )
         topology = load_topology(run_root=run_root, run_id=run_id).validate()
         inventory = load_physical_inventory(inventory_path, topology=topology)
         config = PhysicalExperimentConfig(
@@ -266,7 +276,7 @@ def run_physical_workload(
             lock=load_lock(lock_path),
             dependency_root=deps_root,
             repository_root=repository_root(),
-            workload_id=workload_id,
+            workload_id=effective_workload_id,
             run_root=experiment_root,
             physical_run_root=run_root,
             collection_seconds=collection_seconds,
@@ -301,11 +311,17 @@ def run_physical_workload(
         )
         return PhysicalWorkloadSummary(
             run_id=run_id,
-            workload_id=workload_id,
+            workload_id=effective_workload_id,
             evidence_path=evidence_path,
             workload_result_path=workload_result_path,
             accepted=accepted,
             cleanup_proven=(result.cleanup_proven if result is not None else False),
         )
-    except (R2LabAcceptanceError, R2LabPhysicalUeError, OSError, ValueError) as exc:
+    except (
+        R2LabAcceptanceError,
+        R2LabPhysicalUeError,
+        R2LabWorkloadRetryError,
+        OSError,
+        ValueError,
+    ) as exc:
         raise R2LabPhysicalLifecycleError(str(exc)) from exc
