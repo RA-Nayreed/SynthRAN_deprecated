@@ -41,6 +41,7 @@ from synthran.r2lab.resources import (
     release_physical_resources,
 )
 from synthran.r2lab.ue import R2LabPhysicalUeError
+from synthran.r2lab.upstream_roles import R2LabUpstreamRoleError, stop_role_managed_gnb
 from synthran.slices_controller import SlicesControllerError
 from synthran.utils.environment import scoped_environment
 from synthran.utils.ssh import strict_ssh_command
@@ -598,15 +599,31 @@ def _run_r2lab(
     release_status: Mapping[str, object] | None = None
     if not args.keep_resources:
         progress.start("cleanup", "stop run-owned gNB and release exact radio/UE resources")
-        stop = lambda: stop_n3xx_gnb(
-            run_id=args.run_id,
-            slice_name=slice_name,
-            owner=owner,
-            allocation_id=allocation_id,
-            known_hosts=known_hosts,
-            run_root=run_root,
-            timeout_seconds=max(min(args.timeout, 300), 30),
+        role_managed_gnb = bool(
+            live_resume_status is not None
+            and live_resume_status.get("gnb_restarted") is True
         )
+        if role_managed_gnb:
+            stop = lambda: stop_role_managed_gnb(
+                run_id=args.run_id,
+                slice_name=slice_name,
+                owner=owner,
+                allocation_id=allocation_id,
+                known_hosts=known_hosts,
+                lock_path=args.lock,
+                run_root=run_root,
+                timeout_seconds=max(min(args.timeout, 300), 30),
+            )
+        else:
+            stop = lambda: stop_n3xx_gnb(
+                run_id=args.run_id,
+                slice_name=slice_name,
+                owner=owner,
+                allocation_id=allocation_id,
+                known_hosts=known_hosts,
+                run_root=run_root,
+                timeout_seconds=max(min(args.timeout, 300), 30),
+            )
         release_status = release_physical_resources(
             run_id=args.run_id,
             slice_name=slice_name,
@@ -937,6 +954,7 @@ class RunCommandAdapter:
             R2LabPhysicalUeError,
             R2LabTopologyFoundationError,
             R2LabTopologyResourceError,
+            R2LabUpstreamRoleError,
             SlicesControllerError,
             WorkspaceError,
             OSError,
