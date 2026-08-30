@@ -13,6 +13,10 @@ import sys
 import time
 from typing import Any, Mapping, Protocol, TextIO
 
+from synthran.ambient_contract import (
+    DEFAULT_ENERGY_NODE_VARIATION,
+    DEFAULT_ENERGY_POWER_SCALE,
+)
 from synthran.dependencies import DependencyLock
 from synthran.experiment import (
     ExperimentError,
@@ -64,6 +68,7 @@ from synthran.iot_edge_transport import (
 from synthran.iot_publisher import AmberReplaySession
 from synthran.iot_source import (
     AMBER_SOURCE_ID,
+    AMBIENT_PROFILE,
     DEFAULT_IOT_SEED,
     TRANSPORT_PROFILE,
     AmberSourceAdapter,
@@ -450,6 +455,8 @@ def execute_amber_experiment(
     iot_profile: str = TRANSPORT_PROFILE,
     iot_seed: int = DEFAULT_IOT_SEED,
     sensor_period_seconds: int = 10,
+    energy_power_scale: float = DEFAULT_ENERGY_POWER_SCALE,
+    energy_node_variation: float = DEFAULT_ENERGY_NODE_VARIATION,
     measurement_lifecycle: AmberMeasurementLifecycle | None = None,
     progress: TextIO | None = None,
 ) -> ExperimentRunResult:
@@ -483,9 +490,17 @@ def execute_amber_experiment(
         profile=iot_profile,
         seed=iot_seed,
         sensor_period_seconds=sensor_period_seconds,
+        energy_power_scale=energy_power_scale,
+        energy_node_variation=energy_node_variation,
     )
 
     report(f"experiment: {run_id}")
+    if iot_profile == AMBIENT_PROFILE:
+        report(
+            "Amber energy treatment: "
+            f"external-power-scale={source_spec.energy_power_scale:g}, "
+            f"node-variation={source_spec.energy_node_variation:g}"
+        )
     report("network prerequisite: verifying path-proven baseline...")
     base = verify_network_path(
         inventory=inventory,
@@ -551,6 +566,14 @@ def execute_amber_experiment(
         f"Amber source: {plan.planned_count} opportunities, "
         f"{plan.decoded_count} decoded, {plan.source_loss_count} classified source loss"
     )
+    if iot_profile == AMBIENT_PROFILE:
+        outcomes: dict[str, int] = {}
+        for event in plan.events:
+            outcomes[event.outcome] = outcomes.get(event.outcome, 0) + 1
+        report(
+            "Amber source outcomes: "
+            + ", ".join(f"{name}={outcomes[name]}" for name in sorted(outcomes))
+        )
     _atomic_json(
         manifest_path,
         _manifest(
