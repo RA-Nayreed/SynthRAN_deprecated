@@ -5,12 +5,20 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Iterator, Mapping, Sequence
 
 from synthran import command_runtime
 from synthran.amber_experiment_runtime import execute_amber_experiment
+from synthran.ambient_contract import (
+    DEFAULT_ENERGY_NODE_VARIATION,
+    DEFAULT_ENERGY_POWER_SCALE,
+    ENERGY_NODE_VARIATION_ENV,
+    ENERGY_POWER_SCALE_ENV,
+    energy_treatment,
+)
 from synthran.backends import run as run_backend
 from synthran.backends.base import BackendError
 from synthran.iot_source import (
@@ -85,6 +93,25 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
             default=None,
             help="Amber research profile; omit to use legacy Cooja research artifacts",
         )
+        if name in ("plan", "run", "campaign-run"):
+            child.add_argument(
+                "--energy-power-scale",
+                type=float,
+                default=DEFAULT_ENERGY_POWER_SCALE,
+                help=(
+                    "ambient-v1 external harvested-power multiplier in (0,1]; "
+                    "1.0 preserves the energy-sufficient control"
+                ),
+            )
+            child.add_argument(
+                "--energy-node-variation",
+                type=float,
+                default=DEFAULT_ENERGY_NODE_VARIATION,
+                help=(
+                    "ambient-v1 deterministic per-node harvested-power variation "
+                    "fraction in [0,0.5]"
+                ),
+            )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -235,6 +262,11 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
             "schema": "synthran/research-request/v2alpha1",
             **_amber_research_spec(args).to_request_dict(),
         }
+        if args.iot_profile == AMBIENT_PROFILE:
+            value["energy_treatment"] = {
+                "external_power_scale": args.energy_power_scale,
+                "node_variation_fraction": args.energy_node_variation,
+            }
         print(json.dumps(value, indent=2, sort_keys=True))
         print("\nExecution action: none")
         return 0
@@ -303,6 +335,49 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
 
 
 @contextmanager
+def _selected_amber_energy_treatment(args: argparse.Namespace) -> Iterator[None]:
+    """Apply explicit research energy treatment only while Amber work executes."""
+
+    profile = getattr(args, "iot_profile", None)
+    power_scale = float(
+        getattr(args, "energy_power_scale", DEFAULT_ENERGY_POWER_SCALE)
+    )
+    node_variation = float(
+        getattr(args, "energy_node_variation", DEFAULT_ENERGY_NODE_VARIATION)
+    )
+    non_default = (
+        power_scale != DEFAULT_ENERGY_POWER_SCALE
+        or node_variation != DEFAULT_ENERGY_NODE_VARIATION
+    )
+    if profile != AMBIENT_PROFILE:
+        if non_default:
+            raise ResearchError(
+                "energy treatment options are valid only with --iot-profile ambient-v1"
+            )
+        yield
+        return
+
+    previous_scale = os.environ.get(ENERGY_POWER_SCALE_ENV)
+    previous_variation = os.environ.get(ENERGY_NODE_VARIATION_ENV)
+    os.environ[ENERGY_POWER_SCALE_ENV] = format(power_scale, ".17g")
+    os.environ[ENERGY_NODE_VARIATION_ENV] = format(node_variation, ".17g")
+    try:
+        energy_treatment()
+        yield
+    except ValueError as exc:
+        raise ResearchError(str(exc)) from exc
+    finally:
+        if previous_scale is None:
+            os.environ.pop(ENERGY_POWER_SCALE_ENV, None)
+        else:
+            os.environ[ENERGY_POWER_SCALE_ENV] = previous_scale
+        if previous_variation is None:
+            os.environ.pop(ENERGY_NODE_VARIATION_ENV, None)
+        else:
+            os.environ[ENERGY_NODE_VARIATION_ENV] = previous_variation
+
+
+@contextmanager
 def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
     if args.command != "run" or getattr(args, "iot_source", None) != "amber":
         yield
@@ -353,7 +428,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _validate_persisted_iot_identity(args)
         if args.command == "research" and getattr(args, "iot_profile", None) is not None:
-            return _dispatch_amber_research(args)
+            with _selected_amber_energy_treatment(args):
+                return _dispatch_amber_research(args)
         with _selected_iot_runtime(args):
             return dispatch(args)
     except (BackendError, ResearchError, R2LabTopologyResourceError) as exc:
