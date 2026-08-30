@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import socket
 import sys
-from typing import Any, Mapping, TextIO
+from typing import Any, Mapping, Protocol, TextIO
 
 from synthran.dependencies import DependencyLock
 from synthran.experiment import (
@@ -78,6 +78,26 @@ REMOTE_AMBER_PORTS = (
     RFSIM_AMBER_INGRESS_PORT,
 )
 LOCAL_AMBER_PORTS = (LOCAL_CENTRAL_FORWARD_PORT, RFSIM_AMBER_INGRESS_PORT)
+
+
+@dataclass(frozen=True)
+class AmberRuntimeContext:
+    """Live identity handed explicitly to optional measurement instrumentation."""
+
+    run_id: str
+    network_run_id: str
+    ue_pod: str
+    pdu_address: str
+    run_directory: Path
+    source_plan: PreparedIoTPlan
+
+
+class AmberMeasurementLifecycle(Protocol):
+    """Optional synchronous lifecycle that runs while Amber replays in background."""
+
+    def run(self, context: AmberRuntimeContext) -> Mapping[str, Any]: ...
+
+    def stop(self) -> None: ...
 
 
 def _utc_now() -> str:
@@ -236,6 +256,7 @@ def execute_amber_experiment(
     iot_profile: str = TRANSPORT_PROFILE,
     iot_seed: int = DEFAULT_IOT_SEED,
     sensor_period_seconds: int = 10,
+    measurement_lifecycle: AmberMeasurementLifecycle | None = None,
     progress: TextIO | None = None,
 ) -> ExperimentRunResult:
     """Run an immutable Amber plan through the live RFSIM user plane."""
@@ -360,6 +381,8 @@ def execute_amber_experiment(
     failure: str | None = None
     cleanup_errors: list[str] = []
     transport_payload: dict[str, Any] = {}
+    lifecycle_payload: dict[str, Any] | None = None
+    lifecycle_started = False
     run_accepted = False
 
     try:
@@ -510,6 +533,22 @@ def execute_amber_experiment(
             endpoint=edge_session.mqtt_endpoint,
             collector_barrier=collector,
         ).start()
+
+        if measurement_lifecycle is not None:
+            lifecycle_started = True
+            lifecycle_payload = dict(
+                measurement_lifecycle.run(
+                    AmberRuntimeContext(
+                        run_id=run_id,
+                        network_run_id=transport_context.network_run_id,
+                        ue_pod=ue_pod,
+                        pdu_address=transport_context.pdu_address,
+                        run_directory=run_directory,
+                        source_plan=plan,
+                    )
+                )
+            )
+
         publisher_evidence = publisher.wait(timeout=float(collection_seconds) + 60.0)
         collector.wait_end_canaries(source_spec.sensor_ids, timeout=30.0)
 
@@ -584,12 +623,18 @@ def execute_amber_experiment(
                 "rx_delta": max(0, rx_after - rx_before),
             },
             "network_reproof_ready": True,
+            "measurement": lifecycle_payload,
         }
         run_accepted = True
     except Exception as exc:
         failure = str(exc)
         report(f"error: {failure}")
     finally:
+        if measurement_lifecycle is not None and lifecycle_started:
+            try:
+                measurement_lifecycle.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"measurement lifecycle cleanup: {exc}")
         if publisher is not None:
             try:
                 publisher.stop()
