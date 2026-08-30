@@ -9,7 +9,6 @@ dependencies:
   - paho-mqtt=2.1.0
   - pyarrow=21.0.0
   - ansible-core=2.20.5
-  - openjdk=21.0.9
   - simpy=4.1.1
   - numpy=2.3.2
   - pandas=2.3.2
