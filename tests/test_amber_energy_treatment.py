@@ -180,8 +180,8 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
             profile=AMBIENT_PROFILE,
             seed=424242,
             sensor_period_seconds=10,
-            energy_power_scale=0.5,
-            energy_node_variation=0.1,
+            energy_power_scale=0.42,
+            energy_node_variation=0.0,
         )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -191,8 +191,8 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
         self.assertNotEqual(control.profile_digest, stressed.profile_digest)
         self.assertEqual(
             {
-                "external_power_scale": 0.5,
-                "node_variation_fraction": 0.1,
+                "external_power_scale": 0.42,
+                "node_variation_fraction": 0.0,
             },
             stressed.spec.energy_treatment,
         )
@@ -210,6 +210,23 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
         self.assertEqual(control_slots, stressed_slots)
         self.assertTrue(all(slot is not None for slot in control_slots.values()))
 
+        control_transmissions = {
+            (event.planned_at_ms, event.sensor_id): event.transmitted
+            for event in control.events
+        }
+        stressed_transmissions = {
+            (event.planned_at_ms, event.sensor_id): event.transmitted
+            for event in stressed.events
+        }
+        self.assertEqual(set(control_transmissions), set(stressed_transmissions))
+        self.assertTrue(
+            any(
+                control_transmissions[key] != stressed_transmissions[key]
+                for key in control_transmissions
+            ),
+            "energy stress did not change transmission eligibility in the regression window",
+        )
+
         collect_events = [
             event
             for event in stressed.events
@@ -217,7 +234,7 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
         ]
         self.assertTrue(collect_events)
         self.assertTrue(
-            all(event.details.get("energy_power_scale") == 0.5 for event in collect_events)
+            all(event.details.get("energy_power_scale") == 0.42 for event in collect_events)
         )
         self.assertTrue(
             all(event.details.get("aloha_slot_rule") == ALOHA_SLOT_RULE for event in collect_events)
@@ -229,10 +246,7 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
             )
         )
         self.assertTrue(
-            all(
-                0.9 <= float(event.details.get("energy_node_factor")) <= 1.1
-                for event in collect_events
-            )
+            all(float(event.details.get("energy_node_factor")) == 1.0 for event in collect_events)
         )
         self.assertTrue(
             all(
