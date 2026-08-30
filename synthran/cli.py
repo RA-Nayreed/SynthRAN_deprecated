@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Iterator, Mapping, Sequence
@@ -22,7 +23,7 @@ from synthran.iot_source import (
     DEFAULT_IOT_SEED,
     TRANSPORT_PROFILE,
 )
-from synthran.operator import configure_operator_parser, dispatch, stop_command
+from synthran.operator import configure_operator_parser, dispatch, release_command
 from synthran.r2lab.iot_lifecycle import run_physical_iot_workload
 from synthran.r2lab.resources import R2LabTopologyResourceError
 from synthran.research import LoadSpec, MeasurementSpec, ResearchError
@@ -54,21 +55,6 @@ def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     raise BackendError("SynthRAN parser does not expose command choices")
 
 
-def _top_level_subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
-    return _subparsers(parser)
-
-
-def _remove_command(root: argparse._SubParsersAction, name: str) -> None:
-    """Remove one legacy public parser, including its help-list entry."""
-
-    root.choices.pop(name, None)
-    choices_actions = getattr(root, "_choices_actions", None)
-    if isinstance(choices_actions, list):
-        root._choices_actions = [
-            action for action in choices_actions if getattr(action, "dest", None) != name
-        ]
-
-
 def _make_optional(parser: argparse.ArgumentParser, *destinations: str) -> None:
     wanted = set(destinations)
     for action in parser._actions:
@@ -76,17 +62,16 @@ def _make_optional(parser: argparse.ArgumentParser, *destinations: str) -> None:
             action.required = False
 
 
-def _add_run_measurement_options(run: argparse.ArgumentParser) -> None:
-    # The same run verb handles a full lifecycle run or a controlled measurement
-    # over an already accepted network. These four fields are required only by
-    # the full lifecycle path and are validated at dispatch time.
+def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
+    # Full lifecycle runs need these fields; controlled runs reuse an accepted
+    # network and validate their own smaller contract at dispatch time.
     _make_optional(run, "radio", "run_id", "core_node", "ran_node")
 
     run.add_argument(
         "--iot-source",
         choices=("cooja", "amber"),
         default="cooja",
-        help="IoT source for a full lifecycle run; controlled measurements use Amber",
+        help="IoT source for a full lifecycle run; controlled runs use Amber",
     )
     run.add_argument(
         "--iot-profile",
@@ -129,14 +114,14 @@ def _add_run_measurement_options(run: argparse.ArgumentParser) -> None:
 
     run.add_argument(
         "--network-run-id",
-        help="accepted network run to reuse for a controlled measurement or campaign",
+        help="accepted RFSIM network run to reuse for controlled execution",
     )
     run.add_argument("--campaign-id")
     run.add_argument("--condition")
     run.add_argument(
         "--plan",
         action="store_true",
-        help="persist/render the immutable run or campaign plan without executing it",
+        help="persist/render the immutable controlled run or campaign plan only",
     )
     run.add_argument("--inventory", type=Path)
     run.add_argument("--warmup-seconds", type=int, default=30)
@@ -170,7 +155,7 @@ def _add_top_level_experiment_commands(root: argparse._SubParsersAction) -> None
     calibrate = root.add_parser(
         "calibrate",
         help="measure reference capacity of an accepted UE path",
-        description="Measure RAN/UE-path capacity and persist the calibration evidence.",
+        description="Measure RAN/UE-path capacity and persist calibration evidence.",
     )
     calibrate.add_argument("--inventory", type=Path, required=True)
     calibrate.add_argument("--network-run-id", required=True)
@@ -201,12 +186,18 @@ def _add_top_level_experiment_commands(root: argparse._SubParsersAction) -> None
     release.add_argument(
         "--slice",
         dest="r2lab_slice",
-        default=None,
-        help="R2Lab slice name; SYNTHRAN_R2LAB_SLICE is also honored by the operator",
+        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
     )
-    release.add_argument("--owner")
-    release.add_argument("--allocation-id")
-    release.add_argument("--known-hosts", type=Path)
+    release.add_argument("--owner", default=os.environ.get("SYNTHRAN_OWNER"))
+    release.add_argument(
+        "--allocation-id",
+        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
+    )
+    release.add_argument(
+        "--known-hosts",
+        type=Path,
+        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
+    )
     release.add_argument("--timeout", type=int, default=300)
     release.add_argument("--json", action="store_true")
 
@@ -218,16 +209,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_subparsers(dest="command", required=True)
     configure_operator_parser(parser)
-
-    root = _top_level_subparsers(parser)
-    _remove_command(root, "research")
-    _remove_command(root, "stop")
+    root = _subparsers(parser)
     _add_top_level_experiment_commands(root)
 
     run = root.choices.get("run")
     if run is None:
         raise BackendError("SynthRAN parser does not expose the run command")
-    _add_run_measurement_options(run)
+    _add_run_experiment_options(run)
     return parser
 
 
@@ -239,6 +227,25 @@ def _read_json_object(path: Path, *, label: str) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise BackendError(f"{label} is malformed")
     return value
+
+
+def _is_campaign_run(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "campaign", None) is not None
+        or getattr(args, "seeds", None) is not None
+        or getattr(args, "conditions", None) is not None
+        or getattr(args, "campaign_seed", None) is not None
+    )
+
+
+def _is_controlled_run(args: argparse.Namespace) -> bool:
+    if args.command != "run":
+        return False
+    return bool(
+        _is_campaign_run(args)
+        or getattr(args, "network_run_id", None) is not None
+        or getattr(args, "condition", None) is not None
+    )
 
 
 def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
@@ -338,29 +345,9 @@ def _run_amber_workload(
     return 0 if result.ready else 2
 
 
-def _is_campaign_run(args: argparse.Namespace) -> bool:
-    return bool(
-        getattr(args, "campaign", None) is not None
-        or getattr(args, "seeds", None) is not None
-        or getattr(args, "conditions", None) is not None
-        or getattr(args, "campaign_seed", None) is not None
-    )
-
-
-def _is_controlled_run(args: argparse.Namespace) -> bool:
-    if args.command != "run":
-        return False
-    return bool(
-        _is_campaign_run(args)
-        or getattr(args, "network_run_id", None) is not None
-        or getattr(args, "condition", None) is not None
-        or getattr(args, "plan", False)
-    )
-
-
 def _require_controlled_common(args: argparse.Namespace) -> None:
     if args.radio not in {None, "rfsim"}:
-        raise ResearchError("controlled measurements currently support the RFSIM backend only")
+        raise ResearchError("controlled runs currently support the RFSIM backend only")
     if args.inventory is None and not args.plan:
         raise ResearchError("controlled run requires --inventory")
     if args.probe_target is None and not args.plan:
@@ -410,7 +397,7 @@ def _amber_research_spec(args: argparse.Namespace) -> AmberResearchSpec:
 
 def _campaign_path(args: argparse.Namespace) -> Path:
     if args.campaign is not None:
-        return args.campaign
+        return args.campaign.expanduser().resolve()
     if not args.campaign_id:
         raise ResearchError("campaign run requires --campaign-id or --campaign")
     return args.campaign_root.expanduser().resolve() / f"{args.campaign_id}.json"
@@ -459,8 +446,6 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
             print(f"\nCampaign schedule: {campaign_path}")
             print("Execution action: none")
             return 0
-        if args.inventory is None or args.probe_target is None:
-            raise ResearchError("campaign execution requires --inventory and --probe-target")
         manifest, evidence = command_runtime._network_paths(
             args.network_run_root,
             campaign.network_run_id,
@@ -503,8 +488,6 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
         print(json.dumps(value, indent=2, sort_keys=True))
         print("\nExecution action: none")
         return 0
-    if args.inventory is None:
-        raise ResearchError("controlled run requires --inventory")
     manifest, evidence = command_runtime._network_paths(
         args.network_run_root,
         spec.network_run_id,
@@ -570,30 +553,11 @@ def _dispatch_analysis(args: argparse.Namespace) -> int:
     return 0 if analysis["usable_runs"] == analysis["expected_runs"] else 2
 
 
-def _dispatch_release(args: argparse.Namespace) -> int:
-    # Preserve the mature ownership-bound cleanup implementation while the
-    # public command is named for what it actually does.
-    if args.r2lab_slice is None:
-        import os
-
-        args.r2lab_slice = os.environ.get("SYNTHRAN_R2LAB_SLICE")
-    if args.owner is None:
-        import os
-
-        args.owner = os.environ.get("SYNTHRAN_OWNER")
-    if args.allocation_id is None:
-        import os
-
-        args.allocation_id = os.environ.get("SYNTHRAN_ALLOCATION_ID")
-    if args.known_hosts is None:
-        import os
-
-        value = os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS")
-        args.known_hosts = Path(value) if value else None
-    return stop_command(args)
-
-
 def _validate_lifecycle_run(args: argparse.Namespace) -> None:
+    if args.plan:
+        raise BackendError(
+            "run --plan is for controlled runs/campaigns; full lifecycle runs execute directly"
+        )
     required = {
         "--radio": args.radio,
         "--run-id": args.run_id,
@@ -672,7 +636,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "analyze":
             return _dispatch_analysis(args)
         if args.command == "release":
-            return _dispatch_release(args)
+            return release_command(args)
         if args.command == "run":
             _validate_lifecycle_run(args)
         with _selected_iot_runtime(args):
