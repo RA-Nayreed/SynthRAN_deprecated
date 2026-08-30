@@ -10,6 +10,7 @@ from typing import Iterator, Sequence
 
 from synthran import command_runtime
 from synthran.amber_experiment_runtime import execute_amber_experiment
+from synthran.backends import run as run_backend
 from synthran.backends.base import BackendError
 from synthran.iot_source import (
     AMBIENT_PROFILE,
@@ -17,6 +18,7 @@ from synthran.iot_source import (
     TRANSPORT_PROFILE,
 )
 from synthran.operator import configure_operator_parser, dispatch
+from synthran.r2lab.iot_lifecycle import run_physical_iot_workload
 from synthran.r2lab.resources import R2LabTopologyResourceError
 from synthran.research import LoadSpec, MeasurementSpec, ResearchError
 from synthran.research.amber_campaign import (
@@ -236,24 +238,44 @@ def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
     if args.command != "run" or getattr(args, "iot_source", None) != "amber":
         yield
         return
-    if args.radio != "rfsim":
-        raise BackendError("--iot-source amber is not supported for the R2Lab backend")
 
-    original = command_runtime._experiment_run
+    if args.radio == "rfsim":
+        original = command_runtime._experiment_run
 
-    def amber_experiment_run(experiment_args: argparse.Namespace) -> int:
-        return _run_amber_workload(
-            experiment_args,
-            iot_profile=args.iot_profile,
-            iot_seed=args.iot_seed,
-            sensor_period_seconds=args.sensor_period,
-        )
+        def amber_experiment_run(experiment_args: argparse.Namespace) -> int:
+            return _run_amber_workload(
+                experiment_args,
+                iot_profile=args.iot_profile,
+                iot_seed=args.iot_seed,
+                sensor_period_seconds=args.sensor_period,
+            )
 
-    command_runtime._experiment_run = amber_experiment_run
-    try:
-        yield
-    finally:
-        command_runtime._experiment_run = original
+        command_runtime._experiment_run = amber_experiment_run
+        try:
+            yield
+        finally:
+            command_runtime._experiment_run = original
+        return
+
+    if args.radio == "r2lab":
+        original = run_backend.run_physical_workload
+
+        def amber_physical_workload(**kwargs):
+            return run_physical_iot_workload(
+                **kwargs,
+                iot_profile=args.iot_profile,
+                iot_seed=args.iot_seed,
+                sensor_period_seconds=args.sensor_period,
+            )
+
+        run_backend.run_physical_workload = amber_physical_workload
+        try:
+            yield
+        finally:
+            run_backend.run_physical_workload = original
+        return
+
+    raise BackendError(f"unsupported radio backend: {args.radio}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
