@@ -59,6 +59,8 @@ from synthran.ambient_contract import (
     STARTUP_MAX_MS,
     THRESHOLD_HIGH_V,
     THRESHOLD_LOW_V,
+    deterministic_node_energy_factor,
+    energy_treatment,
 )
 from synthran.iot_source import (
     AMBIENT_PROFILE,
@@ -194,7 +196,28 @@ def _voltage_at(cap: Any, time_ms: float) -> float | None:
     return candidate
 
 
-def _per_node_uplink(uplink: Mapping[str, Any], node_ids: list[int]) -> dict[int, tuple[float | None, str | None]]:
+def _minimum_voltage_between(cap: Any, start_ms: float, end_ms: float) -> float | None:
+    """Return the minimum recorded capacitor voltage in a closed time interval."""
+
+    values = [
+        float(value)
+        for time_s, value in cap.voltage_history
+        if start_ms <= time_s * 1000.0 <= end_ms
+    ]
+    if values:
+        return min(values)
+    return _voltage_at(cap, start_ms)
+
+
+def _capacitor_energy(voltage_v: float | None) -> float | None:
+    if voltage_v is None:
+        return None
+    return 0.5 * CAPACITANCE_F * float(voltage_v) * float(voltage_v)
+
+
+def _per_node_uplink(
+    uplink: Mapping[str, Any], node_ids: list[int]
+) -> dict[int, tuple[float | None, str | None]]:
     """Resolve the strongest BS-sector RSSI for each individual Amber node."""
 
     per_sector = uplink.get("per_sector_powers")
@@ -215,14 +238,20 @@ def _per_node_uplink(uplink: Mapping[str, Any], node_ids: list[int]) -> dict[int
                 candidates.append((float(raw), sector_name))
             except (TypeError, ValueError):
                 continue
-        result[node_id] = max(candidates, default=(None, None), key=lambda item: item[0] if item[0] is not None else -1e9)
+        result[node_id] = max(
+            candidates,
+            default=(None, None),
+            key=lambda item: item[0] if item[0] is not None else -1e9,
+        )
     return result
 
 
-def _collision_resolution(packets: list[Any], packet_analysis: Any) -> dict[int, tuple[str, int]]:
+def _collision_resolution(
+    packets: list[Any], packet_analysis: Any
+) -> dict[int, tuple[str, int]]:
     """Reconstruct AMBER's exact collision groups and expose decode mechanism.
 
-    AMBER stores only the final ``collided`` boolean on ``RxPacket``.  For
+    AMBER stores only the final ``collided`` boolean on ``RxPacket``. For
     research evidence we replay the same grouping and the same AMBER
     ``apply_sic`` implementation, then assert that our reconstruction agrees
     with the engine's final collision flag.
@@ -244,7 +273,10 @@ def _collision_resolution(packets: list[Any], packet_analysis: Any) -> dict[int,
             for other_index, other in enumerate(rx_list):
                 if other_index == index or other_index in used:
                     continue
-                if abs(float(packet.end_ms) - float(other.end_ms)) <= COLLISION_WINDOW_MS:
+                if (
+                    abs(float(packet.end_ms) - float(other.end_ms))
+                    <= COLLISION_WINDOW_MS
+                ):
                     group.append(other_index)
             used.update(group)
             if len(group) == 1:
@@ -256,7 +288,9 @@ def _collision_resolution(packets: list[Any], packet_analysis: Any) -> dict[int,
                 powers_dbm=powers,
                 noise_w=noise_w,
                 required_sinr_db=REQUIRED_SINR_DB,
-                cancellation_factor=(SIC_CANCELLATION_FACTOR if SIC_ENABLED else 0.0),
+                cancellation_factor=(
+                    SIC_CANCELLATION_FACTOR if SIC_ENABLED else 0.0
+                ),
             )
             decoded_global = [group[item] for item in decoded_local]
             if not SIC_ENABLED and decoded_global:
@@ -303,6 +337,19 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     if not trace_path.is_file():
         raise RuntimeError("ambient-v1 energy trace is missing")
 
+    try:
+        energy_power_scale, energy_node_variation = energy_treatment()
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    node_energy_factors = {
+        node_id: deterministic_node_energy_factor(
+            seed,
+            node_id,
+            energy_node_variation,
+        )
+        for node_id in range(count)
+    }
+
     active_frame_ms = COMMAND_MS + SLOT_MS * ALOHA_SLOTS
     if period_ms <= active_frame_ms:
         raise RuntimeError("ambient-v1 sensor period is too short for its ALOHA frame")
@@ -313,18 +360,23 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            # The profile has no registration handshake.  Mark the tag as
-            # registered so AMBER's Controller performs listening, sensing,
-            # processing and transmitting energy states normally.
             self.state = "registered"
             self.capacitor_ref = None
             self.controller_ref = None
+            self.energy_snapshot_fn = None
             self.collect_history: list[dict[str, Any]] = []
             self.tx_runtime_history: list[dict[str, Any]] = []
 
-        def attach_runtime(self, cap: Any, ctrl: Any) -> None:
+        def attach_runtime(self, cap: Any, ctrl: Any, energy_snapshot_fn: Any) -> None:
             self.capacitor_ref = cap
             self.controller_ref = ctrl
+            self.energy_snapshot_fn = energy_snapshot_fn
+
+        def _energy_snapshot(self, *, transmitting: bool) -> dict[str, Any]:
+            if self.energy_snapshot_fn is None:
+                return {}
+            value = self.energy_snapshot_fn(transmitting=transmitting)
+            return dict(value) if isinstance(value, Mapping) else {}
 
         def handle_command(self, cmd, bs_id, data):
             del bs_id
@@ -332,10 +384,9 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                 return
             frame_slots = int(data.get("frame_slots", 0))
             if frame_slots != ALOHA_SLOTS:
-                raise RuntimeError("ambient-v1 collect command advertised the wrong frame size")
-            # BSEngine deliberately looks ahead across two frames.  This
-            # profile is one opportunity per period, so expose only this
-            # command's current 16-slot frame to the node.
+                raise RuntimeError(
+                    "ambient-v1 collect command advertised the wrong frame size"
+                )
             self.rx_slots = list(self.rx_slots[:frame_slots])
             self.chosen_slot_idx = (
                 random.randrange(len(self.rx_slots)) if self.rx_slots else -1
@@ -363,12 +414,15 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "slot_end_ms": float(chosen_slot[1]) if chosen_slot else None,
                     "capacitor_voltage_v": cap_v,
                     "controller_active": bool(getattr(ctrl, "is_active", False)),
-                    "controller_state": str(getattr(ctrl, "state_name", "unknown")),
+                    "controller_state": str(
+                        getattr(ctrl, "state_name", "unknown")
+                    ),
                     "startup_delay_ms": (
                         float(getattr(ctrl, "startup_delay_s", 0.0)) * 1000.0
                         if ctrl is not None
                         else None
                     ),
+                    "energy": self._energy_snapshot(transmitting=False),
                 }
             )
 
@@ -391,6 +445,7 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                         self.chosen_slot_idx if self.chosen_slot_idx >= 0 else None
                     ),
                     "payload": tx_info.get("payload"),
+                    "energy": self._energy_snapshot(transmitting=True),
                 }
             )
             return super().do_transmit(tx_info)
@@ -485,6 +540,14 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     )
     if len(getattr(energy_source, "_voltages", ())) < 1:
         raise RuntimeError("ambient-v1 energy trace is empty")
+
+    def external_power(node: Any) -> float:
+        return (
+            float(energy_source.ext_power)
+            * energy_power_scale
+            * node_energy_factors[int(node.id)]
+        )
+
     coverage = propagation.CoverageMap(
         base_stations=[bs],
         nodes=nodes,
@@ -492,7 +555,7 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
         pathloss_model=PATHLOSS_MODEL,
         los=LOS,
         node_energy_mode=ENERGY_MODE,
-        node_ext_power_fn=lambda node: energy_source.ext_power,
+        node_ext_power_fn=external_power,
         combine_mode=ENERGY_COMBINE_MODE,
         bandwidth_hz=BANDWIDTH_HZ,
         noise_figure_db=NOISE_FIGURE_DB,
@@ -501,6 +564,33 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
     downlink = coverage.compute_bs_to_point(nodes)
     coverage.calculate_node_power(nodes, downlink)
     uplink = coverage.compute_point_to_bs(nodes)
+
+    def harvest_snapshot(node: Any, *, transmitting: bool) -> dict[str, Any]:
+        node_id = int(node.id)
+        received_w = float(downlink.get("best_pw_w", {}).get(node_id, 0.0))
+        wpt_w = (
+            received_w * (1.0 - float(getattr(node, "efficiency", 1.0)))
+            if transmitting
+            else received_w
+        )
+        external_w = external_power(node)
+        if ENERGY_COMBINE_MODE == "max":
+            selected_w = max(wpt_w, external_w)
+            if external_w > wpt_w:
+                selected_source = "external"
+            elif wpt_w > external_w:
+                selected_source = "wpt"
+            else:
+                selected_source = "tie"
+        else:
+            selected_w = wpt_w + external_w
+            selected_source = "combined"
+        return {
+            "external_harvest_power_w": external_w,
+            "wpt_harvest_power_w": wpt_w,
+            "selected_harvest_power_w": selected_w,
+            "selected_harvest_source": selected_source,
+        }
 
     capacitors = []
     modules = []
@@ -531,7 +621,14 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
             downlink_results=downlink,
         )
         controllers.append(ctrl)
-        module.attach_runtime(cap, ctrl)
+        module.attach_runtime(
+            cap,
+            ctrl,
+            lambda *, transmitting, node=node: harvest_snapshot(
+                node,
+                transmitting=transmitting,
+            ),
+        )
 
     behavior = bsengine.BSBehavior(
         env=env,
@@ -643,8 +740,37 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                 collect.get("capacitor_voltage_v") if collect is not None else None
             )
             slot_start_ms = collect.get("slot_start_ms") if collect is not None else None
+            tx_record = tx_runtime[0] if tx_runtime else None
             tx_voltage = (
-                tx_runtime[0].get("capacitor_voltage_v") if tx_runtime else None
+                tx_record.get("capacitor_voltage_v") if tx_record is not None else None
+            )
+            tx_time_ms = (
+                float(tx_record["time_ms"])
+                if tx_record is not None and tx_record.get("time_ms") is not None
+                else None
+            )
+            tx_end_ms = (
+                min(tx_time_ms + DURATION_TRANSMITTING_MS, float(end))
+                if tx_time_ms is not None
+                else None
+            )
+            post_tx_voltage = (
+                _voltage_at(cap, tx_end_ms) if tx_end_ms is not None else None
+            )
+            minimum_tx_voltage = (
+                _minimum_voltage_between(cap, tx_time_ms, tx_end_ms)
+                if tx_time_ms is not None and tx_end_ms is not None
+                else None
+            )
+            collect_energy = (
+                collect.get("energy")
+                if collect is not None and isinstance(collect.get("energy"), Mapping)
+                else {}
+            )
+            tx_energy = (
+                tx_record.get("energy")
+                if tx_record is not None and isinstance(tx_record.get("energy"), Mapping)
+                else {}
             )
             records.append(
                 _event(
@@ -683,6 +809,33 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                         "slot_end_ms": (
                             collect.get("slot_end_ms") if collect is not None else None
                         ),
+                        "energy_power_scale": energy_power_scale,
+                        "energy_node_variation": energy_node_variation,
+                        "energy_node_factor": node_energy_factors[int(node.id)],
+                        "external_harvest_power_collect_w": collect_energy.get(
+                            "external_harvest_power_w"
+                        ),
+                        "wpt_harvest_power_collect_w": collect_energy.get(
+                            "wpt_harvest_power_w"
+                        ),
+                        "selected_harvest_power_collect_w": collect_energy.get(
+                            "selected_harvest_power_w"
+                        ),
+                        "selected_harvest_source_collect": collect_energy.get(
+                            "selected_harvest_source"
+                        ),
+                        "external_harvest_power_tx_w": tx_energy.get(
+                            "external_harvest_power_w"
+                        ),
+                        "wpt_harvest_power_tx_w": tx_energy.get(
+                            "wpt_harvest_power_w"
+                        ),
+                        "selected_harvest_power_tx_w": tx_energy.get(
+                            "selected_harvest_power_w"
+                        ),
+                        "selected_harvest_source_tx": tx_energy.get(
+                            "selected_harvest_source"
+                        ),
                         "capacitor_voltage_start_v": _voltage_at(cap, float(start)),
                         "capacitor_voltage_collect_v": collect_voltage,
                         "capacitor_voltage_slot_v": (
@@ -691,9 +844,13 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                             else None
                         ),
                         "capacitor_voltage_tx_v": tx_voltage,
+                        "capacitor_voltage_post_tx_v": post_tx_voltage,
+                        "capacitor_voltage_min_tx_v": minimum_tx_voltage,
                         "capacitor_voltage_end_v": _voltage_at(cap, float(end)),
-                        # Backward-compatible diagnostic now means the voltage
-                        # at the actual collect opportunity, not period end.
+                        "capacitor_energy_pre_tx_j": _capacitor_energy(tx_voltage),
+                        "capacitor_energy_post_tx_j": _capacitor_energy(
+                            post_tx_voltage
+                        ),
                         "capacitor_voltage_v": collect_voltage,
                     },
                 )
@@ -704,7 +861,9 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Prepare an immutable Amber source-event plan")
+    parser = argparse.ArgumentParser(
+        description="Prepare an immutable Amber source-event plan"
+    )
     parser.add_argument("--amber-root", type=Path, required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
