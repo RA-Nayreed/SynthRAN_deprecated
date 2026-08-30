@@ -19,6 +19,10 @@ from synthran.iot_source import (
 from synthran.operator import configure_operator_parser, dispatch
 from synthran.r2lab.resources import R2LabTopologyResourceError
 from synthran.research import LoadSpec, MeasurementSpec, ResearchError
+from synthran.research.amber_campaign import (
+    analyze_amber_campaign,
+    execute_amber_campaign,
+)
 from synthran.research.amber_runtime import execute_amber_research_experiment
 from synthran.research.v2 import AmberResearchSpec
 
@@ -68,7 +72,7 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
     if research is None:
         raise BackendError("SynthRAN parser does not expose the research command")
     research_sub = _subparsers(research)
-    for name in ("plan", "run", "campaign-run"):
+    for name in ("plan", "run", "campaign-run", "analyze"):
         child = research_sub.choices.get(name)
         if child is None:
             raise BackendError(f"SynthRAN research parser does not expose {name}")
@@ -185,11 +189,47 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
         print(f"Amber research summary: {summary_path}")
         return 0
     if args.research_command == "campaign-run":
-        raise ResearchError(
-            "Amber campaign execution is not enabled until the v2 campaign runner is installed"
+        campaign = command_runtime._load_campaign(args.campaign)
+        manifest, evidence = command_runtime._network_paths(
+            args.network_run_root,
+            campaign.network_run_id,
         )
+        result_path = execute_amber_campaign(
+            campaign=campaign,
+            iot_profile=args.iot_profile,
+            inventory=command_runtime.load_inventory(args.inventory),
+            lock=command_runtime.load_lock(args.lock),
+            dependency_root=args.deps_root,
+            network_manifest=manifest,
+            network_evidence=evidence,
+            repository_root=command_runtime.repository_root(),
+            run_root=args.run_root,
+            target=args.target,
+            reference_capacity_bps=args.reference_capacity_bps,
+            sensor_period_seconds=args.sensor_period,
+            measurement=MeasurementSpec(
+                warmup_seconds=args.warmup_seconds,
+                duration_seconds=args.duration_seconds,
+                sample_interval_seconds=args.sample_interval,
+                probe_interval_seconds=args.probe_interval,
+            ),
+            parallel_flows=args.parallel_flows,
+            load_port=args.load_port,
+            progress=sys.stdout,
+        )
+        print(f"Amber campaign result: {result_path}")
+        return 0
+    if args.research_command == "analyze":
+        campaign = command_runtime._load_campaign(args.campaign)
+        result = analyze_amber_campaign(
+            campaign=campaign,
+            run_root=args.run_root,
+            output_path=args.out,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
     raise ResearchError(
-        "--iot-profile is supported on research plan, run, and campaign-run only"
+        "--iot-profile is supported on research plan, run, campaign-run, and analyze only"
     )
 
 
