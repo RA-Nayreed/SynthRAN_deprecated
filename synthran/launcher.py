@@ -12,5 +12,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
 
     from synthran.cli import main as cli_main
+    from synthran.experiment import ExperimentError
 
-    return cli_main(arguments)
+    try:
+        return cli_main(arguments)
+    except ExperimentError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
