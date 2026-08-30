@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import shlex
 import signal
-import socket
 import subprocess
 import time
 from typing import Any, Mapping, Protocol, Sequence
@@ -162,28 +161,47 @@ def _local_forward_command(
     return tuple(base)
 
 
-def _wait_local_tcp(
-    port: int,
-    *,
-    process: OwnedProcess,
-    timeout_seconds: int = 30,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if process.process.poll() is not None:
-            raise ExperimentError(
-                f"{process.name} exited before local TCP endpoint became ready"
-            )
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(0.5)
+def _proc_has_listener(port: int) -> bool:
+    port_hex = f"{port:04X}"
+    for path in (Path("/proc/net/tcp"), Path("/proc/net/tcp6")):
         try:
-            sock.connect(("127.0.0.1", port))
-            return
+            lines = path.read_text(encoding="ascii").splitlines()[1:]
         except OSError:
-            time.sleep(0.25)
-        finally:
-            sock.close()
-    raise ExperimentError(f"local TCP endpoint 127.0.0.1:{port} did not become ready")
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != "0A":
+                continue
+            local = fields[1]
+            _, _, encoded_port = local.rpartition(":")
+            if encoded_port.upper() == port_hex:
+                return True
+    return False
+
+
+def _remote_listener_probe_command(
+    inventory: NetworkInventory,
+    *,
+    port: int,
+) -> tuple[str, ...]:
+    script = (
+        "from pathlib import Path; "
+        f"want='{port:04X}'; found=False; "
+        "paths=(Path('/proc/net/tcp'),Path('/proc/net/tcp6')); "
+        "\nfor path in paths:\n"
+        "    try: lines=path.read_text().splitlines()[1:]\n"
+        "    except OSError: continue\n"
+        "    for line in lines:\n"
+        "        fields=line.split()\n"
+        "        if len(fields)>=4 and fields[3]=='0A' and fields[1].rsplit(':',1)[-1].upper()==want:\n"
+        "            found=True; break\n"
+        "    if found: break\n"
+        "raise SystemExit(0 if found else 1)"
+    )
+    try:
+        return ssh_command(inventory.core_node, "python3", "-c", script)
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
 
 
 def _remote_tcp_probe_command(
@@ -210,6 +228,8 @@ def _wait_remote_tcp(
     process: OwnedProcess,
     timeout_seconds: int = 30,
 ) -> None:
+    """Probe a non-counted upstream endpoint by connecting to it."""
+
     deadline = time.monotonic() + timeout_seconds
     command = _remote_tcp_probe_command(inventory, port=port)
     while time.monotonic() < deadline:
@@ -224,18 +244,57 @@ def _wait_remote_tcp(
     raise ExperimentError(f"remote TCP endpoint 127.0.0.1:{port} did not become ready")
 
 
+def _wait_remote_listener(
+    inventory: NetworkInventory,
+    *,
+    port: int,
+    process: OwnedProcess,
+    timeout_seconds: int = 30,
+) -> None:
+    """Wait for a listener without opening a connection or changing its counters."""
+
+    deadline = time.monotonic() + timeout_seconds
+    command = _remote_listener_probe_command(inventory, port=port)
+    while time.monotonic() < deadline:
+        if process.process.poll() is not None:
+            raise ExperimentError(
+                f"{process.name} exited before remote listener became ready"
+            )
+        if _run(command, timeout_seconds=5).returncode == 0:
+            return
+        time.sleep(0.25)
+    raise ExperimentError(f"remote listener 127.0.0.1:{port} did not become ready")
+
+
+def _wait_local_tcp(
+    port: int,
+    *,
+    process: OwnedProcess,
+    timeout_seconds: int = 30,
+) -> None:
+    """Wait for the local SSH listener without traversing counted ingress."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process.process.poll() is not None:
+            raise ExperimentError(
+                f"{process.name} exited before local TCP endpoint became ready"
+            )
+        if _proc_has_listener(port):
+            return
+        time.sleep(0.25)
+    raise ExperimentError(f"local listener 127.0.0.1:{port} did not become ready")
+
+
 def _remote_port_is_closed(inventory: NetworkInventory, port: int) -> bool:
-    result = _run(_remote_tcp_probe_command(inventory, port=port), timeout_seconds=5)
-    return result.returncode != 0
+    return _run(
+        _remote_listener_probe_command(inventory, port=port),
+        timeout_seconds=5,
+    ).returncode != 0
 
 
 def _local_port_is_closed(port: int) -> bool:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(0.25)
-    try:
-        return sock.connect_ex(("127.0.0.1", port)) != 0
-    finally:
-        sock.close()
+    return not _proc_has_listener(port)
 
 
 class RfsimEdgeTransportSession:
@@ -296,9 +355,9 @@ class RfsimEdgeTransportSession:
                 break
             time.sleep(0.25)
         if not _local_port_is_closed(self._endpoint.port):
-            self._cleanup_errors.append("local publisher forward still accepts connections")
+            self._cleanup_errors.append("local publisher forward still listens")
         if not _remote_port_is_closed(self.inventory, self.remote_ingress_port):
-            self._cleanup_errors.append("remote counted ingress still accepts connections")
+            self._cleanup_errors.append("remote counted ingress still listens")
         self._stopped = True
 
     def evidence(self) -> Mapping[str, Any]:
@@ -357,6 +416,15 @@ class RfsimEdgeTransportAdapter:
             raise ExperimentError("RFSIM edge transport requires the live UE pod")
         if not remote_workspace.startswith("/tmp/synthran/"):
             raise ExperimentError("RFSIM edge workspace is outside the run-owned root")
+        if not _remote_port_is_closed(self.inventory, self.remote_ingress_port):
+            raise ExperimentError(
+                "RFSIM Amber ingress port is already owned by another process"
+            )
+        if not _local_port_is_closed(self.local_port):
+            raise ExperimentError(
+                "RFSIM Amber local publisher port is already owned by another process"
+            )
+
         ingress_helper = f"{remote_workspace}/ingress.py"
         snapshot_remote = f"{remote_workspace}/amber-ingress-snapshot.json"
         logs = run_directory / "logs"
@@ -404,7 +472,7 @@ class RfsimEdgeTransportAdapter:
                 log_path=logs / "amber-ingress.log",
             )
             processes.append(ingress)
-            _wait_remote_tcp(
+            _wait_remote_listener(
                 self.inventory,
                 port=self.remote_ingress_port,
                 process=ingress,
