@@ -215,9 +215,6 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
         )
         self._report(f"load server: ready on port {self.spec.load.server_port}")
         per_stream_bps = max(1, target_bps // self.spec.load.parallel_flows)
-        # Capture the controller clock immediately before spawning iperf.  The
-        # later source-clock gate gives us the exact offset from iperf time zero
-        # to the source-aligned measurement window.
         self.load_started_monotonic_s = time.monotonic()
         self.load_process = _start_load_client(
             inventory=self.inventory,
@@ -284,9 +281,6 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
             target=self.spec.probe_target or "",
         )
         self._prove_pre_window(paths)
-
-        # Start samplers before source time zero. Their persisted records are
-        # filtered to the exact UTC measurement window after the run.
         self.sampler = ResearchNetworkSampler(
             inventory=self.inventory,
             network_run_id=self.context.network_run_id,
@@ -320,8 +314,6 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
             self._write_path_evidence()
             raise
 
-        # MQTT clients and start canaries are already accepted, but the replay
-        # worker is held on this gate. Releasing it establishes exact source t=0.
         release_replay_start_gate(context.run_id)
         self.replay_origin_monotonic_s = wait_replay_start_origin(context.run_id)
 
@@ -611,6 +603,8 @@ def execute_amber_research_experiment(
             iot_profile=spec.iot_profile,
             iot_seed=spec.iot_seed,
             sensor_period_seconds=spec.sensor_period_seconds,
+            energy_power_scale=spec.energy_power_scale,
+            energy_node_variation=spec.energy_node_variation,
             measurement_lifecycle=lifecycle,
             progress=progress,
         )
@@ -745,12 +739,13 @@ def execute_amber_research_experiment(
         and load_target_valid
     )
 
+    measurement_transmitted = sum(event.transmitted for event in measurement_source)
     metrics.update(
         {
             "source_window_start_ms": source_start_ms,
             "source_window_end_ms": source_end_ms,
             "source_outcomes": dict(sorted(outcome_counts.items())),
-            "measurement_transmitted": sum(event.transmitted for event in measurement_source),
+            "measurement_transmitted": measurement_transmitted,
             "measurement_decoded": len(decoded_keys),
             "measurement_unexpected_central": unexpected_count,
             "measurement_published_missing": published_missing,
@@ -776,6 +771,31 @@ def execute_amber_research_experiment(
     )
     summary_path = run_directory / "research-summary-v2.json"
     save_research_summary_v2(summary_path, summary)
+
+    if progress is not None:
+        print(
+            "[synthran] research: measurement source: "
+            f"planned={len(planned_keys)}, transmitted={measurement_transmitted}, "
+            f"decoded={len(decoded_keys)}, source-loss={source_loss}",
+            file=progress,
+            flush=True,
+        )
+        print(
+            "[synthran] research: measurement outcomes: "
+            + ", ".join(
+                f"{name}={outcome_counts[name]}" for name in sorted(outcome_counts)
+            ),
+            file=progress,
+            flush=True,
+        )
+        print(
+            "[synthran] research: transport: "
+            f"published={len(published_keys)}, received={len(central_keys)}, "
+            f"loss={transport_loss}, duplicates={duplicate_count}",
+            file=progress,
+            flush=True,
+        )
+
     if not infrastructure_valid:
         raise ResearchError("Amber research run failed its infrastructure validity gate")
     if not scientific_valid:
