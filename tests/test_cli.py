@@ -4,8 +4,10 @@ import argparse
 from pathlib import Path
 import tomllib
 import unittest
+from unittest.mock import patch
 
-from synthran.cli import _parser
+from synthran.backends.base import BackendError
+from synthran.cli import _parser, _selected_iot_runtime
 from synthran.operator import PUBLIC_COMMANDS
 
 
@@ -42,7 +44,7 @@ class CliTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(SystemExit):
                 parser.parse_args([command])
 
-    def test_run_selects_rfsim(self) -> None:
+    def test_run_selects_rfsim_and_keeps_cooja_transition_default(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -60,6 +62,105 @@ class CliTests(unittest.TestCase):
         self.assertEqual("rfsim", args.radio)
         self.assertIsNone(args.device)
         self.assertIsNone(args.ue)
+        self.assertEqual("cooja", args.iot_source)
+        self.assertEqual("transport-v1", args.iot_profile)
+        self.assertEqual(424242, args.iot_seed)
+        self.assertEqual(10, args.sensor_period)
+
+    def test_run_parses_explicit_amber_profile_seed_and_period(self) -> None:
+        args = _parser().parse_args(
+            [
+                "run",
+                "--radio",
+                "rfsim",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "amber-001",
+                "--iot-source",
+                "amber",
+                "--iot-profile",
+                "ambient-v1",
+                "--iot-seed",
+                "17",
+                "--sensor-period",
+                "12",
+            ]
+        )
+        self.assertEqual("amber", args.iot_source)
+        self.assertEqual("ambient-v1", args.iot_profile)
+        self.assertEqual(17, args.iot_seed)
+        self.assertEqual(12, args.sensor_period)
+
+    def test_cooja_selection_does_not_replace_experiment_runtime(self) -> None:
+        args = _parser().parse_args(
+            [
+                "run",
+                "--radio",
+                "rfsim",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "virtual-001",
+            ]
+        )
+        from synthran import command_runtime
+
+        original = command_runtime._experiment_run
+        with _selected_iot_runtime(args):
+            self.assertIs(original, command_runtime._experiment_run)
+        self.assertIs(original, command_runtime._experiment_run)
+
+    def test_amber_runtime_override_is_restored_after_scope(self) -> None:
+        args = _parser().parse_args(
+            [
+                "run",
+                "--radio",
+                "rfsim",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "amber-001",
+                "--iot-source",
+                "amber",
+            ]
+        )
+        from synthran import command_runtime
+
+        original = command_runtime._experiment_run
+        with _selected_iot_runtime(args):
+            self.assertIsNot(original, command_runtime._experiment_run)
+        self.assertIs(original, command_runtime._experiment_run)
+
+    def test_amber_physical_backend_fails_closed_until_adapter_exists(self) -> None:
+        args = _parser().parse_args(
+            [
+                "run",
+                "--radio",
+                "r2lab",
+                "--device",
+                "n300",
+                "--ue",
+                "qfit07",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "physical-001",
+                "--iot-source",
+                "amber",
+            ]
+        )
+        with self.assertRaisesRegex(BackendError, "not enabled for R2Lab"):
+            with _selected_iot_runtime(args):
+                pass
 
     def test_run_selects_physical_backend(self) -> None:
         args = _parser().parse_args(
