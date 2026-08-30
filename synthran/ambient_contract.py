@@ -64,6 +64,7 @@ DURATION_PROCESSING_MS = 5
 DURATION_TRANSMITTING_MS = 15
 
 ALOHA_SLOTS = 16
+ALOHA_SLOT_RULE = "sha256-opportunity-v1"
 COMMAND_MS = 5
 SLOT_MS = 8
 COLLISION_WINDOW_MS = 5.0
@@ -119,6 +120,29 @@ def deterministic_node_energy_factor(
     return 1.0 + variation * (2.0 * unit - 1.0)
 
 
+def deterministic_aloha_slot(
+    seed: int,
+    node_id: int,
+    frame_index: int,
+    slot_count: int = ALOHA_SLOTS,
+) -> int:
+    """Return an opportunity-addressed ALOHA slot without consuming AMBER RNG.
+
+    The slot key excludes energy treatment and runtime controller state. Therefore
+    the same seed/node/frame tuple has the same offered slot under every energy
+    treatment; energy may suppress that opportunity but cannot reshuffle it.
+    """
+
+    if seed < 0 or node_id < 0 or frame_index < 0:
+        raise ValueError("ALOHA slot seed, node ID, and frame index must be non-negative")
+    if slot_count <= 0:
+        raise ValueError("ALOHA slot count must be positive")
+    digest = hashlib.sha256(
+        f"ambient-aloha-slot-v1:{seed}:{node_id}:{frame_index}".encode("ascii")
+    ).digest()
+    return int.from_bytes(digest[:8], "big") % slot_count
+
+
 def ambient_model_descriptor(
     energy_trace_sha256: str,
     *,
@@ -152,7 +176,6 @@ def ambient_model_descriptor(
         "trace_loops": ENERGY_TRACE_LOOPS,
         "shared_environmental_trace": True,
     }
-    # Preserve the accepted scale=1, zero-variation profile identity exactly.
     if (
         power_scale != DEFAULT_ENERGY_POWER_SCALE
         or node_variation != DEFAULT_ENERGY_NODE_VARIATION
@@ -222,7 +245,10 @@ def ambient_model_descriptor(
             "slots": ALOHA_SLOTS,
             "slot_ms": SLOT_MS,
             "command_ms": COMMAND_MS,
-            "slot_selection": "uniform-random",
+            "slot_selection": "deterministic-uniform-hash",
+            "slot_rule": ALOHA_SLOT_RULE,
+            "slot_key": ["iot_seed", "node_id", "frame_index"],
+            "energy_treatment_invariant": True,
         },
         "collision": {
             "collision_window_ms": COLLISION_WINDOW_MS,
