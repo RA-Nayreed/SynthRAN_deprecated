@@ -41,7 +41,12 @@ class ProductLanguageTests(unittest.TestCase):
                     continue
                 content = path.read_text(encoding="utf-8").lower()
                 actor_marker = forbidden[0]
-                content = content.replace("user-" + actor_marker, "")
+                for protocol_form in (
+                    "user-" + actor_marker,
+                    "user_" + actor_marker,
+                    "user " + actor_marker,
+                ):
+                    content = content.replace(protocol_form, "")
                 for marker in forbidden:
                     self.assertNotIn(marker, content, relative)
 
