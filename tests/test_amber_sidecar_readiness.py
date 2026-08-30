@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from synthran.amber_experiment_runtime import _restart_edge_sidecar_and_wait
+from synthran.amber_experiment_runtime import (
+    _edge_bridge_connected,
+    _restart_edge_sidecar_and_wait,
+    _wait_edge_bridge_connected,
+)
 
 
 class AmberSidecarReadinessTests(unittest.TestCase):
@@ -31,6 +35,47 @@ class AmberSidecarReadinessTests(unittest.TestCase):
 
         restart.assert_called_once_with(inventory, "ue-pod")
         self.assertEqual(status.call_count, 3)
+
+    def test_bridge_probe_reads_shared_network_socket_state(self) -> None:
+        inventory = object()
+        with patch(
+            "synthran.amber_experiment_runtime._remote",
+            return_value="1\n",
+        ) as remote:
+            connected = _edge_bridge_connected(
+                inventory,
+                "ue-pod",
+                pdu_address="12.1.0.2",
+                central_address="10.10.0.2",
+                central_port=18884,
+            )
+
+        self.assertTrue(connected)
+        rendered = " ".join(str(value) for value in remote.call_args.args)
+        self.assertIn("/proc/net/tcp", rendered)
+        self.assertIn("12.1.0.2", rendered)
+        self.assertIn("10.10.0.2", rendered)
+        self.assertIn("18884", rendered)
+
+    def test_bridge_wait_requires_established_connection(self) -> None:
+        inventory = object()
+        with (
+            patch(
+                "synthran.amber_experiment_runtime._edge_bridge_connected",
+                side_effect=(False, False, True),
+            ) as connected,
+            patch("synthran.amber_experiment_runtime.time.sleep"),
+        ):
+            _wait_edge_bridge_connected(
+                inventory,
+                "ue-pod",
+                pdu_address="12.1.0.2",
+                central_address="10.10.0.2",
+                central_port=18884,
+                timeout_seconds=30,
+            )
+
+        self.assertEqual(connected.call_count, 3)
 
 
 if __name__ == "__main__":
