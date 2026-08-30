@@ -16,7 +16,12 @@ import subprocess
 import sys
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
-from synthran.ambient_contract import ambient_model_descriptor
+from synthran.ambient_contract import (
+    DEFAULT_ENERGY_NODE_VARIATION,
+    DEFAULT_ENERGY_POWER_SCALE,
+    ambient_model_descriptor,
+    validate_energy_treatment,
+)
 from synthran.dependencies import DependencyError, GitDependency, load_lock
 from synthran.experiment import (
     DEFAULT_SENSOR_PERIOD_SECONDS,
@@ -127,6 +132,8 @@ class IoTSourceSpec:
     sensor_count: int = SENSOR_COUNT
     sensor_period_seconds: int = DEFAULT_SENSOR_PERIOD_SECONDS
     topic_prefix: str = DEFAULT_TOPIC_PREFIX
+    energy_power_scale: float = DEFAULT_ENERGY_POWER_SCALE
+    energy_node_variation: float = DEFAULT_ENERGY_NODE_VARIATION
 
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)
@@ -146,6 +153,21 @@ class IoTSourceSpec:
             for character in self.topic_prefix
         ):
             raise IoTSourceError("topic prefix contains unsupported characters")
+        if self.profile == AMBIENT_PROFILE:
+            try:
+                validate_energy_treatment(
+                    self.energy_power_scale,
+                    self.energy_node_variation,
+                )
+            except ValueError as exc:
+                raise IoTSourceError(str(exc)) from exc
+        elif (
+            self.energy_power_scale != DEFAULT_ENERGY_POWER_SCALE
+            or self.energy_node_variation != DEFAULT_ENERGY_NODE_VARIATION
+        ):
+            raise IoTSourceError(
+                "energy treatment is valid only for the ambient-v1 profile"
+            )
 
     @property
     def topic_root(self) -> str:
@@ -154,6 +176,15 @@ class IoTSourceSpec:
     @property
     def sensor_ids(self) -> tuple[str, ...]:
         return tuple(f"sensor-{index:02d}" for index in range(1, SENSOR_COUNT + 1))
+
+    @property
+    def energy_treatment(self) -> dict[str, float] | None:
+        if self.profile != AMBIENT_PROFILE:
+            return None
+        return {
+            "external_power_scale": float(self.energy_power_scale),
+            "node_variation_fraction": float(self.energy_node_variation),
+        }
 
 
 @dataclass(frozen=True)
@@ -314,7 +345,11 @@ def profile_descriptor(
         if not energy_trace_sha256:
             raise IoTSourceError("ambient-v1 requires a pinned energy trace digest")
         try:
-            common["model"] = ambient_model_descriptor(energy_trace_sha256)
+            common["model"] = ambient_model_descriptor(
+                energy_trace_sha256,
+                energy_power_scale=spec.energy_power_scale,
+                energy_node_variation=spec.energy_node_variation,
+            )
         except ValueError as exc:
             raise IoTSourceError(str(exc)) from exc
     return common
@@ -347,6 +382,9 @@ def scenario_record(
         "profile_digest": resolved_profile_digest,
         "amber_commit": amber_commit,
         "energy_trace_sha256": energy_trace_sha256,
+        "energy_treatment": spec.energy_treatment,
+        "energy_power_scale": spec.energy_power_scale,
+        "energy_node_variation": spec.energy_node_variation,
         "data_contract": TELEMETRY_SCHEMA,
     }
 
@@ -660,6 +698,7 @@ class AmberSourceAdapter:
                 "amber_commit": dependency.commit,
                 "amber_checkout_clean": True,
                 "energy_trace_sha256": energy_trace_sha256,
+                "energy_treatment": spec.energy_treatment,
                 "planned_count": len(events),
                 "decoded_count": sum(event.decoded for event in events),
                 "source_loss_count": sum(not event.decoded for event in events),
