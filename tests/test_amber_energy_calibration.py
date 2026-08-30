@@ -77,6 +77,14 @@ class _FakeAmberSourceAdapter:
         return _plan(spec, energy_losses)
 
 
+class _FlatAmberSourceAdapter:
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    def prepare(self, spec, _duration_seconds, _run_directory):
+        return _plan(spec, 1)
+
+
 class AmberEnergyCalibrationTests(unittest.TestCase):
     def test_calibration_selects_in_band_energy_treatment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -153,6 +161,35 @@ class AmberEnergyCalibrationTests(unittest.TestCase):
         self.assertIsNone(result["recommended"])
         self.assertEqual(1.0, result["closest_observed"]["power_scale"])
         self.assertFalse(result["closest_observed"]["target_band_match"])
+
+    def test_flat_multi_scale_response_is_not_calibrated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch(
+                "synthran.research.energy_calibration.AmberSourceAdapter",
+                _FlatAmberSourceAdapter,
+            ):
+                result_path = execute_energy_calibration(
+                    calibration_id="ambient-energy-flat-response-test",
+                    network_run_id="accepted-rfsim-network",
+                    scales=(1.0, 0.5, 0.25),
+                    seed=424242,
+                    sensor_period_seconds=10,
+                    warmup_seconds=30,
+                    duration_seconds=40,
+                    target_energy_loss_min=0.20,
+                    target_energy_loss_max=0.30,
+                    repository_root=root,
+                    dependency_root=root / ".deps",
+                    calibration_root=root / "calibrations",
+                )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["target_band_found"])
+        self.assertFalse(result["treatment_response_observed"])
+        self.assertFalse(result["calibration_valid"])
+        self.assertIsNone(result["recommended"])
+        self.assertEqual(0.25, result["closest_observed"]["energy_loss_ratio"])
 
 
 if __name__ == "__main__":
