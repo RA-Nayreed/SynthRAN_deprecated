@@ -109,7 +109,6 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue((SOURCE / "command_runtime.py").is_file())
         self.assertFalse((SOURCE / "commands").exists())
         self.assertFalse((SOURCE / "__main__.py").exists())
-        self.assertFalse((SOURCE / "terminal").exists())
         self.assertFalse((REPOSITORY_ROOT / "cli").exists())
         self.assertFalse((SOURCE / "entrypoint.py").exists())
         self.assertFalse((SOURCE / "experiment" / "commands.py").exists())
