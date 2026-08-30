@@ -210,17 +210,19 @@ class RfsimEdgeTransportTests(unittest.TestCase):
             processes=[FakeProcess("edge", stopped)],  # type: ignore[list-item]
             owned_remote_pids={18883: (101,), 18886: (102,)},
         )
-        remote_closed = [False, False, False, True, True, True, True]
         with patch(
             "synthran.iot_edge_transport._local_port_is_closed",
             return_value=True,
         ), patch(
             "synthran.iot_edge_transport._remote_port_is_closed",
-            side_effect=remote_closed,
+            side_effect=(False, True, True),
         ), patch(
             "synthran.iot_edge_transport._reap_owned_remote_listeners",
             return_value=(),
-        ) as reap, patch("synthran.iot_edge_transport.time.sleep"):
+        ) as reap, patch(
+            "synthran.iot_edge_transport.time.monotonic",
+            side_effect=(0.0, 4.0),
+        ):
             session.stop()
 
         reap.assert_called_once_with(
