@@ -47,7 +47,7 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
         "--iot-source",
         choices=("cooja", "amber"),
         default="cooja",
-        help="IoT source; Cooja remains the transitional default until Amber cutover",
+        help="IoT source implementation",
     )
     run.add_argument(
         "--iot-profile",
@@ -80,9 +80,7 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
             "--iot-profile",
             choices=(TRANSPORT_PROFILE, AMBIENT_PROFILE),
             default=None,
-            help=(
-                "select Amber research v2; omit for immutable legacy Cooja v1 behavior"
-            ),
+            help="Amber research profile; omit to use legacy Cooja research artifacts",
         )
 
 
@@ -239,9 +237,7 @@ def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
         yield
         return
     if args.radio != "rfsim":
-        raise BackendError(
-            "--iot-source amber is not enabled for R2Lab until the physical Amber adapter is merged"
-        )
+        raise BackendError("--iot-source amber is not supported for the R2Lab backend")
 
     original = command_runtime._experiment_run
 
