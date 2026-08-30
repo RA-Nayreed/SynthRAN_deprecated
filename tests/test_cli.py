@@ -4,7 +4,6 @@ import argparse
 from pathlib import Path
 import tomllib
 import unittest
-from unittest.mock import patch
 
 from synthran.backends.base import BackendError
 from synthran.cli import _parser, _selected_iot_runtime
@@ -205,6 +204,88 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual("research", args.command)
         self.assertEqual("campaign-plan", args.research_command)
+
+    def test_legacy_research_run_omits_iot_profile(self) -> None:
+        args = _parser().parse_args(
+            [
+                "research",
+                "run",
+                "--campaign-id",
+                "campaign-001",
+                "--network-run-id",
+                "virtual-001",
+                "--run-id",
+                "research-001",
+                "--condition",
+                "baseline",
+                "--probe-target",
+                "198.51.100.1",
+                "--inventory",
+                "hosts.ini",
+            ]
+        )
+        self.assertIsNone(args.iot_profile)
+        self.assertEqual(424242, args.seed)
+        self.assertEqual(10, args.sensor_period)
+
+    def test_amber_research_keeps_seed_flag_for_iot_seed_compatibility(self) -> None:
+        args = _parser().parse_args(
+            [
+                "research",
+                "run",
+                "--campaign-id",
+                "campaign-001",
+                "--network-run-id",
+                "virtual-001",
+                "--run-id",
+                "research-001",
+                "--condition",
+                "baseline",
+                "--probe-target",
+                "198.51.100.1",
+                "--inventory",
+                "hosts.ini",
+                "--iot-profile",
+                "ambient-v1",
+                "--seed",
+                "77",
+                "--sensor-period",
+                "20",
+            ]
+        )
+        self.assertEqual("ambient-v1", args.iot_profile)
+        self.assertEqual(77, args.seed)
+        self.assertEqual(20, args.sensor_period)
+
+    def test_amber_campaign_and_analysis_accept_profile_selection(self) -> None:
+        campaign = _parser().parse_args(
+            [
+                "research",
+                "campaign-run",
+                "--campaign",
+                "campaign.json",
+                "--inventory",
+                "hosts.ini",
+                "--target",
+                "198.51.100.1",
+                "--iot-profile",
+                "transport-v1",
+            ]
+        )
+        analyze = _parser().parse_args(
+            [
+                "research",
+                "analyze",
+                "--campaign",
+                "campaign.json",
+                "--out",
+                "analysis.json",
+                "--iot-profile",
+                "transport-v1",
+            ]
+        )
+        self.assertEqual("transport-v1", campaign.iot_profile)
+        self.assertEqual("transport-v1", analyze.iot_profile)
 
     def test_repository_maintenance_is_namespaced(self) -> None:
         args = _parser().parse_args(["dev", "privacy", "scan", "--worktree"])
