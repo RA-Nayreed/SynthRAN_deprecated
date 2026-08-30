@@ -7,7 +7,6 @@ import unittest
 from synthran.ambient_contract import (
     ENERGY_TRACE_SHA256,
     ambient_model_descriptor,
-    clear_run_energy_treatment,
     deterministic_node_energy_factor,
     validate_energy_treatment,
 )
@@ -63,46 +62,33 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
                 energy_power_scale=0.5,
             )
 
-    def test_research_treatment_is_consumed_by_live_source_spec(self) -> None:
-        run_id = "ambient-energy-handoff-test"
-        try:
-            spec = AmberResearchSpec(
-                campaign_id="ambient-energy-handoff-campaign",
-                run_id=run_id,
-                network_run_id="ambient-energy-handoff-network",
-                condition="baseline",
-                iot_profile=AMBIENT_PROFILE,
-                energy_power_scale=0.5,
-                energy_node_variation=0.1,
-                load=LoadSpec(),
-                probe_target="172.28.2.77",
-            )
-            self.assertEqual(
-                {
-                    "external_power_scale": 0.5,
-                    "node_variation_fraction": 0.1,
-                },
-                spec.energy_treatment,
-            )
-            source_spec = IoTSourceSpec(
-                run_id=run_id,
-                network_run_id="ambient-energy-handoff-network",
-                profile=AMBIENT_PROFILE,
-            )
-            self.assertEqual(0.5, source_spec.energy_power_scale)
-            self.assertEqual(0.1, source_spec.energy_node_variation)
-
-            # The registration is one-shot. A second independent source spec
-            # for the same run ID falls back to the normal control treatment.
-            second = IoTSourceSpec(
-                run_id=run_id,
-                network_run_id="ambient-energy-handoff-network",
-                profile=AMBIENT_PROFILE,
-            )
-            self.assertEqual(1.0, second.energy_power_scale)
-            self.assertEqual(0.0, second.energy_node_variation)
-        finally:
-            clear_run_energy_treatment(run_id)
+    def test_research_and_source_specs_share_explicit_treatment(self) -> None:
+        research_spec = AmberResearchSpec(
+            campaign_id="ambient-energy-explicit-campaign",
+            run_id="ambient-energy-explicit-test",
+            network_run_id="ambient-energy-explicit-network",
+            condition="baseline",
+            iot_profile=AMBIENT_PROFILE,
+            energy_power_scale=0.5,
+            energy_node_variation=0.1,
+            load=LoadSpec(),
+            probe_target="172.28.2.77",
+        )
+        source_spec = IoTSourceSpec(
+            run_id=research_spec.run_id,
+            network_run_id=research_spec.network_run_id,
+            profile=research_spec.iot_profile,
+            seed=research_spec.iot_seed,
+            sensor_period_seconds=research_spec.sensor_period_seconds,
+            energy_power_scale=research_spec.energy_power_scale,
+            energy_node_variation=research_spec.energy_node_variation,
+        )
+        expected = {
+            "external_power_scale": 0.5,
+            "node_variation_fraction": 0.1,
+        }
+        self.assertEqual(expected, research_spec.energy_treatment)
+        self.assertEqual(expected, source_spec.energy_treatment)
 
     def test_pinned_amber_plan_records_energy_treatment_and_provenance(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
