@@ -43,7 +43,6 @@ ENERGY_TRACE_TIME_UNITS = "undeclared-in-workbook"
 DEFAULT_ENERGY_POWER_SCALE = 1.0
 DEFAULT_ENERGY_NODE_VARIATION = 0.0
 MAX_ENERGY_NODE_VARIATION = 0.5
-_RUN_ENERGY_TREATMENTS: dict[str, tuple[float, float]] = {}
 
 CAPACITANCE_F = 300e-6
 R_SERIES_OHM = 5000.0
@@ -99,34 +98,6 @@ def validate_energy_treatment(
             f"Ambient energy node variation must be in [0, {MAX_ENERGY_NODE_VARIATION}]"
         )
     return scale, variation
-
-
-def register_run_energy_treatment(
-    run_id: str,
-    power_scale: float,
-    node_variation: float,
-) -> None:
-    """Register one live research treatment until its source spec consumes it."""
-
-    if not isinstance(run_id, str) or not run_id:
-        raise ValueError("Ambient energy treatment run ID must be non-empty")
-    treatment = validate_energy_treatment(power_scale, node_variation)
-    existing = _RUN_ENERGY_TREATMENTS.get(run_id)
-    if existing is not None and existing != treatment:
-        raise ValueError("Ambient energy treatment for this run is already registered")
-    _RUN_ENERGY_TREATMENTS[run_id] = treatment
-
-
-def consume_run_energy_treatment(run_id: str) -> tuple[float, float] | None:
-    """Consume the exact treatment registered for one live source-plan creation."""
-
-    return _RUN_ENERGY_TREATMENTS.pop(run_id, None)
-
-
-def clear_run_energy_treatment(run_id: str) -> None:
-    """Drop a pending treatment after plan-only use or failed dispatch."""
-
-    _RUN_ENERGY_TREATMENTS.pop(run_id, None)
 
 
 def deterministic_node_energy_factor(
@@ -260,15 +231,9 @@ def ambient_model_descriptor(
             "cancellation_factor": SIC_CANCELLATION_FACTOR,
             "noise_figure_db": NOISE_FIGURE_DB,
             "bandwidth_hz": BANDWIDTH_HZ,
-            "decoded_labels": [
-                "decoded",
-                "capture-decoded",
-                "sic-recovered",
-            ],
         },
         "payload": {
-            "source_outcome": "amber",
-            "telemetry_value": "synthran-canonical-sensor-sequence",
-            "amber_sensor_payload_recorded_as_diagnostic": True,
+            "amber_sensor_payload": "controller-generated-integer-100-255",
+            "synthran_value_milli": "deterministic-canonical-transport-value",
         },
     }
