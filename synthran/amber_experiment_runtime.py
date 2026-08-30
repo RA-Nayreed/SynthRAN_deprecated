@@ -237,6 +237,91 @@ def _restart_edge_sidecar_and_wait(
     )
 
 
+def _edge_bridge_connected(
+    inventory: NetworkInventory,
+    pod: str,
+    *,
+    pdu_address: str,
+    central_address: str,
+    central_port: int,
+) -> bool:
+    probe = r'''
+import socket, sys
+local_ip, remote_ip, remote_port = sys.argv[1], sys.argv[2], int(sys.argv[3])
+
+def decode_ipv4(raw):
+    try:
+        return socket.inet_ntoa(bytes.fromhex(raw)[::-1])
+    except Exception:
+        return None
+
+connected = False
+try:
+    lines = open('/proc/net/tcp', encoding='ascii', errors='replace').read().splitlines()[1:]
+except OSError:
+    lines = []
+for line in lines:
+    fields = line.split()
+    if len(fields) < 4 or fields[3] != '01':
+        continue
+    local_raw, _ = fields[1].split(':', 1)
+    remote_raw, remote_port_raw = fields[2].split(':', 1)
+    if (
+        decode_ipv4(local_raw) == local_ip
+        and decode_ipv4(remote_raw) == remote_ip
+        and int(remote_port_raw, 16) == remote_port
+    ):
+        connected = True
+        break
+print('1' if connected else '0')
+'''
+    output = _remote(
+        inventory,
+        "sh",
+        "-c",
+        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl exec "
+        f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -c ue -- "
+        "python3 -c "
+        f"{shlex.quote(probe)} {shlex.quote(pdu_address)} "
+        f"{shlex.quote(central_address)} {int(central_port)}",
+        label="Amber edge MQTT bridge connection probe",
+    ).strip()
+    if output not in {"0", "1"}:
+        raise ExperimentError("Amber edge MQTT bridge connection probe returned invalid data")
+    return output == "1"
+
+
+def _wait_edge_bridge_connected(
+    inventory: NetworkInventory,
+    pod: str,
+    *,
+    pdu_address: str,
+    central_address: str,
+    central_port: int,
+    timeout_seconds: int = 60,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    latest = "bridge connection not yet observed"
+    while time.monotonic() < deadline:
+        try:
+            if _edge_bridge_connected(
+                inventory,
+                pod,
+                pdu_address=pdu_address,
+                central_address=central_address,
+                central_port=central_port,
+            ):
+                return
+            latest = "no established bridge socket"
+        except Exception as exc:
+            latest = str(exc)
+        time.sleep(1)
+    raise ExperimentError(
+        "Amber edge MQTT bridge did not establish the accepted PDU-to-central connection "
+        f"within {timeout_seconds}s ({latest})"
+    )
+
+
 def _probe_amber_host(inventory: NetworkInventory) -> None:
     """Check only capabilities required by the Amber source transport."""
 
@@ -543,6 +628,7 @@ def execute_amber_experiment(
             transport_context,
             pdu_address=runtime_state.pdu_address,
         )
+        _add_ue_route(inventory, ue_pod, core_address)
         edge_config = render_edge_mosquitto_config(
             transport_context,
             central_broker_address=core_address,
@@ -560,6 +646,24 @@ def execute_amber_experiment(
             )
             raise ExperimentError(
                 "Amber edge MQTT sidecar restart did not become Ready; diagnostics saved"
+            ) from exc
+        try:
+            _wait_edge_bridge_connected(
+                inventory,
+                ue_pod,
+                pdu_address=transport_context.pdu_address,
+                central_address=core_address,
+                central_port=CENTRAL_PORT,
+            )
+        except Exception as exc:
+            _collect_rollout_diagnostics(
+                inventory,
+                network_run_id=transport_context.network_run_id,
+                log_path=logs / "amber-edge-bridge-diagnostics.log",
+                private_paths=(repository_root, dependency_root, run_directory, inventory.path),
+            )
+            raise ExperimentError(
+                "Amber edge MQTT bridge did not connect over the accepted 5G path; diagnostics saved"
             ) from exc
 
         after_patch = verify_network_path(
@@ -586,7 +690,6 @@ def execute_amber_experiment(
                 + (f" ({failures})" if failures else "")
                 + "; diagnostics saved"
             )
-        _add_ue_route(inventory, ue_pod, core_address)
         tx_before = _interface_counter(inventory, ue_pod, "tun_srsue1", "tx_bytes")
         rx_before = _interface_counter(inventory, ue_pod, "tun_srsue1", "rx_bytes")
 
@@ -757,7 +860,16 @@ def execute_amber_experiment(
                 edge_session.stop()
                 edge_cleanup = edge_session.evidence()
                 if not edge_cleanup.get("cleanup_valid"):
-                    cleanup_errors.append("RFSIM Amber edge transport cleanup was incomplete")
+                    details = edge_cleanup.get("cleanup_errors")
+                    if isinstance(details, list) and details:
+                        cleanup_errors.extend(
+                            f"RFSIM Amber edge transport: {detail}"
+                            for detail in details
+                        )
+                    else:
+                        cleanup_errors.append(
+                            "RFSIM Amber edge transport cleanup was incomplete"
+                        )
             except Exception as exc:
                 cleanup_errors.append(f"edge transport cleanup: {exc}")
         if central_forward is not None:
