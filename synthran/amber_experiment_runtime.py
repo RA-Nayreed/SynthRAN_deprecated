@@ -1,0 +1,613 @@
+"""Live Amber workload execution over the accepted RFSIM 5G path."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import shlex
+import sys
+from typing import Any, Mapping, TextIO
+
+from synthran.dependencies import DependencyLock
+from synthran.experiment import (
+    ExperimentError,
+    build_scenario,
+    load_jsonl,
+    render_edge_mosquitto_config,
+    validate_run_id,
+    write_parquet,
+)
+from synthran.experiment_resources import (
+    CENTRAL_PORT,
+    KUBERNETES_NAMESPACE,
+    names,
+    render_edge_patch,
+    render_experiment_objects,
+)
+from synthran.experiment.runtime import (
+    DEFAULT_COLLECTION_SECONDS,
+    DEFAULT_MINIMUM_PER_SENSOR,
+    LOCAL_CENTRAL_FORWARD_PORT,
+    ExperimentRunResult,
+    _add_ue_route,
+    _cleanup_live_resources,
+    _collect_rollout_diagnostics,
+    _core_address,
+    _discover_ue_deployment,
+    _interface_counter,
+    _kubectl_apply_object,
+    _kubectl_patch_deployment,
+    _probe_experiment_host,
+    _probe_ssh_forwarding,
+    _remote,
+    _replace_edge_runtime_config,
+    _restart_edge_sidecar,
+    _ssh_tunnel_command,
+    _start_process,
+    _transfer_file,
+    _wait_rollout,
+    _wait_tcp,
+)
+from synthran.fiveg_ansible import NetworkInventory
+from synthran.iot_collector import PortableMqttCollectorSession
+from synthran.iot_edge_transport import (
+    RFSIM_AMBER_INGRESS_PORT,
+    RFSIM_EDGE_FORWARD_PORT,
+    RfsimEdgeTransportAdapter,
+    RfsimEdgeTransportSession,
+)
+from synthran.iot_publisher import AmberReplaySession
+from synthran.iot_source import (
+    AMBER_SOURCE_ID,
+    DEFAULT_IOT_SEED,
+    TRANSPORT_PROFILE,
+    AmberSourceAdapter,
+    IoTSourceSpec,
+    reconcile_source_and_transport,
+)
+from synthran.live_preflight import LivePreflightError, ssh_command
+from synthran.network_runtime import verify_network_path
+from synthran.rfsim_runtime import reconcile_rfsim_runtime
+
+
+AMBER_EXPERIMENT_SCHEMA = "synthran/experiment-run/v2alpha1"
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(dict(value), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    temporary.replace(path)
+
+
+def _manifest(
+    *,
+    run_id: str,
+    network_run_id: str,
+    scenario_name: str,
+    profile: str,
+    seed: int,
+    period: int,
+    status: str,
+    failure: str | None = None,
+) -> dict[str, Any]:
+    value: dict[str, Any] = {
+        "schema": AMBER_EXPERIMENT_SCHEMA,
+        "run_id": run_id,
+        "network_run_id": network_run_id,
+        "status": status,
+        "iot_source": AMBER_SOURCE_ID,
+        "iot_profile": profile,
+        "iot_seed": seed,
+        "sensor_period_seconds": period,
+        "scenario": scenario_name,
+        "updated_at_utc": _utc_now(),
+        "reservation_action": "none",
+        "network_deployment_action": "none",
+    }
+    if failure:
+        value["failure"] = failure
+    return value
+
+
+def execute_amber_experiment(
+    *,
+    inventory: NetworkInventory,
+    lock: DependencyLock,
+    dependency_root: Path,
+    network_manifest: Path,
+    network_evidence: Path,
+    run_id: str,
+    repository_root: Path,
+    run_root: Path,
+    collection_seconds: int = DEFAULT_COLLECTION_SECONDS,
+    minimum_per_sensor: int = DEFAULT_MINIMUM_PER_SENSOR,
+    iot_profile: str = TRANSPORT_PROFILE,
+    iot_seed: int = DEFAULT_IOT_SEED,
+    sensor_period_seconds: int = 10,
+    progress: TextIO | None = None,
+) -> ExperimentRunResult:
+    """Run an immutable Amber plan through the live RFSIM user plane."""
+
+    def report(message: str) -> None:
+        if progress is not None:
+            print(f"[synthran] {message}", file=progress, flush=True)
+
+    if sys.platform != "linux":
+        raise ExperimentError("live experiment execution requires Linux")
+    if os.environ.get("CONDA_DEFAULT_ENV") != "synthran":
+        raise ExperimentError(
+            "live experiment execution requires the active synthran Conda environment"
+        )
+    if collection_seconds < 30 or collection_seconds > 3600:
+        raise ExperimentError("collection duration must be between 30 and 3600 seconds")
+    if minimum_per_sensor < 1 or minimum_per_sensor > 100:
+        raise ExperimentError("minimum events per sensor must be between 1 and 100")
+
+    run_id = validate_run_id(run_id)
+    transport_context = build_scenario(
+        run_id=run_id,
+        network_manifest=network_manifest,
+        network_evidence=network_evidence,
+    )
+    source_spec = IoTSourceSpec(
+        run_id=run_id,
+        network_run_id=transport_context.network_run_id,
+        source=AMBER_SOURCE_ID,
+        profile=iot_profile,
+        seed=iot_seed,
+        sensor_period_seconds=sensor_period_seconds,
+    )
+
+    report(f"experiment: {run_id}")
+    report("network prerequisite: verifying path-proven baseline...")
+    base = verify_network_path(
+        inventory=inventory,
+        lock=lock,
+        run_id=transport_context.network_run_id,
+        timeout_seconds=120,
+    )
+    if not base.ready:
+        raise ExperimentError("accepted network no longer satisfies path proof")
+    report("network prerequisite: OK")
+
+    _probe_experiment_host(
+        inventory,
+        required_ports=(
+            RFSIM_EDGE_FORWARD_PORT,
+            LOCAL_CENTRAL_FORWARD_PORT,
+            RFSIM_AMBER_INGRESS_PORT,
+        ),
+    )
+    _probe_ssh_forwarding(inventory)
+
+    run_root = run_root.resolve()
+    run_root.mkdir(parents=True, exist_ok=True)
+    run_directory = run_root / run_id
+    try:
+        run_directory.mkdir()
+    except FileExistsError as exc:
+        raise ExperimentError("experiment run directory already exists; choose a new run ID") from exc
+    logs = run_directory / "logs"
+    logs.mkdir()
+
+    source_adapter = AmberSourceAdapter(
+        repository_root=repository_root,
+        dependency_root=dependency_root,
+    )
+    report("Amber source: preparing immutable event plan...")
+    plan = source_adapter.prepare(source_spec, collection_seconds, run_directory)
+    report(
+        f"Amber source: {plan.planned_count} opportunities, "
+        f"{plan.decoded_count} decoded, {plan.source_loss_count} classified source loss"
+    )
+
+    manifest_path = run_directory / "manifest.json"
+    wrapper_evidence_path = run_directory / "experiment-evidence.json"
+    jsonl_path = run_directory / "telemetry.jsonl"
+    rejected_path = run_directory / "rejected-events.jsonl"
+    parquet_path = run_directory / "telemetry.parquet"
+    _atomic_json(
+        manifest_path,
+        _manifest(
+            run_id=run_id,
+            network_run_id=transport_context.network_run_id,
+            scenario_name=plan.scenario_path.name,
+            profile=iot_profile,
+            seed=iot_seed,
+            period=sensor_period_seconds,
+            status="running",
+        ),
+    )
+
+    remote_workspace = f"/tmp/synthran/{run_id}"
+    remote_workspace_created = False
+    ue_deployment: str | None = None
+    ue_pod: str | None = None
+    central_forward = None
+    edge_session: RfsimEdgeTransportSession | None = None
+    collector: PortableMqttCollectorSession | None = None
+    publisher: AmberReplaySession | None = None
+    failure: str | None = None
+    cleanup_errors: list[str] = []
+    transport_payload: dict[str, Any] = {}
+    ready = False
+
+    try:
+        _remote(
+            inventory,
+            "mkdir",
+            "-p",
+            remote_workspace,
+            label="Amber remote workspace creation",
+        )
+        remote_workspace_created = True
+        _transfer_file(
+            inventory,
+            repository_root.resolve() / "synthran" / "ingress.py",
+            f"{remote_workspace}/ingress.py",
+            label="Amber counted ingress transfer",
+        )
+
+        core_address = _core_address(inventory)
+        ue_deployment = _discover_ue_deployment(
+            inventory, transport_context.network_run_id
+        )
+        resource_names = names(transport_context)
+        for index, value in enumerate(
+            render_experiment_objects(
+                transport_context,
+                lock=lock,
+                core_node=inventory.core_node.name,
+                core_address=core_address,
+            ),
+            start=1,
+        ):
+            _kubectl_apply_object(
+                inventory,
+                value,
+                label=f"Amber experiment Kubernetes object {index}",
+            )
+        _remote(
+            inventory,
+            "sh",
+            "-c",
+            "KUBECONFIG=/etc/kubernetes/admin.conf kubectl rollout status deployment/"
+            f"{resource_names['central_deployment']} -n {KUBERNETES_NAMESPACE} "
+            "--timeout=180s",
+            label="Amber central MQTT rollout",
+            timeout_seconds=200,
+        )
+
+        _kubectl_patch_deployment(
+            inventory,
+            ue_deployment,
+            render_edge_patch(
+                transport_context,
+                lock=lock,
+                core_address=core_address,
+            ),
+            label="Amber srsUE MQTT sidecar patch",
+        )
+        try:
+            _wait_rollout(inventory, ue_deployment, label="Amber srsUE MQTT rollout")
+        except Exception as exc:
+            _collect_rollout_diagnostics(
+                inventory,
+                network_run_id=transport_context.network_run_id,
+                log_path=logs / "amber-srsue-mqtt-rollout-diagnostics.log",
+                private_paths=(
+                    repository_root,
+                    dependency_root,
+                    run_directory,
+                    inventory.path,
+                ),
+            )
+            raise ExperimentError(
+                "Amber edge MQTT sidecar did not become Ready"
+            ) from exc
+
+        runtime_state = reconcile_rfsim_runtime(
+            inventory,
+            network_run_id=transport_context.network_run_id,
+        )
+        ue_pod = runtime_state.ue_pod
+        transport_context = replace(
+            transport_context,
+            pdu_address=runtime_state.pdu_address,
+        )
+        edge_config = render_edge_mosquitto_config(
+            transport_context,
+            central_broker_address=core_address,
+            central_broker_port=CENTRAL_PORT,
+        )
+        _replace_edge_runtime_config(inventory, ue_pod, edge_config)
+        _restart_edge_sidecar(inventory, ue_pod)
+
+        after_patch = verify_network_path(
+            inventory=inventory,
+            lock=lock,
+            run_id=transport_context.network_run_id,
+            timeout_seconds=120,
+        )
+        if not after_patch.ready:
+            raise ExperimentError(
+                "srsUE sidecar patch broke the accepted network path"
+            )
+        _add_ue_route(inventory, ue_pod, core_address)
+        tx_before = _interface_counter(
+            inventory, ue_pod, "tun_srsue1", "tx_bytes"
+        )
+        rx_before = _interface_counter(
+            inventory, ue_pod, "tun_srsue1", "rx_bytes"
+        )
+
+        central_forward = _start_process(
+            "Amber central MQTT port-forward",
+            _ssh_tunnel_command(
+                inventory,
+                local_port=LOCAL_CENTRAL_FORWARD_PORT,
+                remote_port=LOCAL_CENTRAL_FORWARD_PORT,
+                remote_command=(
+                    "KUBECONFIG=/etc/kubernetes/admin.conf kubectl port-forward "
+                    f"-n {KUBERNETES_NAMESPACE} "
+                    f"deployment/{resource_names['central_deployment']} "
+                    f"{LOCAL_CENTRAL_FORWARD_PORT}:{CENTRAL_PORT} "
+                    "--address 127.0.0.1"
+                ),
+            ),
+            cwd=repository_root,
+            log_path=logs / "amber-central-port-forward.log",
+        )
+        _wait_tcp(
+            "127.0.0.1",
+            LOCAL_CENTRAL_FORWARD_PORT,
+            timeout_seconds=30,
+            process=central_forward,
+        )
+
+        collector = PortableMqttCollectorSession(
+            run_id=run_id,
+            sensor_count=source_spec.sensor_count,
+            topic_root=source_spec.topic_root,
+            host="127.0.0.1",
+            port=LOCAL_CENTRAL_FORWARD_PORT,
+            jsonl_path=jsonl_path,
+            rejected_path=rejected_path,
+            default_timeout_seconds=max(30.0, float(collection_seconds) + 30.0),
+        ).start()
+        collector.wait_ready(timeout=30.0)
+
+        edge_session = RfsimEdgeTransportAdapter(
+            inventory=inventory,
+            repository_root=repository_root,
+        ).start(
+            run_id=run_id,
+            ue_pod=ue_pod,
+            remote_workspace=remote_workspace,
+            run_directory=run_directory,
+        )
+
+        publisher = AmberReplaySession(
+            plan=plan,
+            endpoint=edge_session.mqtt_endpoint,
+            collector_barrier=collector,
+        ).start()
+        collector.wait_start_canaries(
+            source_spec.sensor_ids,
+            timeout=30.0,
+        )
+        publisher_evidence = publisher.wait(
+            timeout=float(collection_seconds) + 60.0
+        )
+        collector.wait_end_canaries(
+            source_spec.sensor_ids,
+            timeout=30.0,
+        )
+
+        decoded_pairs = tuple(event.key for event in plan.events if event.decoded)
+        records = collector.wait_expected_pairs(
+            decoded_pairs,
+            timeout=30.0,
+        )
+        central_pairs = [
+            (str(record["sensor_id"]), int(record["sequence"]))
+            for record in records
+        ]
+        published_pairs = [
+            (event.sensor_id, int(event.sequence))
+            for event in publisher._events
+            if event.kind == "telemetry" and event.success and event.sequence is not None
+        ]
+        reconciliation = reconcile_source_and_transport(
+            plan.events,
+            published_pairs=published_pairs,
+            central_pairs=central_pairs,
+        )
+        if not reconciliation.valid:
+            raise ExperimentError(
+                "Amber source/transport reconciliation found loss, duplicates, or unexpected telemetry"
+            )
+        if iot_profile == TRANSPORT_PROFILE and plan.source_loss_count != 0:
+            raise ExperimentError("transport-v1 produced scientific source loss")
+        if iot_profile == TRANSPORT_PROFILE:
+            counts: dict[str, int] = {}
+            for record in records:
+                sensor_id = str(record["sensor_id"])
+                counts[sensor_id] = counts.get(sensor_id, 0) + 1
+            if len(counts) != source_spec.sensor_count or any(
+                count < minimum_per_sensor for count in counts.values()
+            ):
+                raise ExperimentError(
+                    "transport-v1 did not satisfy the minimum telemetry window"
+                )
+
+        ingress_snapshot = edge_session.snapshot()
+        if (
+            ingress_snapshot.accepted_connections < source_spec.sensor_count
+            or ingress_snapshot.upstream_bytes <= 0
+        ):
+            raise ExperimentError(
+                "Amber MQTT ingress did not prove all ten publisher connections"
+            )
+
+        tx_after = _interface_counter(
+            inventory, ue_pod, "tun_srsue1", "tx_bytes"
+        )
+        rx_after = _interface_counter(
+            inventory, ue_pod, "tun_srsue1", "rx_bytes"
+        )
+        if tx_after <= tx_before:
+            raise ExperimentError(
+                "tun_srsue1 TX counter did not increase during Amber delivery"
+            )
+
+        live_network = verify_network_path(
+            inventory=inventory,
+            lock=lock,
+            run_id=transport_context.network_run_id,
+            timeout_seconds=120,
+        )
+        if not live_network.ready:
+            raise ExperimentError(
+                "accepted UPF path was not valid after Amber telemetry delivery"
+            )
+
+        write_parquet(records, parquet_path)
+        collector_evidence = collector.evidence()
+        transport_payload = {
+            "publisher": publisher_evidence.to_dict(),
+            "collector": collector_evidence.to_dict(),
+            "ingress": ingress_snapshot.to_dict(),
+            "reconciliation": reconciliation.to_dict(),
+            "ue": {
+                "interface": "tun_srsue1",
+                "tx_before": tx_before,
+                "tx_after": tx_after,
+                "tx_delta": tx_after - tx_before,
+                "rx_before": rx_before,
+                "rx_after": rx_after,
+                "rx_delta": max(0, rx_after - rx_before),
+            },
+            "network_reproof_ready": True,
+        }
+        ready = True
+    except Exception as exc:
+        failure = str(exc)
+        report(f"error: {failure}")
+    finally:
+        if publisher is not None:
+            try:
+                publisher.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"publisher cleanup: {exc}")
+        if collector is not None:
+            try:
+                collector.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"collector cleanup: {exc}")
+        if edge_session is not None:
+            try:
+                edge_session.stop()
+                edge_cleanup = edge_session.evidence()
+                if not edge_cleanup.get("cleanup_valid"):
+                    cleanup_errors.append("RFSIM Amber edge transport cleanup was incomplete")
+            except Exception as exc:
+                cleanup_errors.append(f"edge transport cleanup: {exc}")
+        if central_forward is not None:
+            try:
+                central_forward.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"central forward cleanup: {exc}")
+        if remote_workspace_created:
+            try:
+                _remote(
+                    inventory,
+                    "rm",
+                    "-rf",
+                    remote_workspace,
+                    label="Amber remote workspace cleanup",
+                )
+            except Exception as exc:
+                cleanup_errors.append(f"remote workspace cleanup: {exc}")
+
+        cleanup_check = _cleanup_live_resources(
+            inventory=inventory,
+            lock=lock,
+            scenario=transport_context,
+            ue_deployment=ue_deployment,
+            cleanup_errors=cleanup_errors,
+        )
+        cleanup_valid = cleanup_check.passed
+        ready = ready and cleanup_valid and failure is None
+
+        try:
+            iot_evidence = json.loads(plan.evidence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            iot_evidence = {
+                "schema": "synthran/iot-evidence/v2alpha1",
+                "run_id": run_id,
+            }
+        iot_evidence["live_transport"] = transport_payload or None
+        iot_evidence["cleanup"] = {
+            "valid": cleanup_valid,
+            "detail": cleanup_check.detail,
+            "errors": cleanup_errors,
+        }
+        iot_evidence["ready"] = ready
+        if failure:
+            iot_evidence["failure"] = failure
+        _atomic_json(plan.evidence_path, iot_evidence)
+
+        wrapper = {
+            "schema": "synthran/experiment-evidence/v2alpha1",
+            "run_id": run_id,
+            "network_run_id": transport_context.network_run_id,
+            "iot_source": AMBER_SOURCE_ID,
+            "iot_profile": iot_profile,
+            "iot_seed": iot_seed,
+            "profile_digest": plan.profile_digest,
+            "ready": ready,
+            "iot_evidence": plan.evidence_path.name,
+            "telemetry_jsonl": jsonl_path.name if jsonl_path.is_file() else None,
+            "telemetry_parquet": parquet_path.name if parquet_path.is_file() else None,
+            "updated_at_utc": _utc_now(),
+        }
+        if failure:
+            wrapper["failure"] = failure
+        _atomic_json(wrapper_evidence_path, wrapper)
+        _atomic_json(
+            manifest_path,
+            _manifest(
+                run_id=run_id,
+                network_run_id=transport_context.network_run_id,
+                scenario_name=plan.scenario_path.name,
+                profile=iot_profile,
+                seed=iot_seed,
+                period=sensor_period_seconds,
+                status="accepted" if ready else "failed",
+                failure=failure,
+            ),
+        )
+
+    if failure:
+        raise ExperimentError(failure)
+    if not ready:
+        raise ExperimentError("Amber experiment failed its cleanup or acceptance gate")
+    return ExperimentRunResult(
+        run_id=run_id,
+        run_directory=run_directory,
+        evidence_path=wrapper_evidence_path,
+        ready=True,
+    )
