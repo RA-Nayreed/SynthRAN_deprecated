@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
+    register_run_energy_treatment,
     validate_energy_treatment,
 )
 from synthran.iot_source import (
@@ -84,6 +85,15 @@ class AmberResearchSpec:
             raise ResearchError("non-baseline condition requires an enabled load")
         if self.probe_target is not None and not self.probe_target.strip():
             raise ResearchError("probe target must not be empty")
+        if self.iot_profile == AMBIENT_PROFILE:
+            try:
+                register_run_energy_treatment(
+                    self.run_id,
+                    self.energy_power_scale,
+                    self.energy_node_variation,
+                )
+            except ValueError as exc:
+                raise ResearchError(str(exc)) from exc
 
     @property
     def total_source_seconds(self) -> int:
