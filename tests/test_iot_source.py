@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from synthran.ambient_contract import ENERGY_TRACE_SHA256
 from synthran.dependencies import GitDependency
 from synthran.iot_source import (
     AMBIENT_PROFILE,
@@ -91,11 +92,13 @@ class IoTSourceContractTests(unittest.TestCase):
         descriptor = profile_descriptor(
             spec,
             amber_commit=AMBER_COMMIT,
-            energy_trace_sha256="a" * 64,
+            energy_trace_sha256=ENERGY_TRACE_SHA256,
         )
-        self.assertEqual("hybrid", descriptor["model"]["energy_mode"])
-        self.assertTrue(descriptor["model"]["sic"])
-        self.assertEqual(16, descriptor["model"]["aloha_slots"])
+        model = descriptor["model"]
+        self.assertEqual("hybrid", model["energy"]["mode"])
+        self.assertTrue(model["collision"]["sic"])
+        self.assertEqual(16, model["access"]["slots"])
+        self.assertEqual(ENERGY_TRACE_SHA256, model["energy"]["trace_sha256"])
 
     def test_source_event_round_trip_preserves_scientific_outcome(self) -> None:
         event = IoTSourceEvent(
