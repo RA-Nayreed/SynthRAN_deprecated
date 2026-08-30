@@ -32,6 +32,10 @@ from synthran.research.amber_campaign import (
     execute_amber_campaign,
 )
 from synthran.research.amber_runtime import execute_amber_research_experiment
+from synthran.research.energy_calibration import (
+    execute_energy_calibration,
+    parse_energy_scales,
+)
 from synthran.research.v2 import AmberResearchSpec
 
 
@@ -255,6 +259,31 @@ def _amber_research_spec(args: argparse.Namespace) -> AmberResearchSpec:
     )
 
 
+def _dispatch_amber_energy_calibration(args: argparse.Namespace) -> int:
+    result_path = execute_energy_calibration(
+        calibration_id=args.calibration_id,
+        network_run_id=args.network_run_id,
+        scales=parse_energy_scales(args.scales),
+        seed=args.seed,
+        sensor_period_seconds=args.sensor_period,
+        warmup_seconds=args.warmup_seconds,
+        duration_seconds=args.duration_seconds,
+        energy_node_variation=args.energy_node_variation,
+        target_energy_loss_min=args.target_energy_loss_min,
+        target_energy_loss_max=args.target_energy_loss_max,
+        repository_root=command_runtime.repository_root(),
+        dependency_root=args.deps_root,
+        calibration_root=args.calibration_root,
+    )
+    payload = _read_json_object(
+        result_path,
+        label="Amber energy calibration result",
+    )
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    print(f"Amber energy calibration: {result_path}")
+    return 0
+
+
 def _dispatch_amber_research(args: argparse.Namespace) -> int:
     if args.research_command == "plan":
         spec = _amber_research_spec(args)
@@ -387,6 +416,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(arguments)
     try:
         _validate_persisted_iot_identity(args)
+        if args.command == "research" and args.research_command == "energy-calibrate":
+            return _dispatch_amber_energy_calibration(args)
         if args.command == "research" and getattr(args, "iot_profile", None) is not None:
             return _dispatch_amber_research(args)
         with _selected_iot_runtime(args):
