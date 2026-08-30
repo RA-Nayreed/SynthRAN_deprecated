@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from synthran.live_preflight import CommandResult
-from synthran.operator import stop_command
+from synthran.operator import release_command
 from synthran.r2lab.hardware import PhysicalTopology
 from synthran.r2lab.resources import R2LabTopologyResourceError
 from synthran.r2lab.stale_claim import retire_if_lease_absent
@@ -175,11 +175,11 @@ class R2LabStaleClaimTests(unittest.TestCase):
 
             self.assertTrue(active.is_file())
 
-    def test_stop_retires_expired_claim_without_cleanup_credentials(self) -> None:
+    def test_release_retires_expired_claim_without_cleanup_credentials(self) -> None:
         runner = LeaseRunner(lease_ok=False)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            run_id = "r2lab-stop-stale-001"
+            run_id = "r2lab-release-stale-001"
             write_claim(root / ".synthran" / "r2lab", run_id, "oulu_user")
             args = argparse.Namespace(
                 run_id=run_id,
@@ -200,7 +200,7 @@ class R2LabStaleClaimTests(unittest.TestCase):
                     patch("synthran.operator.release_physical_resources") as release,
                     redirect_stdout(output),
                 ):
-                    self.assertEqual(0, stop_command(args))
+                    self.assertEqual(0, release_command(args))
                 release.assert_not_called()
             finally:
                 os.chdir(previous)
