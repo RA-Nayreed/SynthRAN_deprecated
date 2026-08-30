@@ -33,6 +33,8 @@ from synthran.ambient_contract import (
     CURRENT_PROCESSING_A,
     CURRENT_SENSING_A,
     CURRENT_TRANSMITTING_A,
+    DEFAULT_ENERGY_NODE_VARIATION,
+    DEFAULT_ENERGY_POWER_SCALE,
     DURATION_LISTENING_MS,
     DURATION_PROCESSING_MS,
     DURATION_SENSING_MS,
@@ -60,7 +62,7 @@ from synthran.ambient_contract import (
     THRESHOLD_HIGH_V,
     THRESHOLD_LOW_V,
     deterministic_node_energy_factor,
-    energy_treatment,
+    validate_energy_treatment,
 )
 from synthran.iot_source import (
     AMBIENT_PROFILE,
@@ -249,13 +251,7 @@ def _per_node_uplink(
 def _collision_resolution(
     packets: list[Any], packet_analysis: Any
 ) -> dict[int, tuple[str, int]]:
-    """Reconstruct AMBER's exact collision groups and expose decode mechanism.
-
-    AMBER stores only the final ``collided`` boolean on ``RxPacket``. For
-    research evidence we replay the same grouping and the same AMBER
-    ``apply_sic`` implementation, then assert that our reconstruction agrees
-    with the engine's final collision flag.
-    """
+    """Reconstruct AMBER's exact collision groups and expose decode mechanism."""
 
     labels: dict[int, tuple[str, int]] = {}
     by_subcarrier: dict[int, list[Any]] = {}
@@ -338,8 +334,11 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
         raise RuntimeError("ambient-v1 energy trace is missing")
 
     try:
-        energy_power_scale, energy_node_variation = energy_treatment()
-    except ValueError as exc:
+        energy_power_scale, energy_node_variation = validate_energy_treatment(
+            float(config.get("energy_power_scale", DEFAULT_ENERGY_POWER_SCALE)),
+            float(config.get("energy_node_variation", DEFAULT_ENERGY_NODE_VARIATION)),
+        )
+    except (TypeError, ValueError) as exc:
         raise RuntimeError(str(exc)) from exc
     node_energy_factors = {
         node_id: deterministic_node_energy_factor(
