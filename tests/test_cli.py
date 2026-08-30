@@ -43,7 +43,7 @@ class CliTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(SystemExit):
                 parser.parse_args([command])
 
-    def test_run_selects_rfsim_and_defaults_to_cooja_source(self) -> None:
+    def test_run_defaults_to_amber_transport_profile(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -61,12 +61,31 @@ class CliTests(unittest.TestCase):
         self.assertEqual("rfsim", args.radio)
         self.assertIsNone(args.device)
         self.assertIsNone(args.ue)
-        self.assertEqual("cooja", args.iot_source)
+        self.assertEqual("amber", args.iot_source)
         self.assertEqual("transport-v1", args.iot_profile)
         self.assertEqual(424242, args.iot_seed)
         self.assertEqual(10, args.sensor_period)
 
-    def test_run_parses_explicit_amber_profile_seed_and_period(self) -> None:
+    def test_removed_source_selector_is_rejected(self) -> None:
+        parser = _parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "run",
+                    "--radio",
+                    "rfsim",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
+                    "--run-id",
+                    "virtual-001",
+                    "--iot-source",
+                    "cooja",
+                ]
+            )
+
+    def test_run_parses_explicit_profile_seed_and_period(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -93,28 +112,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(17, args.iot_seed)
         self.assertEqual(12, args.sensor_period)
 
-    def test_cooja_selection_does_not_replace_experiment_runtime(self) -> None:
-        args = _parser().parse_args(
-            [
-                "run",
-                "--radio",
-                "rfsim",
-                "--core-node",
-                "sopnode-f2",
-                "--ran-node",
-                "sopnode-f3",
-                "--run-id",
-                "virtual-001",
-            ]
-        )
-        from synthran import command_runtime
-
-        original = command_runtime._experiment_run
-        with _selected_iot_runtime(args):
-            self.assertIs(original, command_runtime._experiment_run)
-        self.assertIs(original, command_runtime._experiment_run)
-
-    def test_amber_rfsim_runtime_is_restored_after_scope(self) -> None:
+    def test_rfsim_runtime_is_restored_after_scope(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -126,8 +124,6 @@ class CliTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "amber-001",
-                "--iot-source",
-                "amber",
             ]
         )
         from synthran import command_runtime
@@ -137,7 +133,7 @@ class CliTests(unittest.TestCase):
             self.assertIsNot(original, command_runtime._experiment_run)
         self.assertIs(original, command_runtime._experiment_run)
 
-    def test_amber_physical_runtime_passes_source_settings_and_restores_scope(self) -> None:
+    def test_physical_runtime_passes_source_settings_and_restores_scope(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -153,8 +149,6 @@ class CliTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "physical-001",
-                "--iot-source",
-                "amber",
                 "--iot-profile",
                 "ambient-v1",
                 "--iot-seed",
@@ -223,7 +217,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual("research", args.command)
         self.assertEqual("campaign-plan", args.research_command)
 
-    def test_legacy_research_run_omits_iot_profile(self) -> None:
+    def test_research_run_defaults_to_transport_profile(self) -> None:
         args = _parser().parse_args(
             [
                 "research",
@@ -242,11 +236,11 @@ class CliTests(unittest.TestCase):
                 "hosts.ini",
             ]
         )
-        self.assertIsNone(args.iot_profile)
+        self.assertEqual("transport-v1", args.iot_profile)
         self.assertEqual(424242, args.seed)
         self.assertEqual(10, args.sensor_period)
 
-    def test_amber_research_keeps_seed_flag_for_iot_seed_compatibility(self) -> None:
+    def test_research_keeps_seed_flag_for_iot_seed(self) -> None:
         args = _parser().parse_args(
             [
                 "research",
@@ -275,7 +269,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(77, args.seed)
         self.assertEqual(20, args.sensor_period)
 
-    def test_amber_campaign_and_analysis_accept_profile_selection(self) -> None:
+    def test_campaign_and_analysis_accept_profile_selection(self) -> None:
         campaign = _parser().parse_args(
             [
                 "research",
