@@ -16,6 +16,7 @@ import sys
 from typing import Any, Mapping
 
 from synthran.ambient_contract import (
+    ALOHA_SLOT_RULE,
     ALOHA_SLOTS,
     BANDWIDTH_HZ,
     BS_HEIGHT_M,
@@ -61,6 +62,7 @@ from synthran.ambient_contract import (
     STARTUP_MAX_MS,
     THRESHOLD_HIGH_V,
     THRESHOLD_LOW_V,
+    deterministic_aloha_slot,
     deterministic_node_energy_factor,
     validate_energy_treatment,
 )
@@ -387,8 +389,16 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "ambient-v1 collect command advertised the wrong frame size"
                 )
             self.rx_slots = list(self.rx_slots[:frame_slots])
+            frame_index = int(float(self.env.now) // period_ms)
             self.chosen_slot_idx = (
-                random.randrange(len(self.rx_slots)) if self.rx_slots else -1
+                deterministic_aloha_slot(
+                    seed,
+                    int(self.node.id),
+                    frame_index,
+                    len(self.rx_slots),
+                )
+                if self.rx_slots
+                else -1
             )
             self.state = "registered"
             self.last_tx_command_time = self.env.now
@@ -406,6 +416,8 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
             self.collect_history.append(
                 {
                     "time_ms": float(self.env.now),
+                    "aloha_frame_index": frame_index,
+                    "aloha_slot_rule": ALOHA_SLOT_RULE,
                     "slot_index": (
                         self.chosen_slot_idx if self.chosen_slot_idx >= 0 else None
                     ),
@@ -803,6 +815,12 @@ def _ambient_plan(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                         "controller_state_final": str(ctrl.state_name),
                         "startup_delay_ms": (
                             collect.get("startup_delay_ms") if collect is not None else None
+                        ),
+                        "aloha_frame_index": (
+                            collect.get("aloha_frame_index") if collect is not None else None
+                        ),
+                        "aloha_slot_rule": (
+                            collect.get("aloha_slot_rule") if collect is not None else None
                         ),
                         "slot_start_ms": slot_start_ms,
                         "slot_end_ms": (
