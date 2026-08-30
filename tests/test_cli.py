@@ -4,8 +4,8 @@ import argparse
 from pathlib import Path
 import tomllib
 import unittest
+from unittest.mock import patch
 
-from synthran.backends.base import BackendError
 from synthran.cli import _parser, _selected_iot_runtime
 from synthran.operator import PUBLIC_COMMANDS
 
@@ -114,7 +114,7 @@ class CliTests(unittest.TestCase):
             self.assertIs(original, command_runtime._experiment_run)
         self.assertIs(original, command_runtime._experiment_run)
 
-    def test_amber_runtime_override_is_restored_after_scope(self) -> None:
+    def test_amber_rfsim_runtime_is_restored_after_scope(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -137,7 +137,7 @@ class CliTests(unittest.TestCase):
             self.assertIsNot(original, command_runtime._experiment_run)
         self.assertIs(original, command_runtime._experiment_run)
 
-    def test_amber_physical_backend_rejects_unsupported_source(self) -> None:
+    def test_amber_physical_runtime_passes_source_settings_and_restores_scope(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -155,11 +155,29 @@ class CliTests(unittest.TestCase):
                 "physical-001",
                 "--iot-source",
                 "amber",
+                "--iot-profile",
+                "ambient-v1",
+                "--iot-seed",
+                "17",
+                "--sensor-period",
+                "12",
             ]
         )
-        with self.assertRaisesRegex(BackendError, "not supported for the R2Lab backend"):
+        from synthran.backends import run as run_backend
+
+        original = run_backend.run_physical_workload
+        with patch("synthran.cli.run_physical_iot_workload", return_value="ok") as execute:
             with _selected_iot_runtime(args):
-                pass
+                self.assertIsNot(original, run_backend.run_physical_workload)
+                result = run_backend.run_physical_workload(run_id="physical-001")
+            self.assertIs(original, run_backend.run_physical_workload)
+        self.assertEqual("ok", result)
+        execute.assert_called_once_with(
+            run_id="physical-001",
+            iot_profile="ambient-v1",
+            iot_seed=17,
+            sensor_period_seconds=12,
+        )
 
     def test_run_selects_physical_backend(self) -> None:
         args = _parser().parse_args(

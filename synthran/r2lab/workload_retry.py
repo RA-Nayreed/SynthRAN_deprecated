@@ -31,7 +31,7 @@ DEFAULT_EXPERIMENT_ROOT = Path(".synthran/experiments-r2lab")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUN_LABEL = "synthran.experiment/run"
 _KUBERNETES_NAMESPACE = "open5gs"
-_RESERVED_CORE_PORTS = (60001, 18883, 18885, 18884)
+_RESERVED_CORE_PORTS = (60001, 18883, 18884, 18885, 18886)
 Runner = Callable[[Sequence[str], int], CommandResult]
 
 
@@ -213,7 +213,7 @@ def _recover_early_cleanup(
     probe = "\n".join(
         (
             "import json, os, socket",
-            "ports = [60001, 18883, 18885, 18884]",
+            f"ports = {list(_RESERVED_CORE_PORTS)!r}",
             "busy = []",
             "for port in ports:",
             "    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)",
