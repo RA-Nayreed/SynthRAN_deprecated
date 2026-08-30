@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from synthran.backends.base import BackendContract, BackendError, LifecycleStage
 from synthran.cli import main as cli_main
@@ -30,12 +30,21 @@ class OperatorBoundaryTests(unittest.TestCase):
     def test_cli_uses_one_error_surface(self) -> None:
         stderr = io.StringIO()
         with (
-            patch("synthran.cli._parser") as parser,
             patch("synthran.cli.dispatch", side_effect=BackendError("boundary failure")),
             patch("sys.stderr", stderr),
         ):
-            parser.return_value.parse_args.return_value = Mock(command="run")
-            self.assertEqual(2, cli_main(["run"]))
+            self.assertEqual(
+                2,
+                cli_main(
+                    [
+                        "run",
+                        "--radio",
+                        "rfsim",
+                        "--run-id",
+                        "boundary-test-001",
+                    ]
+                ),
+            )
         self.assertEqual("error: boundary failure\n", stderr.getvalue())
 
 
