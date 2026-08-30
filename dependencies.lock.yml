@@ -1,6 +1,6 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-08-27T05:58:00Z",
+  "resolved_at_utc": "2026-08-30T02:10:41Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
@@ -17,6 +17,14 @@
       "checkout": "contiki-ng",
       "sync": true,
       "role": "IoT firmware and Cooja simulation base",
+      "license": "BSD-3-Clause"
+    },
+    "amber": {
+      "url": "https://github.com/RA-Nayreed/Amber.git",
+      "commit": "08dd6bd445e607ad3accf4e9a2dff51a499ebdf9",
+      "checkout": "amber",
+      "sync": true,
+      "role": "Ambient IoT discrete-event source model",
       "license": "BSD-3-Clause"
     },
     "open5gs_k8s": {
@@ -240,6 +248,31 @@
         "version": "21.0.9",
         "role": "Java runtime required by Cooja",
         "license": "GPL-2.0-with-classpath-exception"
+      },
+      "simpy": {
+        "version": "4.1.1",
+        "role": "Amber discrete-event simulation runtime",
+        "license": "MIT"
+      },
+      "numpy": {
+        "version": "2.3.2",
+        "role": "Amber numerical runtime",
+        "license": "BSD-3-Clause"
+      },
+      "pandas": {
+        "version": "2.3.2",
+        "role": "Amber trace and result processing",
+        "license": "BSD-3-Clause"
+      },
+      "matplotlib": {
+        "version": "3.10.5",
+        "role": "Amber optional plotting dependency required by upstream imports",
+        "license": "PSF-2.0"
+      },
+      "openpyxl": {
+        "version": "3.1.5",
+        "role": "Amber energy-trace workbook reader",
+        "license": "MIT"
       }
     },
     "lock_status": "direct-versions-only"
