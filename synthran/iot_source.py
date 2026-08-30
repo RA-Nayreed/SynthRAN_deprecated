@@ -16,6 +16,7 @@ import subprocess
 import sys
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
+from synthran.ambient_contract import ambient_model_descriptor
 from synthran.dependencies import DependencyError, GitDependency, load_lock
 from synthran.experiment import (
     DEFAULT_SENSOR_PERIOD_SECONDS,
@@ -312,26 +313,10 @@ def profile_descriptor(
     else:
         if not energy_trace_sha256:
             raise IoTSourceError("ambient-v1 requires a pinned energy trace digest")
-        common["model"] = {
-            "frequency_hz": 924_000_000.0,
-            "pathloss": "macro",
-            "los": True,
-            "energy_mode": "hybrid",
-            "energy_trace_sha256": energy_trace_sha256,
-            "node_radius_m": [5.0, 40.0],
-            "aloha_slots": 16,
-            "slot_ms": 8,
-            "command_ms": 5,
-            "sic": True,
-            "capture": "amber-default",
-            "capacitor": {
-                "capacitance_f": 0.0003,
-                "r_series_ohm": 5000.0,
-                "r_leakage_ohm": 100000.0,
-                "dt_seconds": 0.001,
-            },
-            "thresholds_v": {"low": 1.3, "high": 1.7},
-        }
+        try:
+            common["model"] = ambient_model_descriptor(energy_trace_sha256)
+        except ValueError as exc:
+            raise IoTSourceError(str(exc)) from exc
     return common
 
 
