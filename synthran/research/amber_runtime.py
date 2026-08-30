@@ -36,7 +36,6 @@ from synthran.research import (
 from synthran.research.instrumentation import (
     _check_research_tools,
     _install_target_route,
-    _parse_load_log,
     _parse_probe_log,
     _prove_target_reachability,
     _prove_target_route,
@@ -50,6 +49,7 @@ from synthran.research.iperf import (
     start_owned_iperf_server,
     stop_owned_iperf_server,
 )
+from synthran.research.iperf_window import parse_measurement_load_log
 from synthran.research.runtime import _require_network_ready
 from synthran.research.sampling import ResearchNetworkSampler
 from synthran.research.v2 import (
@@ -106,6 +106,7 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
         self.probe_process: Any | None = None
         self.load_process: Any | None = None
         self.load_server: OwnedIperfServer | None = None
+        self.load_started_monotonic_s: float | None = None
         self.route_installed = False
         self.instrumentation_errors: list[str] = []
         self.path_errors: list[str] = []
@@ -214,6 +215,10 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
         )
         self._report(f"load server: ready on port {self.spec.load.server_port}")
         per_stream_bps = max(1, target_bps // self.spec.load.parallel_flows)
+        # Capture the controller clock immediately before spawning iperf.  The
+        # later source-clock gate gives us the exact offset from iperf time zero
+        # to the source-aligned measurement window.
+        self.load_started_monotonic_s = time.monotonic()
         self.load_process = _start_load_client(
             inventory=self.inventory,
             ue_pod=self.context.ue_pod,
@@ -443,11 +448,27 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
             target_bps = self.spec.load.resolved_target_bps
             assert target_bps is not None
             try:
-                _parse_load_log(
+                if (
+                    self.load_started_monotonic_s is None
+                    or self.replay_origin_monotonic_s is None
+                ):
+                    raise ResearchError(
+                        "background-load source-clock alignment is unavailable"
+                    )
+                measurement_start_offset = (
+                    self.replay_origin_monotonic_s
+                    + self.spec.measurement.warmup_seconds
+                    - self.load_started_monotonic_s
+                )
+                parse_measurement_load_log(
                     paths["load_client_log"],
                     paths["load"],
                     target_bps=target_bps,
                     protocol=self.spec.load.protocol,
+                    measurement_start_offset_seconds=measurement_start_offset,
+                    measurement_duration_seconds=float(
+                        self.spec.measurement.duration_seconds
+                    ),
                 )
             except Exception as exc:
                 self.instrumentation_errors.append(str(exc))
@@ -516,11 +537,11 @@ def _measurement_metrics(run_directory: Path) -> dict[str, Any]:
         for record in probe_records
         if record.get("rtt_ms") is not None
     ]
-    loads = []
-    for record in load_records:
-        raw = record.get("achieved_bps", record.get("bits_per_second"))
-        if raw is not None:
-            loads.append(float(raw))
+    loads = [
+        float(record["bits_per_second"])
+        for record in load_records
+        if isinstance(record.get("bits_per_second"), (int, float))
+    ]
     return {
         "probe_records": len(probe_records),
         "mean_rtt_ms": _mean(rtts),
@@ -617,12 +638,11 @@ def execute_amber_research_experiment(
         for event in source_events
         if source_start_ms <= event.planned_at_ms < source_end_ms
     ]
+    duration_ms = spec.measurement.duration_seconds * 1000
+    period_ms = spec.sensor_period_seconds * 1000
     expected_measurement_opportunities = (
-        self_count := spec.sensor_count
-    ) * (
-        (spec.measurement.duration_seconds * 1000)
-        // (spec.sensor_period_seconds * 1000)
-    )
+        (duration_ms + period_ms - 1) // period_ms
+    ) * spec.sensor_count
     if len(measurement_source) != expected_measurement_opportunities:
         raise ResearchError(
             "measurement source window does not contain the expected opportunity count"
@@ -700,13 +720,31 @@ def execute_amber_research_experiment(
         and published_missing == 0
         and path_valid
     )
+
+    metrics = _measurement_metrics(run_directory)
+    target_bps = spec.load.resolved_target_bps
+    achieved_bps = metrics.get("mean_achieved_load_bps")
+    if spec.load.enabled:
+        load_target_ratio = (
+            float(achieved_bps) / target_bps
+            if isinstance(achieved_bps, (int, float)) and target_bps
+            else None
+        )
+        load_target_valid = bool(
+            isinstance(load_target_ratio, float)
+            and 0.90 <= load_target_ratio <= 1.10
+        )
+    else:
+        load_target_ratio = None
+        load_target_valid = True
+
     scientific_valid = bool(
         infrastructure_valid
         and len(measurement_source) == expected_measurement_opportunities
         and (spec.iot_profile != "transport-v1" or source_loss == 0)
+        and load_target_valid
     )
 
-    metrics = _measurement_metrics(run_directory)
     metrics.update(
         {
             "source_window_start_ms": source_start_ms,
@@ -716,6 +754,8 @@ def execute_amber_research_experiment(
             "measurement_decoded": len(decoded_keys),
             "measurement_unexpected_central": unexpected_count,
             "measurement_published_missing": published_missing,
+            "load_target_ratio": load_target_ratio,
+            "load_target_valid": load_target_valid,
             "full_run_reconciliation": dict(reconciliation),
         }
     )
