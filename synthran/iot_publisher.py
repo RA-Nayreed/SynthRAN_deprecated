@@ -212,6 +212,19 @@ class AmberReplaySession:
         if self._errors:
             self.stop()
             raise IoTSourceError(self._errors[0])
+        wait_start = getattr(self.collector_barrier, "wait_start_canaries", None)
+        if not callable(wait_start):
+            self.stop()
+            raise IoTSourceError(
+                "collector does not expose the required start-canary barrier"
+            )
+        try:
+            wait_start(self.plan.spec.sensor_ids)
+        except Exception as exc:
+            self.stop()
+            raise IoTSourceError(
+                "central collector did not observe all start canaries"
+            ) from exc
         self._replay_origin = self.clock.monotonic()
         self._worker = threading.Thread(
             target=self._run,
@@ -309,13 +322,11 @@ class AmberReplaySession:
             if callable(published):
                 success = bool(published())
             else:
-                rc = getattr(info, "rc", 0)
-                success = rc == 0
+                success = getattr(info, "rc", 0) == 0
             if not success:
                 detail = f"publish did not complete (rc={getattr(info, 'rc', None)})"
         except Exception as exc:
             detail = str(exc)
-            success = False
         if not success:
             self._errors.append(f"{sensor_id} {kind} publish failed: {detail}")
         self._events.append(
@@ -372,9 +383,7 @@ class AmberReplaySession:
         return self._publish_message(
             sensor_id=source_event.sensor_id,
             kind="telemetry",
-            topic=(
-                f"{self.plan.spec.topic_root}/sensor/{source_event.sensor_id}"
-            ),
+            topic=f"{self.plan.spec.topic_root}/sensor/{source_event.sensor_id}",
             payload=payload,
             qos=0,
             scheduled=scheduled,
@@ -446,6 +455,15 @@ class AmberReplaySession:
         self._done.set()
         self._persist()
 
+    def published_pairs(self) -> tuple[tuple[str, int], ...]:
+        return tuple(
+            (event.sensor_id, int(event.sequence))
+            for event in self._events
+            if event.kind == "telemetry"
+            and event.success
+            and event.sequence is not None
+        )
+
     def evidence(self) -> PublisherEvidence:
         telemetry = [event for event in self._events if event.kind == "telemetry"]
         lags = [max(0.0, event.lag_ms) for event in telemetry if event.success]
@@ -453,7 +471,7 @@ class AmberReplaySession:
         maximum = max(lags, default=0.0)
         lag_limit = max(250.0, self.plan.spec.sensor_period_seconds * 100.0)
         max_lag_limit = self.plan.spec.sensor_period_seconds * 1000.0
-        errors = len(self._errors) + sum(not event.success for event in self._events)
+        failed_events = sum(not event.success for event in self._events)
         start_count = sum(
             event.kind == "start-canary" and event.success for event in self._events
         )
@@ -461,7 +479,9 @@ class AmberReplaySession:
             event.kind == "end-canary" and event.success for event in self._events
         )
         decoded_count = sum(event.decoded for event in self.plan.events)
-        published_count = sum(event.kind == "telemetry" and event.success for event in self._events)
+        published_count = sum(
+            event.kind == "telemetry" and event.success for event in self._events
+        )
         timing_valid = p95 <= lag_limit and maximum < max_lag_limit
         complete = (
             self._complete
@@ -469,7 +489,8 @@ class AmberReplaySession:
             and start_count == self.plan.spec.sensor_count
             and end_count == self.plan.spec.sensor_count
             and published_count == decoded_count
-            and errors == 0
+            and not self._errors
+            and failed_events == 0
         )
         return PublisherEvidence(
             client_count=len(self._clients),
@@ -478,7 +499,7 @@ class AmberReplaySession:
             end_canaries=end_count,
             decoded_events=decoded_count,
             published_events=published_count,
-            publisher_errors=errors,
+            publisher_errors=len(self._errors) + failed_events,
             p95_lag_ms=p95,
             max_lag_ms=maximum,
             lag_limit_ms=lag_limit,
