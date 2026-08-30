@@ -13,9 +13,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from synthran.cli import main as cli_main
     from synthran.experiment import ExperimentError
+    from synthran.network.runtime import NetworkRuntimeError
 
     try:
         return cli_main(arguments)
-    except ExperimentError as exc:
+    except (ExperimentError, NetworkRuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
