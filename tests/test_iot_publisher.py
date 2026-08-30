@@ -190,14 +190,16 @@ class AmberReplayTests(unittest.TestCase):
                 endpoint=MQTTEndpoint("127.0.0.1", 18886),
                 collector_barrier=Barrier(),
                 client_factory=lambda client_id: FakeClient(client_id, records),
-                clock=FakeClock(oversleep=0.30),
+                clock=FakeClock(oversleep=0.60),
             ).start()
-            with self.assertRaisesRegex(IoTSourceError, "timing exceeded"):
-                session.wait(timeout=2.0)
-            evidence = session.evidence()
-            self.assertGreater(evidence.p95_lag_ms, 250.0)
-            self.assertFalse(evidence.timing_valid)
-            session.stop()
+            try:
+                with self.assertRaisesRegex(IoTSourceError, "timing exceeded"):
+                    session.wait(timeout=2.0)
+                evidence = session.evidence()
+                self.assertGreater(evidence.p95_lag_ms, 250.0)
+                self.assertFalse(evidence.timing_valid)
+            finally:
+                session.stop()
 
     def test_publish_failure_prevents_completion_and_cleans_clients(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
