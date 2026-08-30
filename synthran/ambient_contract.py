@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from typing import Any
 
 
@@ -39,6 +41,12 @@ ENERGY_TRACE_TIME_LAST = 2.998
 ENERGY_TRACE_TIME_STEP = 0.001
 ENERGY_TRACE_TIME_UNITS = "undeclared-in-workbook"
 
+ENERGY_POWER_SCALE_ENV = "SYNTHRAN_AMBER_ENERGY_POWER_SCALE"
+ENERGY_NODE_VARIATION_ENV = "SYNTHRAN_AMBER_ENERGY_NODE_VARIATION"
+DEFAULT_ENERGY_POWER_SCALE = 1.0
+DEFAULT_ENERGY_NODE_VARIATION = 0.0
+MAX_ENERGY_NODE_VARIATION = 0.5
+
 CAPACITANCE_F = 300e-6
 R_SERIES_OHM = 5000.0
 R_LEAKAGE_OHM = 100000.0
@@ -69,11 +77,104 @@ NOISE_FIGURE_DB = 6.0
 BANDWIDTH_HZ = 100e6
 
 
+def _environment_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a finite decimal number") from exc
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(f"{name} must be finite")
+    return value
+
+
+def energy_treatment() -> tuple[float, float]:
+    """Return the explicit Ambient-IoT harvested-energy treatment.
+
+    The treatment scales only the external environmental harvested power. WPT
+    remains governed by AMBER's radio model. Optional per-node variation is a
+    deterministic symmetric multiplier around one and never consumes AMBER's
+    simulation RNG stream.
+    """
+
+    power_scale = _environment_float(
+        ENERGY_POWER_SCALE_ENV,
+        DEFAULT_ENERGY_POWER_SCALE,
+    )
+    node_variation = _environment_float(
+        ENERGY_NODE_VARIATION_ENV,
+        DEFAULT_ENERGY_NODE_VARIATION,
+    )
+    if not 0.0 < power_scale <= 1.0:
+        raise ValueError("Ambient energy power scale must be in (0, 1]")
+    if not 0.0 <= node_variation <= MAX_ENERGY_NODE_VARIATION:
+        raise ValueError(
+            f"Ambient energy node variation must be in [0, {MAX_ENERGY_NODE_VARIATION}]"
+        )
+    return power_scale, node_variation
+
+
+def deterministic_node_energy_factor(
+    seed: int,
+    node_id: int,
+    variation: float,
+) -> float:
+    """Return a stable per-node energy multiplier without perturbing AMBER RNG."""
+
+    if seed < 0 or node_id < 0:
+        raise ValueError("energy factor seed and node ID must be non-negative")
+    if not 0.0 <= variation <= MAX_ENERGY_NODE_VARIATION:
+        raise ValueError("energy factor variation is outside the accepted range")
+    if variation == 0.0:
+        return 1.0
+    digest = hashlib.sha256(
+        f"ambient-energy-factor-v1:{seed}:{node_id}".encode("ascii")
+    ).digest()
+    unit = int.from_bytes(digest[:8], "big") / float((1 << 64) - 1)
+    return 1.0 + variation * (2.0 * unit - 1.0)
+
+
 def ambient_model_descriptor(energy_trace_sha256: str) -> dict[str, Any]:
     """Return every result-affecting fixed assumption in ``ambient-v1``."""
 
     if energy_trace_sha256 != ENERGY_TRACE_SHA256:
         raise ValueError("ambient energy trace does not match the pinned scientific contract")
+    power_scale, node_variation = energy_treatment()
+    energy: dict[str, Any] = {
+        "mode": ENERGY_MODE,
+        "combine_mode": ENERGY_COMBINE_MODE,
+        "trace_sha256": energy_trace_sha256,
+        "trace_column": ENERGY_TRACE_COLUMN,
+        "trace_time_column": ENERGY_TRACE_TIME_COLUMN,
+        "trace_resistance_ohm": ENERGY_TRACE_RESISTANCE_OHM,
+        "simulation_row_period_ms": ENERGY_TRACE_SIMULATION_ROW_PERIOD_MS,
+        "simulation_replay": "one-trace-row-per-simulation-millisecond",
+        "trace_time_axis": {
+            "rows": ENERGY_TRACE_EXPECTED_ROWS,
+            "first": ENERGY_TRACE_TIME_FIRST,
+            "last": ENERGY_TRACE_TIME_LAST,
+            "step": ENERGY_TRACE_TIME_STEP,
+            "units": ENERGY_TRACE_TIME_UNITS,
+        },
+        "trace_loops": ENERGY_TRACE_LOOPS,
+        "shared_environmental_trace": True,
+    }
+    # Preserve the accepted scale=1, zero-variation profile identity exactly.
+    # A non-default treatment is result-affecting and therefore enters the
+    # descriptor/profile digest explicitly.
+    if (
+        power_scale != DEFAULT_ENERGY_POWER_SCALE
+        or node_variation != DEFAULT_ENERGY_NODE_VARIATION
+    ):
+        energy["treatment"] = {
+            "external_power_scale": power_scale,
+            "node_variation_fraction": node_variation,
+            "node_factor_rule": "sha256-symmetric-v1",
+            "wpt_scaled": False,
+        }
+
     return {
         "radio": {
             "frequency_hz": FREQUENCY_HZ,
@@ -97,25 +198,7 @@ def ambient_model_descriptor(energy_trace_sha256: str) -> dict[str, Any]:
                 "height_m": BS_HEIGHT_M,
             },
         },
-        "energy": {
-            "mode": ENERGY_MODE,
-            "combine_mode": ENERGY_COMBINE_MODE,
-            "trace_sha256": energy_trace_sha256,
-            "trace_column": ENERGY_TRACE_COLUMN,
-            "trace_time_column": ENERGY_TRACE_TIME_COLUMN,
-            "trace_resistance_ohm": ENERGY_TRACE_RESISTANCE_OHM,
-            "simulation_row_period_ms": ENERGY_TRACE_SIMULATION_ROW_PERIOD_MS,
-            "simulation_replay": "one-trace-row-per-simulation-millisecond",
-            "trace_time_axis": {
-                "rows": ENERGY_TRACE_EXPECTED_ROWS,
-                "first": ENERGY_TRACE_TIME_FIRST,
-                "last": ENERGY_TRACE_TIME_LAST,
-                "step": ENERGY_TRACE_TIME_STEP,
-                "units": ENERGY_TRACE_TIME_UNITS,
-            },
-            "trace_loops": ENERGY_TRACE_LOOPS,
-            "shared_environmental_trace": True,
-        },
+        "energy": energy,
         "capacitor": {
             "capacitance_f": CAPACITANCE_F,
             "r_series_ohm": R_SERIES_OHM,
