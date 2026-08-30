@@ -58,6 +58,8 @@ from synthran.iot_edge_transport import (
     RFSIM_EDGE_FORWARD_PORT,
     RfsimEdgeTransportAdapter,
     RfsimEdgeTransportSession,
+    _remote_listener_pids,
+    _reap_owned_remote_listeners,
 )
 from synthran.iot_publisher import AmberReplaySession
 from synthran.iot_source import (
@@ -158,6 +160,32 @@ def _local_port_free(port: int) -> bool:
         return False
     finally:
         sock.close()
+
+
+def _wait_unique_remote_listener(
+    inventory: NetworkInventory,
+    port: int,
+    *,
+    process: Any,
+    timeout_seconds: int = 30,
+) -> tuple[int, ...]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process.process.poll() is not None:
+            raise ExperimentError(
+                f"{process.name} exited before remote listener ownership was observed"
+            )
+        observed = _remote_listener_pids(inventory, (port,)).get(port, ())
+        if len(observed) == 1:
+            return observed
+        if len(observed) > 1:
+            raise ExperimentError(
+                f"remote listener ownership on port {port} is ambiguous"
+            )
+        time.sleep(0.25)
+    raise ExperimentError(
+        f"remote listener ownership on port {port} was not observed"
+    )
 
 
 def _edge_sidecar_status(
@@ -540,6 +568,7 @@ def execute_amber_experiment(
     ue_deployment: str | None = None
     ue_pod: str | None = None
     central_forward = None
+    central_owned_remote_pids: dict[int, tuple[int, ...]] = {}
     edge_session: RfsimEdgeTransportSession | None = None
     collector: PortableMqttCollectorSession | None = None
     publisher: AmberReplaySession | None = None
@@ -700,7 +729,7 @@ def execute_amber_experiment(
                 local_port=LOCAL_CENTRAL_FORWARD_PORT,
                 remote_port=LOCAL_CENTRAL_FORWARD_PORT,
                 remote_command=(
-                    "KUBECONFIG=/etc/kubernetes/admin.conf kubectl port-forward "
+                    "exec env KUBECONFIG=/etc/kubernetes/admin.conf kubectl port-forward "
                     f"-n {KUBERNETES_NAMESPACE} "
                     f"deployment/{resource_names['central_deployment']} "
                     f"{LOCAL_CENTRAL_FORWARD_PORT}:{CENTRAL_PORT} --address 127.0.0.1"
@@ -709,6 +738,14 @@ def execute_amber_experiment(
             cwd=repository_root,
             log_path=logs / "amber-central-port-forward.log",
         )
+        central_pids = _wait_unique_remote_listener(
+            inventory,
+            LOCAL_CENTRAL_FORWARD_PORT,
+            process=central_forward,
+        )
+        central_owned_remote_pids = {
+            LOCAL_CENTRAL_FORWARD_PORT: central_pids,
+        }
         _wait_tcp(
             "127.0.0.1",
             LOCAL_CENTRAL_FORWARD_PORT,
@@ -877,6 +914,25 @@ def execute_amber_experiment(
                 central_forward.stop()
             except Exception as exc:
                 cleanup_errors.append(f"central forward cleanup: {exc}")
+        if central_owned_remote_pids:
+            cleanup_errors.extend(
+                f"central forward cleanup: {detail}"
+                for detail in _reap_owned_remote_listeners(
+                    inventory,
+                    central_owned_remote_pids,
+                )
+            )
+        try:
+            remaining_central = _remote_listener_pids(
+                inventory,
+                (LOCAL_CENTRAL_FORWARD_PORT,),
+            ).get(LOCAL_CENTRAL_FORWARD_PORT, ())
+            if remaining_central:
+                cleanup_errors.append(
+                    "central MQTT remote port-forward remained in use"
+                )
+        except Exception as exc:
+            cleanup_errors.append(f"central remote cleanup proof: {exc}")
         if not _local_port_free(LOCAL_CENTRAL_FORWARD_PORT):
             cleanup_errors.append("central MQTT controller port remained in use")
         if remote_workspace_created:
