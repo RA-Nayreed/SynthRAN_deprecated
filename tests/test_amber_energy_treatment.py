@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from synthran import cli
 from synthran.ambient_contract import (
     ENERGY_TRACE_SHA256,
     ambient_model_descriptor,
@@ -89,6 +90,48 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
         }
         self.assertEqual(expected, research_spec.energy_treatment)
         self.assertEqual(expected, source_spec.energy_treatment)
+
+    def test_public_research_surface_has_no_energy_calibration_subcommand(self) -> None:
+        parser = cli._parser()
+        root = cli._top_level_subparsers(parser)
+        research = root.choices["research"]
+        research_commands = cli._subparsers(research).choices
+        self.assertNotIn("energy-calibrate", research_commands)
+        self.assertIn("plan", research_commands)
+        self.assertIn("run", research_commands)
+        self.assertIn("campaign-run", research_commands)
+
+    def test_research_plan_carries_energy_treatment_directly(self) -> None:
+        args = cli._parser().parse_args(
+            [
+                "research",
+                "plan",
+                "--campaign-id",
+                "ambient-energy-plan-campaign",
+                "--network-run-id",
+                "ambient-energy-plan-network",
+                "--run-id",
+                "ambient-energy-plan-run",
+                "--condition",
+                "baseline",
+                "--iot-profile",
+                AMBIENT_PROFILE,
+                "--energy-power-scale",
+                "0.5",
+                "--energy-node-variation",
+                "0.1",
+            ]
+        )
+        spec = cli._amber_research_spec(args)
+        self.assertEqual(0.5, spec.energy_power_scale)
+        self.assertEqual(0.1, spec.energy_node_variation)
+        self.assertEqual(
+            {
+                "external_power_scale": 0.5,
+                "node_variation_fraction": 0.1,
+            },
+            spec.energy_treatment,
+        )
 
     def test_pinned_amber_plan_records_energy_treatment_and_provenance(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
