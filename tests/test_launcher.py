@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from synthran.experiment import ExperimentError
 from synthran.launcher import main
+from synthran.network.runtime import NetworkRuntimeError
 
 
 class LauncherTests(unittest.TestCase):
@@ -27,6 +28,20 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(result, 2)
         self.assertEqual(stderr.getvalue(), "error: path proof failed\n")
+
+    def test_network_runtime_error_is_rendered_without_traceback(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch(
+                "synthran.cli.main",
+                side_effect=NetworkRuntimeError("network reproof failed"),
+            ),
+            patch("sys.stderr", stderr),
+        ):
+            result = main(["run"])
+
+        self.assertEqual(result, 2)
+        self.assertEqual(stderr.getvalue(), "error: network reproof failed\n")
 
 
 if __name__ == "__main__":
