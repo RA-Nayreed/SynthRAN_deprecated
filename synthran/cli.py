@@ -15,6 +15,7 @@ from synthran.backends import run as run_backend
 from synthran.backends.base import BackendError
 from synthran.iot_source import (
     AMBIENT_PROFILE,
+    AMBER_SOURCE_ID,
     DEFAULT_IOT_SEED,
     TRANSPORT_PROFILE,
 )
@@ -48,21 +49,21 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
         raise BackendError("SynthRAN parser does not expose the run command")
     run.add_argument(
         "--iot-source",
-        choices=("cooja", "amber"),
-        default="cooja",
+        choices=(AMBER_SOURCE_ID,),
+        default=AMBER_SOURCE_ID,
         help="IoT source implementation",
     )
     run.add_argument(
         "--iot-profile",
         choices=(TRANSPORT_PROFILE, AMBIENT_PROFILE),
         default=TRANSPORT_PROFILE,
-        help="Amber source profile",
+        help="IoT source profile",
     )
     run.add_argument(
         "--iot-seed",
         type=int,
         default=DEFAULT_IOT_SEED,
-        help="Amber source seed",
+        help="IoT source seed",
     )
     run.add_argument(
         "--sensor-period",
@@ -82,8 +83,8 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
         child.add_argument(
             "--iot-profile",
             choices=(TRANSPORT_PROFILE, AMBIENT_PROFILE),
-            default=None,
-            help="Amber research profile; omit to use legacy Cooja research artifacts",
+            default=TRANSPORT_PROFILE,
+            help="IoT research profile",
         )
 
 
@@ -144,15 +145,10 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
     if manifest_path is None:
         return
     manifest = _read_json_object(manifest_path, label="persisted IoT workload manifest")
-    observed_source = manifest.get("iot_source", "cooja")
-    requested_source = getattr(args, "iot_source", "cooja")
-    if observed_source != requested_source:
+    if manifest.get("iot_source") != AMBER_SOURCE_ID:
         raise BackendError(
-            f"persisted workload uses IoT source {observed_source!r}, "
-            f"but this run requested {requested_source!r}"
+            "persisted workload does not contain compatible Amber source identity; use a new run ID"
         )
-    if requested_source != "amber":
-        return
 
     expected = {
         "iot_profile": getattr(args, "iot_profile", TRANSPORT_PROFILE),
@@ -304,7 +300,7 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
 
 @contextmanager
 def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
-    if args.command != "run" or getattr(args, "iot_source", None) != "amber":
+    if args.command != "run":
         yield
         return
 
