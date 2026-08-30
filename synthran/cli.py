@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
-import os
 from pathlib import Path
 import sys
 from typing import Iterator, Mapping, Sequence
@@ -15,9 +14,7 @@ from synthran.amber_experiment_runtime import execute_amber_experiment
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
-    ENERGY_NODE_VARIATION_ENV,
-    ENERGY_POWER_SCALE_ENV,
-    energy_treatment,
+    clear_run_energy_treatment,
 )
 from synthran.backends import run as run_backend
 from synthran.backends.base import BackendError
@@ -236,6 +233,8 @@ def _amber_research_spec(args: argparse.Namespace) -> AmberResearchSpec:
         iot_profile=args.iot_profile,
         iot_seed=args.seed,
         sensor_period_seconds=args.sensor_period,
+        energy_power_scale=args.energy_power_scale,
+        energy_node_variation=args.energy_node_variation,
         measurement=MeasurementSpec(
             warmup_seconds=args.warmup_seconds,
             duration_seconds=args.duration_seconds,
@@ -258,37 +257,39 @@ def _amber_research_spec(args: argparse.Namespace) -> AmberResearchSpec:
 
 def _dispatch_amber_research(args: argparse.Namespace) -> int:
     if args.research_command == "plan":
-        value = {
-            "schema": "synthran/research-request/v2alpha1",
-            **_amber_research_spec(args).to_request_dict(),
-        }
-        if args.iot_profile == AMBIENT_PROFILE:
-            value["energy_treatment"] = {
-                "external_power_scale": args.energy_power_scale,
-                "node_variation_fraction": args.energy_node_variation,
+        spec = _amber_research_spec(args)
+        try:
+            value = {
+                "schema": "synthran/research-request/v2alpha1",
+                **spec.to_request_dict(),
             }
-        print(json.dumps(value, indent=2, sort_keys=True))
-        print("\nExecution action: none")
-        return 0
+            print(json.dumps(value, indent=2, sort_keys=True))
+            print("\nExecution action: none")
+            return 0
+        finally:
+            clear_run_energy_treatment(spec.run_id)
     if args.research_command == "run":
         spec = _amber_research_spec(args)
-        manifest, evidence = command_runtime._network_paths(
-            args.network_run_root,
-            args.network_run_id,
-        )
-        summary_path = execute_amber_research_experiment(
-            spec=spec,
-            inventory=command_runtime.load_inventory(args.inventory),
-            lock=command_runtime.load_lock(args.lock),
-            dependency_root=args.deps_root,
-            network_manifest=manifest,
-            network_evidence=evidence,
-            repository_root=command_runtime.repository_root(),
-            run_root=args.run_root,
-            progress=sys.stdout,
-        )
-        print(f"Amber research summary: {summary_path}")
-        return 0
+        try:
+            manifest, evidence = command_runtime._network_paths(
+                args.network_run_root,
+                args.network_run_id,
+            )
+            summary_path = execute_amber_research_experiment(
+                spec=spec,
+                inventory=command_runtime.load_inventory(args.inventory),
+                lock=command_runtime.load_lock(args.lock),
+                dependency_root=args.deps_root,
+                network_manifest=manifest,
+                network_evidence=evidence,
+                repository_root=command_runtime.repository_root(),
+                run_root=args.run_root,
+                progress=sys.stdout,
+            )
+            print(f"Amber research summary: {summary_path}")
+            return 0
+        finally:
+            clear_run_energy_treatment(spec.run_id)
     if args.research_command == "campaign-run":
         campaign = command_runtime._load_campaign(args.campaign)
         manifest, evidence = command_runtime._network_paths(
@@ -298,6 +299,8 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
         result_path = execute_amber_campaign(
             campaign=campaign,
             iot_profile=args.iot_profile,
+            energy_power_scale=args.energy_power_scale,
+            energy_node_variation=args.energy_node_variation,
             inventory=command_runtime.load_inventory(args.inventory),
             lock=command_runtime.load_lock(args.lock),
             dependency_root=args.deps_root,
@@ -332,49 +335,6 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
     raise ResearchError(
         "--iot-profile is supported on research plan, run, campaign-run, and analyze only"
     )
-
-
-@contextmanager
-def _selected_amber_energy_treatment(args: argparse.Namespace) -> Iterator[None]:
-    """Apply explicit research energy treatment only while Amber work executes."""
-
-    profile = getattr(args, "iot_profile", None)
-    power_scale = float(
-        getattr(args, "energy_power_scale", DEFAULT_ENERGY_POWER_SCALE)
-    )
-    node_variation = float(
-        getattr(args, "energy_node_variation", DEFAULT_ENERGY_NODE_VARIATION)
-    )
-    non_default = (
-        power_scale != DEFAULT_ENERGY_POWER_SCALE
-        or node_variation != DEFAULT_ENERGY_NODE_VARIATION
-    )
-    if profile != AMBIENT_PROFILE:
-        if non_default:
-            raise ResearchError(
-                "energy treatment options are valid only with --iot-profile ambient-v1"
-            )
-        yield
-        return
-
-    previous_scale = os.environ.get(ENERGY_POWER_SCALE_ENV)
-    previous_variation = os.environ.get(ENERGY_NODE_VARIATION_ENV)
-    os.environ[ENERGY_POWER_SCALE_ENV] = format(power_scale, ".17g")
-    os.environ[ENERGY_NODE_VARIATION_ENV] = format(node_variation, ".17g")
-    try:
-        energy_treatment()
-        yield
-    except ValueError as exc:
-        raise ResearchError(str(exc)) from exc
-    finally:
-        if previous_scale is None:
-            os.environ.pop(ENERGY_POWER_SCALE_ENV, None)
-        else:
-            os.environ[ENERGY_POWER_SCALE_ENV] = previous_scale
-        if previous_variation is None:
-            os.environ.pop(ENERGY_NODE_VARIATION_ENV, None)
-        else:
-            os.environ[ENERGY_NODE_VARIATION_ENV] = previous_variation
 
 
 @contextmanager
@@ -428,8 +388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _validate_persisted_iot_identity(args)
         if args.command == "research" and getattr(args, "iot_profile", None) is not None:
-            with _selected_amber_energy_treatment(args):
-                return _dispatch_amber_research(args)
+            return _dispatch_amber_research(args)
         with _selected_iot_runtime(args):
             return dispatch(args)
     except (BackendError, ResearchError, R2LabTopologyResourceError) as exc:
