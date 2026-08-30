@@ -7,6 +7,11 @@ from pathlib import Path
 import statistics
 from typing import Any, Mapping, Sequence, TextIO
 
+from synthran.ambient_contract import (
+    DEFAULT_ENERGY_NODE_VARIATION,
+    DEFAULT_ENERGY_POWER_SCALE,
+    clear_run_energy_treatment,
+)
 from synthran.dependencies import DependencyLock
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.research import LoadSpec, MeasurementSpec, ResearchCampaign, ResearchError, atomic_json
@@ -74,6 +79,8 @@ def execute_amber_campaign(
     *,
     campaign: ResearchCampaign,
     iot_profile: str,
+    energy_power_scale: float = DEFAULT_ENERGY_POWER_SCALE,
+    energy_node_variation: float = DEFAULT_ENERGY_NODE_VARIATION,
     inventory: NetworkInventory,
     lock: DependencyLock,
     dependency_root: Path,
@@ -89,12 +96,20 @@ def execute_amber_campaign(
     load_port: int,
     progress: TextIO | None = None,
 ) -> Path:
-    """Execute the persisted blocked schedule using Amber seeds and one profile."""
+    """Execute the persisted blocked schedule using one fixed Amber treatment."""
 
     result_root = run_root.resolve()
     completed: list[dict[str, Any]] = []
     summaries: list[dict[str, Any]] = []
     result_path = result_root / f"{campaign.campaign_id}-amber-campaign-v2.json"
+    energy_treatment = (
+        {
+            "external_power_scale": float(energy_power_scale),
+            "node_variation_fraction": float(energy_node_variation),
+        }
+        if iot_profile == "ambient-v1"
+        else None
+    )
 
     for scheduled in campaign.runs:
         load = _load_for_condition(
@@ -112,6 +127,8 @@ def execute_amber_campaign(
             iot_profile=iot_profile,
             iot_seed=scheduled.seed,
             sensor_period_seconds=sensor_period_seconds,
+            energy_power_scale=energy_power_scale,
+            energy_node_variation=energy_node_variation,
             measurement=measurement,
             load=load,
             probe_target=target,
@@ -124,18 +141,21 @@ def execute_amber_campaign(
                 flush=True,
             )
         try:
-            summary_path = execute_amber_research_experiment(
-                spec=spec,
-                inventory=inventory,
-                lock=lock,
-                dependency_root=dependency_root,
-                network_manifest=network_manifest,
-                network_evidence=network_evidence,
-                repository_root=repository_root,
-                run_root=result_root,
-                progress=progress,
-            )
-            summary = _read_summary(summary_path)
+            try:
+                summary_path = execute_amber_research_experiment(
+                    spec=spec,
+                    inventory=inventory,
+                    lock=lock,
+                    dependency_root=dependency_root,
+                    network_manifest=network_manifest,
+                    network_evidence=network_evidence,
+                    repository_root=repository_root,
+                    run_root=result_root,
+                    progress=progress,
+                )
+                summary = _read_summary(summary_path)
+            finally:
+                clear_run_energy_treatment(spec.run_id)
         except Exception as exc:
             atomic_json(
                 result_path,
@@ -145,6 +165,7 @@ def execute_amber_campaign(
                     "network_run_id": campaign.network_run_id,
                     "iot_source": "amber",
                     "iot_profile": iot_profile,
+                    "energy_treatment": energy_treatment,
                     "completed": completed,
                     "failed_run_id": scheduled.run_id,
                     "failure": str(exc),
@@ -155,6 +176,8 @@ def execute_amber_campaign(
             raise ResearchError("Amber campaign summary seed does not match schedule")
         if summary.get("condition") != scheduled.condition:
             raise ResearchError("Amber campaign summary condition does not match schedule")
+        if summary.get("energy_treatment") != energy_treatment:
+            raise ResearchError("Amber campaign summary energy treatment does not match campaign")
         summaries.append(summary)
         identity = require_consistent_campaign_summaries(summaries)
         completed.append(
@@ -175,6 +198,7 @@ def execute_amber_campaign(
                 "iot_source": identity[0],
                 "iot_profile": identity[1],
                 "profile_digest": identity[2],
+                "energy_treatment": energy_treatment,
                 "completed": completed,
                 "failed_run_id": None,
                 "failure": None,
@@ -231,6 +255,11 @@ def analyze_amber_campaign(
         summaries.append(summary)
 
     source, profile, digest = require_consistent_campaign_summaries(summaries)
+    treatments = {json.dumps(item.get("energy_treatment"), sort_keys=True) for item in summaries}
+    if len(treatments) != 1:
+        raise ResearchError("Amber campaign contains mixed energy treatments")
+    energy_treatment = summaries[0].get("energy_treatment")
+
     condition_payload: dict[str, Any] = {}
     for condition in campaign.conditions:
         subset = [item for item in summaries if item.get("condition") == condition.name]
@@ -266,6 +295,7 @@ def analyze_amber_campaign(
         "iot_source": source,
         "iot_profile": profile,
         "profile_digest": digest,
+        "energy_treatment": energy_treatment,
         "runs": len(summaries),
         "conditions": condition_payload,
     }
