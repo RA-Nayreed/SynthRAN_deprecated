@@ -253,16 +253,23 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
         return
     if _is_controlled_run(args):
         return
+    run_id = getattr(args, "run_id", None)
+    if not run_id:
+        return
 
     manifest_path: Path | None = None
     if args.radio == "rfsim":
-        candidate = Path(args.experiment_root).expanduser().resolve() / args.run_id / "manifest.json"
+        candidate = (
+            Path(args.experiment_root).expanduser().resolve()
+            / run_id
+            / "manifest.json"
+        )
         if candidate.is_file():
             manifest_path = candidate
     else:
         result_path = (
             Path(args.r2lab_run_root).expanduser().resolve()
-            / args.run_id
+            / run_id
             / "physical"
             / "physical-workload-result.json"
         )
@@ -628,7 +635,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(arguments)
     try:
-        _validate_persisted_iot_identity(args)
         if args.command == "run" and _is_controlled_run(args):
             return _dispatch_controlled_run(args)
         if args.command == "calibrate":
@@ -639,6 +645,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return release_command(args)
         if args.command == "run":
             _validate_lifecycle_run(args)
+            _validate_persisted_iot_identity(args)
         with _selected_iot_runtime(args):
             return dispatch(args)
     except (BackendError, ResearchError, R2LabTopologyResourceError) as exc:
