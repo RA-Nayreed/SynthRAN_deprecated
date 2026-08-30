@@ -235,7 +235,7 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
 
 @contextmanager
 def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
-    if args.command != "run" or getattr(args, "iot_source", "cooja") == "cooja":
+    if args.command != "run" or getattr(args, "iot_source", None) != "amber":
         yield
         return
     if args.radio != "rfsim":
