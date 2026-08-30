@@ -88,6 +88,12 @@ class RfsimEdgeTransportTests(unittest.TestCase):
             del host
             return ("ssh", "root@core.example", " ".join(remote))
 
+        def fake_listener_pids(_inventory, ports):
+            return {
+                int(port): ((101,) if int(port) == 18883 else (102,))
+                for port in ports
+            }
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             adapter = RfsimEdgeTransportAdapter(
@@ -110,6 +116,9 @@ class RfsimEdgeTransportTests(unittest.TestCase):
                 "synthran.iot_edge_transport._local_port_is_closed",
                 return_value=True,
             ), patch(
+                "synthran.iot_edge_transport._remote_listener_pids",
+                side_effect=fake_listener_pids,
+            ), patch(
                 "synthran.iot_edge_transport.ssh_command",
                 side_effect=fake_ssh,
             ), patch(
@@ -131,6 +140,8 @@ class RfsimEdgeTransportTests(unittest.TestCase):
 
             self.assertEqual(MQTTEndpoint("127.0.0.1", 18886), session.mqtt_endpoint)
             self.assertEqual(3, len(started))
+            self.assertEqual((101,), session.owned_remote_pids[18883])
+            self.assertEqual((102,), session.owned_remote_pids[18886])
             edge_text = " ".join(started[0][1])
             ingress_text = " ".join(started[1][1])
             local_text = " ".join(started[2][1])
@@ -169,9 +180,11 @@ class RfsimEdgeTransportTests(unittest.TestCase):
         session = RfsimEdgeTransportSession(
             inventory=inventory(),
             endpoint=MQTTEndpoint("127.0.0.1", 18886),
+            edge_forward_port=18883,
             remote_ingress_port=18886,
             snapshot_remote_path="/tmp/synthran/test/snapshot.json",
             processes=processes,  # type: ignore[arg-type]
+            owned_remote_pids={18883: (101,), 18886: (102,)},
         )
         with patch(
             "synthran.iot_edge_transport._local_port_is_closed",
@@ -185,6 +198,36 @@ class RfsimEdgeTransportTests(unittest.TestCase):
         evidence = session.evidence()
         self.assertTrue(evidence["stopped"])
         self.assertTrue(evidence["cleanup_valid"])
+
+    def test_cleanup_reaps_only_recorded_remote_listeners(self) -> None:
+        stopped: list[str] = []
+        session = RfsimEdgeTransportSession(
+            inventory=inventory(),
+            endpoint=MQTTEndpoint("127.0.0.1", 18886),
+            edge_forward_port=18883,
+            remote_ingress_port=18886,
+            snapshot_remote_path="/tmp/synthran/test/snapshot.json",
+            processes=[FakeProcess("edge", stopped)],  # type: ignore[list-item]
+            owned_remote_pids={18883: (101,), 18886: (102,)},
+        )
+        remote_closed = [False, False, False, True, True, True, True]
+        with patch(
+            "synthran.iot_edge_transport._local_port_is_closed",
+            return_value=True,
+        ), patch(
+            "synthran.iot_edge_transport._remote_port_is_closed",
+            side_effect=remote_closed,
+        ), patch(
+            "synthran.iot_edge_transport._reap_owned_remote_listeners",
+            return_value=(),
+        ) as reap, patch("synthran.iot_edge_transport.time.sleep"):
+            session.stop()
+
+        reap.assert_called_once_with(
+            session.inventory,
+            {18883: (101,), 18886: (102,)},
+        )
+        self.assertTrue(session.evidence()["cleanup_valid"])
 
 
 if __name__ == "__main__":
