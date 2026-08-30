@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import unittest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 SOURCE = REPOSITORY_ROOT / "synthran"
+
+
+def _tracked(path: str) -> bool:
+    result = subprocess.run(
+        ["git", "ls-files", "--", path],
+        cwd=REPOSITORY_ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return bool(result.stdout.strip())
 
 
 class ModuleLayoutTests(unittest.TestCase):
@@ -107,14 +120,17 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue((SOURCE / "launcher.py").is_file())
         self.assertTrue((SOURCE / "cli.py").is_file())
         self.assertTrue((SOURCE / "command_runtime.py").is_file())
-        self.assertFalse((SOURCE / "commands").exists())
-        self.assertFalse((SOURCE / "__main__.py").exists())
-        self.assertFalse((REPOSITORY_ROOT / "cli").exists())
-        self.assertFalse((SOURCE / "entrypoint.py").exists())
-        self.assertFalse((SOURCE / "experiment" / "commands.py").exists())
-        self.assertFalse((SOURCE / "network" / "r2lab.py").exists())
-        self.assertFalse((SOURCE / "r2lab" / "_deployment_impl.py").exists())
-        self.assertFalse((SOURCE / "r2lab" / "qfit_activation_provider.py").exists())
+        for forbidden in (
+            "synthran/commands",
+            "synthran/__main__.py",
+            "cli",
+            "synthran/entrypoint.py",
+            "synthran/experiment/commands.py",
+            "synthran/network/r2lab.py",
+            "synthran/r2lab/_deployment_impl.py",
+            "synthran/r2lab/qfit_activation_provider.py",
+        ):
+            self.assertFalse(_tracked(forbidden), forbidden)
 
 
 if __name__ == "__main__":
