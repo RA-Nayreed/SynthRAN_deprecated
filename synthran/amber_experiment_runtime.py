@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import shlex
 import socket
 import sys
+import time
 from typing import Any, Mapping, Protocol, TextIO
 
 from synthran.dependencies import DependencyLock
@@ -21,6 +23,7 @@ from synthran.experiment import (
 )
 from synthran.experiment_resources import (
     CENTRAL_PORT,
+    EDGE_CONTAINER,
     names,
     render_edge_patch,
     render_experiment_objects,
@@ -155,6 +158,83 @@ def _local_port_free(port: int) -> bool:
         return False
     finally:
         sock.close()
+
+
+def _edge_sidecar_status(
+    inventory: NetworkInventory,
+    pod: str,
+) -> tuple[int, bool, bool, bool]:
+    raw = _remote(
+        inventory,
+        "sh",
+        "-c",
+        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get pod "
+        f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -o json",
+        label="Amber edge MQTT sidecar status",
+    )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ExperimentError("Amber edge MQTT sidecar status returned invalid JSON") from exc
+    status = payload.get("status") if isinstance(payload, dict) else None
+    if not isinstance(status, Mapping):
+        raise ExperimentError("Amber edge MQTT sidecar status is unavailable")
+    statuses = status.get("containerStatuses")
+    if not isinstance(statuses, list):
+        raise ExperimentError("Amber edge MQTT sidecar container status is unavailable")
+    matches = [
+        item
+        for item in statuses
+        if isinstance(item, Mapping) and item.get("name") == EDGE_CONTAINER
+    ]
+    if len(matches) != 1:
+        raise ExperimentError("Amber edge MQTT sidecar container status is ambiguous")
+    sidecar = matches[0]
+    restart_count = sidecar.get("restartCount")
+    if not isinstance(restart_count, int) or isinstance(restart_count, bool):
+        raise ExperimentError("Amber edge MQTT sidecar restart count is unavailable")
+    state = sidecar.get("state")
+    running = isinstance(state, Mapping) and isinstance(state.get("running"), Mapping)
+    container_ready = sidecar.get("ready") is True
+    conditions = status.get("conditions")
+    pod_ready = isinstance(conditions, list) and any(
+        isinstance(item, Mapping)
+        and item.get("type") == "Ready"
+        and item.get("status") == "True"
+        for item in conditions
+    )
+    return restart_count, container_ready, pod_ready, running
+
+
+def _restart_edge_sidecar_and_wait(
+    inventory: NetworkInventory,
+    pod: str,
+    *,
+    timeout_seconds: int = 60,
+) -> None:
+    before, _, _, _ = _edge_sidecar_status(inventory, pod)
+    _restart_edge_sidecar(inventory, pod)
+    deadline = time.monotonic() + timeout_seconds
+    latest = "restart not yet observed"
+    while time.monotonic() < deadline:
+        try:
+            count, container_ready, pod_ready, running = _edge_sidecar_status(
+                inventory, pod
+            )
+        except Exception as exc:
+            latest = str(exc)
+        else:
+            latest = (
+                f"restartCount={count}, containerReady={container_ready}, "
+                f"podReady={pod_ready}, running={running}"
+            )
+            if count > before and container_ready and pod_ready and running:
+                return
+        time.sleep(1)
+    raise ExperimentError(
+        "Amber edge MQTT sidecar restart did not reach a new Ready container instance "
+        f"within {timeout_seconds}s ({latest})"
+    )
 
 
 def _probe_amber_host(inventory: NetworkInventory) -> None:
@@ -469,7 +549,18 @@ def execute_amber_experiment(
             central_broker_port=CENTRAL_PORT,
         )
         _replace_edge_runtime_config(inventory, ue_pod, edge_config)
-        _restart_edge_sidecar(inventory, ue_pod)
+        try:
+            _restart_edge_sidecar_and_wait(inventory, ue_pod)
+        except Exception as exc:
+            _collect_rollout_diagnostics(
+                inventory,
+                network_run_id=transport_context.network_run_id,
+                log_path=logs / "amber-srsue-mqtt-restart-diagnostics.log",
+                private_paths=(repository_root, dependency_root, run_directory, inventory.path),
+            )
+            raise ExperimentError(
+                "Amber edge MQTT sidecar restart did not become Ready; diagnostics saved"
+            ) from exc
 
         after_patch = verify_network_path(
             inventory=inventory,
@@ -478,7 +569,23 @@ def execute_amber_experiment(
             timeout_seconds=120,
         )
         if not after_patch.ready:
-            raise ExperimentError("srsUE sidecar patch broke the accepted network path")
+            _collect_rollout_diagnostics(
+                inventory,
+                network_run_id=transport_context.network_run_id,
+                log_path=logs / "amber-srsue-mqtt-network-reproof-diagnostics.log",
+                private_paths=(repository_root, dependency_root, run_directory, inventory.path),
+                verification=after_patch,
+            )
+            failures = "; ".join(
+                f"{check.name}: {check.detail}"
+                for check in after_patch.checks
+                if not check.passed
+            )
+            raise ExperimentError(
+                "srsUE sidecar patch failed network reproof"
+                + (f" ({failures})" if failures else "")
+                + "; diagnostics saved"
+            )
         _add_ue_route(inventory, ue_pod, core_address)
         tx_before = _interface_counter(inventory, ue_pod, "tun_srsue1", "tx_bytes")
         rx_before = _interface_counter(inventory, ue_pod, "tun_srsue1", "rx_bytes")
