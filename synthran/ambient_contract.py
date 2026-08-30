@@ -26,9 +26,17 @@ BS_HEIGHT_M = 25.0
 ENERGY_MODE = "hybrid"
 ENERGY_COMBINE_MODE = "max"
 ENERGY_TRACE_COLUMN = "V_IM"
+ENERGY_TRACE_TIME_COLUMN = "Time"
 ENERGY_TRACE_RESISTANCE_OHM = 5000.0
 ENERGY_TRACE_SIMULATION_ROW_PERIOD_MS = 1
 ENERGY_TRACE_LOOPS = True
+# Observed from the pinned workbook.  AMBER ignores the Time column and advances
+# one V_IM row per env.timeout(1); we validate the stored axis independently.
+ENERGY_TRACE_EXPECTED_ROWS = 2999
+ENERGY_TRACE_TIME_FIRST = 0.0
+ENERGY_TRACE_TIME_LAST = 2.998
+ENERGY_TRACE_TIME_STEP = 0.001
+ENERGY_TRACE_TIME_UNITS = "undeclared-in-workbook"
 
 CAPACITANCE_F = 300e-6
 R_SERIES_OHM = 5000.0
@@ -93,10 +101,17 @@ def ambient_model_descriptor(energy_trace_sha256: str) -> dict[str, Any]:
             "combine_mode": ENERGY_COMBINE_MODE,
             "trace_sha256": energy_trace_sha256,
             "trace_column": ENERGY_TRACE_COLUMN,
+            "trace_time_column": ENERGY_TRACE_TIME_COLUMN,
             "trace_resistance_ohm": ENERGY_TRACE_RESISTANCE_OHM,
             "simulation_row_period_ms": ENERGY_TRACE_SIMULATION_ROW_PERIOD_MS,
             "simulation_replay": "one-trace-row-per-simulation-millisecond",
-            "source_trace_acquisition_period": "not-encoded-by-amber-energy-contract",
+            "trace_time_axis": {
+                "rows": ENERGY_TRACE_EXPECTED_ROWS,
+                "first": ENERGY_TRACE_TIME_FIRST,
+                "last": ENERGY_TRACE_TIME_LAST,
+                "step": ENERGY_TRACE_TIME_STEP,
+                "units": ENERGY_TRACE_TIME_UNITS,
+            },
             "trace_loops": ENERGY_TRACE_LOOPS,
             "shared_environmental_trace": True,
         },
