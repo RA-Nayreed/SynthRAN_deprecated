@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 import statistics
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from synthran.ambient_contract import (
     CAPACITOR_MAX_V,
@@ -120,6 +120,11 @@ def _measurement_row(
         for event in events
         if event.details.get("selected_harvest_source_collect") is not None
     )
+    selected_total = sum(selected_sources.values())
+    selected_source_fractions = {
+        source: count / selected_total
+        for source, count in sorted(selected_sources.items())
+    } if selected_total else {}
     ceiling_count = sum(
         value >= CAPACITOR_MAX_V - 1e-9 for value in collect_voltages
     )
@@ -158,7 +163,30 @@ def _measurement_row(
             "selected": _range(selected_collect_power),
         },
         "selected_harvest_source_counts": dict(sorted(selected_sources.items())),
+        "selected_harvest_source_fractions": selected_source_fractions,
     }
+
+
+def _selection(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "power_scale": row["power_scale"],
+        "energy_loss_ratio": row["energy_loss_ratio"],
+        "decode_ratio": row["decode_ratio"],
+        "target_band_match": row["target_band_match"],
+        "profile_digest": row["profile_digest"],
+    }
+
+
+def _response_signature(row: Mapping[str, Any]) -> tuple[Any, ...]:
+    voltage = row.get("capacitor_voltage_collect_v")
+    collect_mean = voltage.get("mean") if isinstance(voltage, Mapping) else None
+    return (
+        int(row["energy_loss_count"]),
+        int(row["transmitted_opportunities"]),
+        int(row["decoded_opportunities"]),
+        round(float(collect_mean), 9) if collect_mean is not None else None,
+        tuple(sorted(dict(row["selected_harvest_source_counts"]).items())),
+    )
 
 
 def execute_energy_calibration(
@@ -264,14 +292,31 @@ def execute_energy_calibration(
 
     midpoint = (target_energy_loss_min + target_energy_loss_max) / 2.0
     in_band = [row for row in rows if row["target_band_match"]]
-    candidates = in_band or rows
-    recommended = min(
-        candidates,
+    closest = min(
+        rows,
         key=lambda row: (
             abs(float(row["energy_loss_ratio"]) - midpoint),
             -float(row["decode_ratio"]),
             -float(row["power_scale"]),
         ),
+    )
+    response_observed = (
+        len({_response_signature(row) for row in rows}) > 1
+        if len(rows) > 1
+        else None
+    )
+    calibration_valid = bool(in_band) and response_observed is True
+    recommended = (
+        min(
+            in_band,
+            key=lambda row: (
+                abs(float(row["energy_loss_ratio"]) - midpoint),
+                -float(row["decode_ratio"]),
+                -float(row["power_scale"]),
+            ),
+        )
+        if calibration_valid
+        else None
     )
 
     result = {
@@ -290,14 +335,12 @@ def execute_energy_calibration(
             target_energy_loss_min,
             target_energy_loss_max,
         ],
+        "target_band_found": bool(in_band),
+        "treatment_response_observed": response_observed,
+        "calibration_valid": calibration_valid,
         "runs": rows,
-        "recommended": {
-            "power_scale": recommended["power_scale"],
-            "energy_loss_ratio": recommended["energy_loss_ratio"],
-            "decode_ratio": recommended["decode_ratio"],
-            "target_band_match": recommended["target_band_match"],
-            "profile_digest": recommended["profile_digest"],
-        },
+        "recommended": _selection(recommended) if recommended is not None else None,
+        "closest_observed": _selection(closest),
     }
     result_path = root / "energy-calibration.json"
     atomic_json(result_path, result)
