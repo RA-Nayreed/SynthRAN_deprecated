@@ -81,7 +81,28 @@ def write_claim(root: Path, run_id: str, slice_name: str) -> Path:
     return claim
 
 
+def test_gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
+    """Build deterministic fake Faraday argv without reading the live profile."""
+
+    return (
+        "ssh",
+        "-F",
+        "/dev/null",
+        "--",
+        f"{slice_name}@faraday.inria.fr",
+        *remote,
+    )
+
+
 class R2LabStaleClaimTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch(
+            "synthran.r2lab.stale_claim.gateway_command",
+            side_effect=test_gateway_command,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_expired_lease_retires_only_local_claim_and_preserves_evidence(self) -> None:
         runner = LeaseRunner(lease_ok=False)
         with tempfile.TemporaryDirectory() as directory:
