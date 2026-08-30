@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import shlex
+import socket
 import sys
 from typing import Any, Mapping, TextIO
 
@@ -15,14 +15,12 @@ from synthran.dependencies import DependencyLock
 from synthran.experiment import (
     ExperimentError,
     build_scenario,
-    load_jsonl,
     render_edge_mosquitto_config,
     validate_run_id,
     write_parquet,
 )
 from synthran.experiment_resources import (
     CENTRAL_PORT,
-    KUBERNETES_NAMESPACE,
     names,
     render_edge_patch,
     render_experiment_objects,
@@ -40,7 +38,6 @@ from synthran.experiment.runtime import (
     _interface_counter,
     _kubectl_apply_object,
     _kubectl_patch_deployment,
-    _probe_experiment_host,
     _probe_ssh_forwarding,
     _remote,
     _replace_edge_runtime_config,
@@ -66,14 +63,21 @@ from synthran.iot_source import (
     TRANSPORT_PROFILE,
     AmberSourceAdapter,
     IoTSourceSpec,
+    PreparedIoTPlan,
     reconcile_source_and_transport,
 )
-from synthran.live_preflight import LivePreflightError, ssh_command
 from synthran.network_runtime import verify_network_path
 from synthran.rfsim_runtime import reconcile_rfsim_runtime
 
 
 AMBER_EXPERIMENT_SCHEMA = "synthran/experiment-run/v2alpha1"
+KUBERNETES_NAMESPACE = "open5gs"
+REMOTE_AMBER_PORTS = (
+    RFSIM_EDGE_FORWARD_PORT,
+    LOCAL_CENTRAL_FORWARD_PORT,
+    RFSIM_AMBER_INGRESS_PORT,
+)
+LOCAL_AMBER_PORTS = (LOCAL_CENTRAL_FORWARD_PORT, RFSIM_AMBER_INGRESS_PORT)
 
 
 def _utc_now() -> str:
@@ -95,11 +99,11 @@ def _manifest(
     *,
     run_id: str,
     network_run_id: str,
-    scenario_name: str,
     profile: str,
     seed: int,
     period: int,
     status: str,
+    scenario_name: str = "iot-scenario-v2.json",
     failure: str | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
@@ -119,6 +123,102 @@ def _manifest(
     if failure:
         value["failure"] = failure
     return value
+
+
+def _local_port_free(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _probe_amber_host(inventory: NetworkInventory) -> None:
+    """Check only capabilities required by the Amber source transport."""
+
+    probe = (
+        "import json, os, socket\n"
+        f"ports={list(REMOTE_AMBER_PORTS)!r}\n"
+        "busy=[]\n"
+        "for port in ports:\n"
+        "    s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
+        "    try:\n"
+        "        s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
+        "        s.bind(('127.0.0.1',port))\n"
+        "    except OSError:\n"
+        "        busy.append(port)\n"
+        "    finally:\n"
+        "        s.close()\n"
+        "print(json.dumps({'uid':os.geteuid(),'busy_ports':busy}))\n"
+    )
+    raw = _remote(
+        inventory,
+        "python3",
+        "-c",
+        probe,
+        label="Amber experiment-host capability probe",
+    )
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ExperimentError("Amber experiment-host probe returned invalid JSON") from exc
+    if not isinstance(value, dict):
+        raise ExperimentError("Amber experiment-host probe returned invalid data")
+    if value.get("uid") != 0:
+        raise ExperimentError("Amber experiment host must be accessed as root")
+    busy = value.get("busy_ports")
+    if busy:
+        raise ExperimentError(
+            f"Amber experiment remote loopback ports are already in use: {busy}"
+        )
+    local_busy = [port for port in LOCAL_AMBER_PORTS if not _local_port_free(port)]
+    if local_busy:
+        raise ExperimentError(
+            f"Amber experiment controller loopback ports are already in use: {local_busy}"
+        )
+
+
+def _write_failure_artifacts(
+    *,
+    manifest_path: Path,
+    wrapper_evidence_path: Path,
+    run_id: str,
+    network_run_id: str,
+    profile: str,
+    seed: int,
+    period: int,
+    failure: str,
+) -> None:
+    _atomic_json(
+        manifest_path,
+        _manifest(
+            run_id=run_id,
+            network_run_id=network_run_id,
+            profile=profile,
+            seed=seed,
+            period=period,
+            status="failed",
+            failure=failure,
+        ),
+    )
+    _atomic_json(
+        wrapper_evidence_path,
+        {
+            "schema": "synthran/experiment-evidence/v2alpha1",
+            "run_id": run_id,
+            "network_run_id": network_run_id,
+            "iot_source": AMBER_SOURCE_ID,
+            "iot_profile": profile,
+            "iot_seed": seed,
+            "ready": False,
+            "failure": failure,
+            "updated_at_utc": _utc_now(),
+        },
+    )
 
 
 def execute_amber_experiment(
@@ -180,17 +280,9 @@ def execute_amber_experiment(
     )
     if not base.ready:
         raise ExperimentError("accepted network no longer satisfies path proof")
-    report("network prerequisite: OK")
-
-    _probe_experiment_host(
-        inventory,
-        required_ports=(
-            RFSIM_EDGE_FORWARD_PORT,
-            LOCAL_CENTRAL_FORWARD_PORT,
-            RFSIM_AMBER_INGRESS_PORT,
-        ),
-    )
+    _probe_amber_host(inventory)
     _probe_ssh_forwarding(inventory)
+    report("network and Amber transport prerequisites: OK")
 
     run_root = run_root.resolve()
     run_root.mkdir(parents=True, exist_ok=True)
@@ -202,17 +294,6 @@ def execute_amber_experiment(
     logs = run_directory / "logs"
     logs.mkdir()
 
-    source_adapter = AmberSourceAdapter(
-        repository_root=repository_root,
-        dependency_root=dependency_root,
-    )
-    report("Amber source: preparing immutable event plan...")
-    plan = source_adapter.prepare(source_spec, collection_seconds, run_directory)
-    report(
-        f"Amber source: {plan.planned_count} opportunities, "
-        f"{plan.decoded_count} decoded, {plan.source_loss_count} classified source loss"
-    )
-
     manifest_path = run_directory / "manifest.json"
     wrapper_evidence_path = run_directory / "experiment-evidence.json"
     jsonl_path = run_directory / "telemetry.jsonl"
@@ -223,11 +304,48 @@ def execute_amber_experiment(
         _manifest(
             run_id=run_id,
             network_run_id=transport_context.network_run_id,
-            scenario_name=plan.scenario_path.name,
+            profile=iot_profile,
+            seed=iot_seed,
+            period=sensor_period_seconds,
+            status="preparing",
+        ),
+    )
+
+    source_adapter = AmberSourceAdapter(
+        repository_root=repository_root,
+        dependency_root=dependency_root,
+    )
+    plan: PreparedIoTPlan | None = None
+    try:
+        report("Amber source: preparing immutable event plan...")
+        plan = source_adapter.prepare(source_spec, collection_seconds, run_directory)
+    except Exception as exc:
+        failure = str(exc)
+        _write_failure_artifacts(
+            manifest_path=manifest_path,
+            wrapper_evidence_path=wrapper_evidence_path,
+            run_id=run_id,
+            network_run_id=transport_context.network_run_id,
+            profile=iot_profile,
+            seed=iot_seed,
+            period=sensor_period_seconds,
+            failure=failure,
+        )
+        raise
+    report(
+        f"Amber source: {plan.planned_count} opportunities, "
+        f"{plan.decoded_count} decoded, {plan.source_loss_count} classified source loss"
+    )
+    _atomic_json(
+        manifest_path,
+        _manifest(
+            run_id=run_id,
+            network_run_id=transport_context.network_run_id,
             profile=iot_profile,
             seed=iot_seed,
             period=sensor_period_seconds,
             status="running",
+            scenario_name=plan.scenario_path.name,
         ),
     )
 
@@ -242,7 +360,7 @@ def execute_amber_experiment(
     failure: str | None = None
     cleanup_errors: list[str] = []
     transport_payload: dict[str, Any] = {}
-    ready = False
+    run_accepted = False
 
     try:
         _remote(
@@ -307,15 +425,10 @@ def execute_amber_experiment(
                 inventory,
                 network_run_id=transport_context.network_run_id,
                 log_path=logs / "amber-srsue-mqtt-rollout-diagnostics.log",
-                private_paths=(
-                    repository_root,
-                    dependency_root,
-                    run_directory,
-                    inventory.path,
-                ),
+                private_paths=(repository_root, dependency_root, run_directory, inventory.path),
             )
             raise ExperimentError(
-                "Amber edge MQTT sidecar did not become Ready"
+                "Amber edge MQTT sidecar did not become Ready; diagnostics saved"
             ) from exc
 
         runtime_state = reconcile_rfsim_runtime(
@@ -342,16 +455,10 @@ def execute_amber_experiment(
             timeout_seconds=120,
         )
         if not after_patch.ready:
-            raise ExperimentError(
-                "srsUE sidecar patch broke the accepted network path"
-            )
+            raise ExperimentError("srsUE sidecar patch broke the accepted network path")
         _add_ue_route(inventory, ue_pod, core_address)
-        tx_before = _interface_counter(
-            inventory, ue_pod, "tun_srsue1", "tx_bytes"
-        )
-        rx_before = _interface_counter(
-            inventory, ue_pod, "tun_srsue1", "rx_bytes"
-        )
+        tx_before = _interface_counter(inventory, ue_pod, "tun_srsue1", "tx_bytes")
+        rx_before = _interface_counter(inventory, ue_pod, "tun_srsue1", "rx_bytes")
 
         central_forward = _start_process(
             "Amber central MQTT port-forward",
@@ -363,8 +470,7 @@ def execute_amber_experiment(
                     "KUBECONFIG=/etc/kubernetes/admin.conf kubectl port-forward "
                     f"-n {KUBERNETES_NAMESPACE} "
                     f"deployment/{resource_names['central_deployment']} "
-                    f"{LOCAL_CENTRAL_FORWARD_PORT}:{CENTRAL_PORT} "
-                    "--address 127.0.0.1"
+                    f"{LOCAL_CENTRAL_FORWARD_PORT}:{CENTRAL_PORT} --address 127.0.0.1"
                 ),
             ),
             cwd=repository_root,
@@ -404,42 +510,24 @@ def execute_amber_experiment(
             endpoint=edge_session.mqtt_endpoint,
             collector_barrier=collector,
         ).start()
-        collector.wait_start_canaries(
-            source_spec.sensor_ids,
-            timeout=30.0,
-        )
-        publisher_evidence = publisher.wait(
-            timeout=float(collection_seconds) + 60.0
-        )
-        collector.wait_end_canaries(
-            source_spec.sensor_ids,
-            timeout=30.0,
-        )
+        publisher_evidence = publisher.wait(timeout=float(collection_seconds) + 60.0)
+        collector.wait_end_canaries(source_spec.sensor_ids, timeout=30.0)
 
         decoded_pairs = tuple(event.key for event in plan.events if event.decoded)
-        records = collector.wait_expected_pairs(
-            decoded_pairs,
-            timeout=30.0,
-        )
+        records = collector.wait_expected_pairs(decoded_pairs, timeout=30.0)
         central_pairs = [
-            (str(record["sensor_id"]), int(record["sequence"]))
-            for record in records
-        ]
-        published_pairs = [
-            (event.sensor_id, int(event.sequence))
-            for event in publisher._events
-            if event.kind == "telemetry" and event.success and event.sequence is not None
+            (str(record["sensor_id"]), int(record["sequence"])) for record in records
         ]
         reconciliation = reconcile_source_and_transport(
             plan.events,
-            published_pairs=published_pairs,
+            published_pairs=publisher.published_pairs(),
             central_pairs=central_pairs,
         )
         if not reconciliation.valid:
             raise ExperimentError(
                 "Amber source/transport reconciliation found loss, duplicates, or unexpected telemetry"
             )
-        if iot_profile == TRANSPORT_PROFILE and plan.source_loss_count != 0:
+        if iot_profile == TRANSPORT_PROFILE and plan.source_loss_count:
             raise ExperimentError("transport-v1 produced scientific source loss")
         if iot_profile == TRANSPORT_PROFILE:
             counts: dict[str, int] = {}
@@ -459,15 +547,11 @@ def execute_amber_experiment(
             or ingress_snapshot.upstream_bytes <= 0
         ):
             raise ExperimentError(
-                "Amber MQTT ingress did not prove all ten publisher connections"
+                "Amber counted ingress did not prove all ten publisher connections"
             )
 
-        tx_after = _interface_counter(
-            inventory, ue_pod, "tun_srsue1", "tx_bytes"
-        )
-        rx_after = _interface_counter(
-            inventory, ue_pod, "tun_srsue1", "rx_bytes"
-        )
+        tx_after = _interface_counter(inventory, ue_pod, "tun_srsue1", "tx_bytes")
+        rx_after = _interface_counter(inventory, ue_pod, "tun_srsue1", "rx_bytes")
         if tx_after <= tx_before:
             raise ExperimentError(
                 "tun_srsue1 TX counter did not increase during Amber delivery"
@@ -485,10 +569,9 @@ def execute_amber_experiment(
             )
 
         write_parquet(records, parquet_path)
-        collector_evidence = collector.evidence()
         transport_payload = {
             "publisher": publisher_evidence.to_dict(),
-            "collector": collector_evidence.to_dict(),
+            "collector": collector.evidence().to_dict(),
             "ingress": ingress_snapshot.to_dict(),
             "reconciliation": reconciliation.to_dict(),
             "ue": {
@@ -502,7 +585,7 @@ def execute_amber_experiment(
             },
             "network_reproof_ready": True,
         }
-        ready = True
+        run_accepted = True
     except Exception as exc:
         failure = str(exc)
         report(f"error: {failure}")
@@ -530,6 +613,8 @@ def execute_amber_experiment(
                 central_forward.stop()
             except Exception as exc:
                 cleanup_errors.append(f"central forward cleanup: {exc}")
+        if not _local_port_free(LOCAL_CENTRAL_FORWARD_PORT):
+            cleanup_errors.append("central MQTT controller port remained in use")
         if remote_workspace_created:
             try:
                 _remote(
@@ -550,7 +635,7 @@ def execute_amber_experiment(
             cleanup_errors=cleanup_errors,
         )
         cleanup_valid = cleanup_check.passed
-        ready = ready and cleanup_valid and failure is None
+        ready = run_accepted and cleanup_valid and failure is None
 
         try:
             iot_evidence = json.loads(plan.evidence_path.read_text(encoding="utf-8"))
@@ -586,18 +671,20 @@ def execute_amber_experiment(
         }
         if failure:
             wrapper["failure"] = failure
+        if not cleanup_valid:
+            wrapper["cleanup_failure"] = cleanup_check.detail
         _atomic_json(wrapper_evidence_path, wrapper)
         _atomic_json(
             manifest_path,
             _manifest(
                 run_id=run_id,
                 network_run_id=transport_context.network_run_id,
-                scenario_name=plan.scenario_path.name,
                 profile=iot_profile,
                 seed=iot_seed,
                 period=sensor_period_seconds,
                 status="accepted" if ready else "failed",
-                failure=failure,
+                scenario_name=plan.scenario_path.name,
+                failure=failure or (None if cleanup_valid else cleanup_check.detail),
             ),
         )
 
