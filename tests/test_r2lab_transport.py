@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import shlex
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -65,7 +64,8 @@ class R2LabTransportTests(unittest.TestCase):
         self.assertIn("/tmp/id_rsa", command)
         self.assertEqual("oulu_user@faraday.inria.fr", command[command.index("--") + 1])
 
-    def test_qfit_host_mapping_and_nested_argv(self) -> None:
+    @patch("synthran.r2lab.controller._configured_identity", return_value=None)
+    def test_qfit_host_mapping_and_nested_argv(self, _identity) -> None:
         self.assertEqual("fit07", physical_qfit_host("qfit07"))
         script = "import socket; print('ok')"
         command = qfit_gateway_command("oulu_user", "qfit07", "python3", "-c", script)
