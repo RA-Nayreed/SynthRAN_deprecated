@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import shlex
 import threading
 import time
 from typing import Any, Mapping
@@ -154,11 +155,19 @@ def _interface_counters(
 def _ingress_snapshot(
     inventory: NetworkInventory, run_id: str
 ) -> IngressSnapshot:
-    path = f"/tmp/synthran/{run_id}/ingress-snapshot.json"
+    root = f"/tmp/synthran/{run_id}"
+    amber_path = f"{root}/amber-ingress-snapshot.json"
+    legacy_path = f"{root}/ingress-snapshot.json"
+    command = (
+        f"if test -f {shlex.quote(amber_path)}; then cat {shlex.quote(amber_path)}; "
+        f"elif test -f {shlex.quote(legacy_path)}; then cat {shlex.quote(legacy_path)}; "
+        "else exit 44; fi"
+    )
     output = base_runtime._remote(
         inventory,
-        "cat",
-        path,
+        "sh",
+        "-c",
+        command,
         label="research counted ingress sample",
         timeout_seconds=10,
     )
