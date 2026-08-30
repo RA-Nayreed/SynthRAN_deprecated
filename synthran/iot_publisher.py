@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
@@ -35,6 +35,69 @@ class SystemReplayClock:
 
     def sleep(self, seconds: float) -> None:
         time.sleep(seconds)
+
+
+@dataclass
+class ReplayStartGate:
+    """Optional research barrier placed after canaries and before source time zero."""
+
+    released: threading.Event = field(default_factory=threading.Event)
+    condition: threading.Condition = field(default_factory=threading.Condition)
+    origin_monotonic_s: float | None = None
+
+
+_REPLAY_GATES_LOCK = threading.Lock()
+_REPLAY_GATES: dict[str, ReplayStartGate] = {}
+
+
+def install_replay_start_gate(run_id: str) -> None:
+    """Require explicit release before a run's source clock can advance."""
+
+    with _REPLAY_GATES_LOCK:
+        if run_id in _REPLAY_GATES:
+            raise IoTSourceError(f"Amber replay start gate already exists for {run_id}")
+        _REPLAY_GATES[run_id] = ReplayStartGate()
+
+
+def release_replay_start_gate(run_id: str) -> None:
+    """Allow a gated replay worker to establish source time zero."""
+
+    with _REPLAY_GATES_LOCK:
+        gate = _REPLAY_GATES.get(run_id)
+    if gate is None:
+        raise IoTSourceError(f"Amber replay start gate is missing for {run_id}")
+    gate.released.set()
+
+
+def wait_replay_start_origin(run_id: str, *, timeout: float = 30.0) -> float:
+    """Return the exact monotonic instant chosen as source time zero."""
+
+    with _REPLAY_GATES_LOCK:
+        gate = _REPLAY_GATES.get(run_id)
+    if gate is None:
+        raise IoTSourceError(f"Amber replay start gate is missing for {run_id}")
+    deadline = time.monotonic() + timeout
+    with gate.condition:
+        while gate.origin_monotonic_s is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise IoTSourceError("Amber replay source-clock origin was not observed")
+            gate.condition.wait(timeout=min(0.25, remaining))
+        return float(gate.origin_monotonic_s)
+
+
+def remove_replay_start_gate(run_id: str) -> None:
+    """Remove a research gate and release any worker still waiting on teardown."""
+
+    with _REPLAY_GATES_LOCK:
+        gate = _REPLAY_GATES.pop(run_id, None)
+    if gate is not None:
+        gate.released.set()
+
+
+def _replay_start_gate(run_id: str) -> ReplayStartGate | None:
+    with _REPLAY_GATES_LOCK:
+        return _REPLAY_GATES.get(run_id)
 
 
 @dataclass(frozen=True)
@@ -225,7 +288,6 @@ class AmberReplaySession:
             raise IoTSourceError(
                 "central collector did not observe all start canaries"
             ) from exc
-        self._replay_origin = self.clock.monotonic()
         self._worker = threading.Thread(
             target=self._run,
             name=f"amber-replay-{self.plan.spec.run_id}",
@@ -397,9 +459,25 @@ class AmberReplaySession:
                 return
             self.clock.sleep(min(remaining, 0.05))
 
+    def _await_replay_start(self) -> bool:
+        gate = _replay_start_gate(self.plan.spec.run_id)
+        if gate is not None:
+            while not self._cancel.is_set() and not gate.released.wait(timeout=0.05):
+                pass
+            if self._cancel.is_set():
+                return False
+        self._replay_origin = self.clock.monotonic()
+        if gate is not None:
+            with gate.condition:
+                gate.origin_monotonic_s = self._replay_origin
+                gate.condition.notify_all()
+        return True
+
     def _run(self) -> None:
-        assert self._replay_origin is not None
         try:
+            if not self._await_replay_start():
+                return
+            assert self._replay_origin is not None
             decoded = sorted(
                 (event for event in self.plan.events if event.decoded),
                 key=lambda event: (event.planned_at_ms, event.sensor_id, event.sequence),
