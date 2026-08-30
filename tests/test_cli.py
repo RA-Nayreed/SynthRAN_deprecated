@@ -43,7 +43,7 @@ class CliTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(SystemExit):
                 parser.parse_args([command])
 
-    def test_run_selects_rfsim_and_keeps_cooja_transition_default(self) -> None:
+    def test_run_selects_rfsim_and_defaults_to_cooja_source(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -137,7 +137,7 @@ class CliTests(unittest.TestCase):
             self.assertIsNot(original, command_runtime._experiment_run)
         self.assertIs(original, command_runtime._experiment_run)
 
-    def test_amber_physical_backend_fails_closed_until_adapter_exists(self) -> None:
+    def test_amber_physical_backend_rejects_unsupported_source(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -157,7 +157,7 @@ class CliTests(unittest.TestCase):
                 "amber",
             ]
         )
-        with self.assertRaisesRegex(BackendError, "not enabled for R2Lab"):
+        with self.assertRaisesRegex(BackendError, "not supported for the R2Lab backend"):
             with _selected_iot_runtime(args):
                 pass
 
