@@ -43,6 +43,7 @@ ENERGY_TRACE_TIME_UNITS = "undeclared-in-workbook"
 DEFAULT_ENERGY_POWER_SCALE = 1.0
 DEFAULT_ENERGY_NODE_VARIATION = 0.0
 MAX_ENERGY_NODE_VARIATION = 0.5
+_RUN_ENERGY_TREATMENTS: dict[str, tuple[float, float]] = {}
 
 CAPACITANCE_F = 300e-6
 R_SERIES_OHM = 5000.0
@@ -74,6 +75,10 @@ NOISE_FIGURE_DB = 6.0
 BANDWIDTH_HZ = 100e6
 
 
+def math_is_finite(value: float) -> bool:
+    return value == value and value not in (float("inf"), float("-inf"))
+
+
 def validate_energy_treatment(
     power_scale: float,
     node_variation: float,
@@ -96,8 +101,32 @@ def validate_energy_treatment(
     return scale, variation
 
 
-def math_is_finite(value: float) -> bool:
-    return value == value and value not in (float("inf"), float("-inf"))
+def register_run_energy_treatment(
+    run_id: str,
+    power_scale: float,
+    node_variation: float,
+) -> None:
+    """Register one live research treatment until its source spec consumes it."""
+
+    if not isinstance(run_id, str) or not run_id:
+        raise ValueError("Ambient energy treatment run ID must be non-empty")
+    treatment = validate_energy_treatment(power_scale, node_variation)
+    existing = _RUN_ENERGY_TREATMENTS.get(run_id)
+    if existing is not None and existing != treatment:
+        raise ValueError("Ambient energy treatment for this run is already registered")
+    _RUN_ENERGY_TREATMENTS[run_id] = treatment
+
+
+def consume_run_energy_treatment(run_id: str) -> tuple[float, float] | None:
+    """Consume the exact treatment registered for one live source-plan creation."""
+
+    return _RUN_ENERGY_TREATMENTS.pop(run_id, None)
+
+
+def clear_run_energy_treatment(run_id: str) -> None:
+    """Drop a pending treatment after plan-only use or failed dispatch."""
+
+    _RUN_ENERGY_TREATMENTS.pop(run_id, None)
 
 
 def deterministic_node_energy_factor(
