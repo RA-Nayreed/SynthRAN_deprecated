@@ -15,27 +15,27 @@ SynthRAN turns a collection of provider, radio, 5G, IoT, and measurement tools i
 
 ## One command surface
 
-There is one installed executable and one lifecycle command:
+There is one installed executable and one experiment execution verb:
 
 ```text
-synthran run --radio rfsim ...
-synthran run --radio r2lab ...
+synthran run ...
 ```
 
 The supported top-level interface is intentionally small:
 
 ```text
-run       execute a complete experiment lifecycle
-doctor    perform read-only readiness checks
-inspect   show capabilities or persisted run evidence
-logs      read or follow the unified run event stream
-stop      release resources owned by one run
-research  controlled measurement and campaign tools
-deps      synchronize pinned external dependencies
-dev       repository maintenance commands
+run        execute one experiment or an immutable campaign
+doctor     perform read-only readiness checks
+calibrate  measure reference RAN/UE-path capacity
+inspect    show capabilities or persisted run evidence
+logs       read or follow the unified run event stream
+analyze    analyze a completed persisted campaign
+release    release persistent resources owned by one physical run
+deps       synchronize pinned external dependencies
+dev        repository maintenance commands
 ```
 
-RFSIM and R2Lab are backends of the same product, not separate workflows. Backend-specific resource and hardware functions remain internal implementation boundaries.
+RFSIM and R2Lab are backends of the same product, not separate workflows. Backend-specific resource, radio, measurement, and campaign functions remain internal implementation boundaries.
 
 ## Install
 
@@ -56,7 +56,7 @@ export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
 export SYNTHRAN_OWNER='YOUR_SLICES_USERNAME'
 ```
 
-A run creates or reuses its provider experiment and acquires the required Post5G prefix. By default the provider experiment name is the run ID.
+A full lifecycle run creates or reuses its provider experiment and acquires the required Post5G prefix. By default the provider experiment name is the run ID.
 
 ## Virtual run
 
@@ -77,7 +77,75 @@ synthran run \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-The run prepares compute resources, verifies authority, deploys Open5GS and srsRAN/RFSIM, proves the user path, executes the deterministic ten-sensor workload, and persists acceptance evidence.
+The run prepares compute resources, verifies authority, deploys Open5GS and srsRAN/RFSIM, proves the user path, executes the selected IoT workload, and persists acceptance evidence.
+
+## Controlled run on an accepted RFSIM path
+
+A controlled measurement is still a `run`; it reuses a previously accepted network rather than creating another command hierarchy.
+
+```zsh
+synthran run \
+  --campaign-id ambient-study-01 \
+  --network-run-id virtual-001 \
+  --run-id ambient-baseline-01 \
+  --condition baseline \
+  --iot-profile ambient-v1 \
+  --seed 424242 \
+  --sensor-period 10 \
+  --warmup-seconds 30 \
+  --duration-seconds 180 \
+  --sample-interval 1 \
+  --probe-interval 1 \
+  --probe-target 198.51.100.1 \
+  --inventory .synthran/preparations/virtual-001/hosts.ini
+```
+
+`ambient-v1` additionally accepts explicit `--energy-power-scale` and `--energy-node-variation` treatments. The selected treatment is part of the immutable source identity and evidence.
+
+Add `--plan` to a controlled single run to render its immutable request without execution.
+
+## Campaigns
+
+Campaign scheduling and execution use the same `run` verb. A new deterministic schedule is persisted automatically before execution:
+
+```zsh
+synthran run \
+  --campaign-id ambient-ran-study-01 \
+  --network-run-id virtual-001 \
+  --seeds 424242,424243,424244 \
+  --conditions baseline,load50=0.5,load80=0.8,load95=0.95 \
+  --campaign-seed 20260830 \
+  --iot-profile ambient-v1 \
+  --inventory .synthran/preparations/virtual-001/hosts.ini \
+  --probe-target 198.51.100.1 \
+  --reference-capacity-bps REFERENCE_CAPACITY
+```
+
+Use `--plan` to persist and display the deterministic campaign schedule without executing it. Use `--campaign PATH` later to execute the exact persisted schedule rather than rebuilding it from command-line arguments.
+
+## Capacity calibration
+
+`calibrate` means RAN/UE-path capacity only. It is independent of AMBER energy treatment:
+
+```zsh
+synthran calibrate \
+  --inventory .synthran/preparations/virtual-001/hosts.ini \
+  --network-run-id virtual-001 \
+  --target 198.51.100.1 \
+  --out .synthran/capacity/virtual-001.json
+```
+
+The resulting capacity evidence can be supplied to fractional loaded conditions with `--reference-capacity-bps`.
+
+## Analyze
+
+Analysis consumes a persisted campaign schedule and completed run summaries; it does not execute an experiment:
+
+```zsh
+synthran analyze \
+  --campaign .synthran/campaigns/ambient-ran-study-01.json \
+  --out .synthran/analysis/ambient-ran-study-01.json
+```
 
 ## Physical R2Lab run
 
@@ -108,13 +176,13 @@ synthran run \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-The physical path reuses the active R2Lab lease, claims only the selected radio and UE, reconciles the selected SLICES/Open5GS foundation, stages and starts the pinned N3xx gNB, proves N2, activates the selected UE through pinned `5g_ansible` roles, proves the PDU/user plane, runs the same deterministic IoT workload, then releases exact run-owned physical resources unless `--keep-resources` was requested.
+The physical path reuses the active R2Lab lease, claims only the selected radio and UE, reconciles the selected SLICES/Open5GS foundation, stages and starts the pinned N3xx gNB, proves N2, activates the selected UE through pinned `5g_ansible` roles, proves the PDU/user plane, runs the selected IoT workload, then releases exact run-owned physical resources unless `--keep-resources` was requested.
 
 ## Live progress and logs
 
 All long Ansible work uses the same sanitized streaming implementation. RFSIM deployment, physical Open5GS work, and R2Lab UE setup/connect/stop therefore expose the same task filtering, failures, and heartbeats.
 
-Every run also writes the same messages to:
+Every lifecycle run also writes the same messages to:
 
 ```text
 .synthran/events/<run-id>.jsonl
@@ -129,36 +197,23 @@ synthran logs --run-id "$RUN_ID" --follow
 
 `--quiet` suppresses terminal progress but still records the event stream.
 
-## Inspect and cleanup
+## Inspect and release
 
 ```zsh
 synthran inspect --run-id "$RUN_ID"
 synthran inspect --radio r2lab
-synthran stop --run-id "$RUN_ID"
+synthran release --run-id "$RUN_ID"
 ```
 
-Physical cleanup is authority-bound and exact. SynthRAN does not use broad radio power-off, wildcard deletion, or guessed ownership.
+Normal RFSIM runs clean up their transient experiment resources inside the run itself, so `release` is primarily for persistent physical/provider ownership after an interrupted or intentionally retained R2Lab run. Physical release is authority-bound and exact. SynthRAN does not use broad radio power-off, wildcard deletion, or guessed ownership.
 
-## Research
-
-The controlled research tools are top-level commands:
-
-```text
-synthran research plan
-synthran research run
-synthran research calibrate
-synthran research campaign-plan
-synthran research campaign-run
-synthran research analyze
-```
-
-The published controlled-load campaign implementation is currently validated against the accepted RFSIM network-evidence path. Physical deterministic workload execution is implemented, but physical controlled-load campaign parity is not claimed until it has its own accepted evidence.
+The controlled-load implementation is currently validated against the accepted RFSIM network-evidence path. Physical deterministic workload execution is implemented, but physical controlled-load campaign parity is not claimed until it has its own accepted evidence.
 
 Current accepted measurements and interpretation limits are in [`docs/results.md`](docs/results.md).
 
 ## Deterministic workload
 
-The reference workload is:
+The historical reference workload is:
 
 ```text
 10 deterministic Contiki-NG/Cooja sensors
@@ -172,7 +227,7 @@ The reference workload is:
 -> deterministic Parquet
 ```
 
-The virtual backend carries that path through srsUE/RFSIM. The physical backend substitutes the selected physical UE and N3xx radio while preserving experiment-level workload and evidence semantics.
+AMBER profiles use the same experiment-level evidence boundary without claiming Contiki, RPL, or 6LoWPAN semantics. The virtual backend carries the selected workload through srsUE/RFSIM. The physical backend substitutes the selected physical UE and N3xx radio where that profile is supported.
 
 ## Documentation
 
@@ -191,6 +246,6 @@ The virtual backend carries that path through srsUE/RFSIM. The physical backend 
 
 ## Capability boundary
 
-Accepted virtual evidence includes Open5GS, srsRAN, RFSIM, deterministic Cooja telemetry, external-peer capacity calibration, controlled UDP load, fixed-window measurement, blocked campaigns, and offline paired analysis.
+Accepted virtual evidence includes Open5GS, srsRAN, RFSIM, deterministic telemetry, external-peer capacity calibration, controlled UDP load, fixed-window measurement, blocked campaigns, and offline paired analysis.
 
 R2Lab implements the corresponding physical lifecycle through exact hardware authority, N3xx gNB/N2, selected Quectel UE activation, PDU/user-plane proof, deterministic workload execution, and exact cleanup. A physical capability is considered established only when current accepted evidence proves it; historical observations are not upgraded into current authority or scientific results.
