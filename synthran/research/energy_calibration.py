@@ -50,10 +50,6 @@ def parse_energy_scales(raw: str) -> tuple[float, ...]:
     return tuple(values)
 
 
-def _mean(values: Sequence[float]) -> float | None:
-    return statistics.fmean(values) if values else None
-
-
 def _range(values: Sequence[float]) -> dict[str, float | None]:
     if not values:
         return {"minimum": None, "mean": None, "maximum": None}
@@ -263,7 +259,7 @@ def execute_energy_calibration(
         row["power_scale"] = scale
         row["node_variation_fraction"] = variation
         row["run_id"] = run_id
-        row["artifact_directory"] = str((root / token).resolve())
+        row["artifact_directory"] = token
         rows.append(row)
 
     midpoint = (target_energy_loss_min + target_energy_loss_max) / 2.0
