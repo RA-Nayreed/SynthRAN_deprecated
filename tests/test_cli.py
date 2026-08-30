@@ -61,29 +61,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual("rfsim", args.radio)
         self.assertIsNone(args.device)
         self.assertIsNone(args.ue)
-        self.assertEqual("amber", args.iot_source)
+        self.assertFalse(hasattr(args, "iot_source"))
         self.assertEqual("transport-v1", args.iot_profile)
         self.assertEqual(424242, args.iot_seed)
         self.assertEqual(10, args.sensor_period)
 
     def test_removed_source_selector_is_rejected(self) -> None:
         parser = _parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(
-                [
-                    "run",
-                    "--radio",
-                    "rfsim",
-                    "--core-node",
-                    "sopnode-f2",
-                    "--ran-node",
-                    "sopnode-f3",
-                    "--run-id",
-                    "virtual-001",
-                    "--iot-source",
-                    "cooja",
-                ]
-            )
+        for source in ("cooja", "amber"):
+            with self.subTest(source=source), self.assertRaises(SystemExit):
+                parser.parse_args(
+                    [
+                        "run",
+                        "--radio",
+                        "rfsim",
+                        "--core-node",
+                        "sopnode-f2",
+                        "--ran-node",
+                        "sopnode-f3",
+                        "--run-id",
+                        "virtual-001",
+                        "--iot-source",
+                        source,
+                    ]
+                )
 
     def test_run_parses_explicit_profile_seed_and_period(self) -> None:
         args = _parser().parse_args(
@@ -97,8 +98,6 @@ class CliTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "amber-001",
-                "--iot-source",
-                "amber",
                 "--iot-profile",
                 "ambient-v1",
                 "--iot-seed",
@@ -107,7 +106,7 @@ class CliTests(unittest.TestCase):
                 "12",
             ]
         )
-        self.assertEqual("amber", args.iot_source)
+        self.assertFalse(hasattr(args, "iot_source"))
         self.assertEqual("ambient-v1", args.iot_profile)
         self.assertEqual(17, args.iot_seed)
         self.assertEqual(12, args.sensor_period)
