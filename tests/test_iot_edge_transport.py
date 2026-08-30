@@ -66,9 +66,10 @@ class RfsimEdgeTransportTests(unittest.TestCase):
         with patch(
             "synthran.iot_edge_transport.ssh_command",
             return_value=("ssh", "root@core.example", "python3"),
-        ):
-            command = _remote_listener_probe_command(inventory(), port=18886)
-        rendered = " ".join(command)
+        ) as mocked_ssh:
+            _remote_listener_probe_command(inventory(), port=18886)
+        remote_args = mocked_ssh.call_args.args[1:]
+        rendered = " ".join(str(value) for value in remote_args)
         self.assertIn("/proc/net/tcp", rendered)
         self.assertIn("49C6", rendered)
         self.assertNotIn("socket.connect", rendered)
