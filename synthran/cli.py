@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import json
+from pathlib import Path
 import sys
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 from synthran import command_runtime
 from synthran.amber_experiment_runtime import execute_amber_experiment
@@ -95,6 +96,74 @@ def _parser() -> argparse.ArgumentParser:
     configure_operator_parser(parser)
     _augment_iot_options(parser)
     return parser
+
+
+def _read_json_object(path: Path, *, label: str) -> Mapping[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BackendError(f"{label} is unreadable") from exc
+    if not isinstance(value, dict):
+        raise BackendError(f"{label} is malformed")
+    return value
+
+
+def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
+    if args.command != "run" or getattr(args, "radio", None) not in {"rfsim", "r2lab"}:
+        return
+
+    manifest_path: Path | None = None
+    if args.radio == "rfsim":
+        candidate = Path(args.experiment_root).expanduser().resolve() / args.run_id / "manifest.json"
+        if candidate.is_file():
+            manifest_path = candidate
+    else:
+        result_path = (
+            Path(args.r2lab_run_root).expanduser().resolve()
+            / args.run_id
+            / "physical"
+            / "physical-workload-result.json"
+        )
+        if result_path.is_file():
+            result = _read_json_object(
+                result_path,
+                label="persisted physical workload result",
+            )
+            workload_id = result.get("workload_id")
+            if not isinstance(workload_id, str) or not workload_id:
+                raise BackendError("persisted physical workload result has no workload ID")
+            candidate = (
+                Path(args.r2lab_experiment_root).expanduser().resolve()
+                / workload_id
+                / "manifest.json"
+            )
+            if not candidate.is_file():
+                raise BackendError("persisted physical workload manifest is unavailable")
+            manifest_path = candidate
+
+    if manifest_path is None:
+        return
+    manifest = _read_json_object(manifest_path, label="persisted IoT workload manifest")
+    observed_source = manifest.get("iot_source", "cooja")
+    requested_source = getattr(args, "iot_source", "cooja")
+    if observed_source != requested_source:
+        raise BackendError(
+            f"persisted workload uses IoT source {observed_source!r}, "
+            f"but this run requested {requested_source!r}"
+        )
+    if requested_source != "amber":
+        return
+
+    expected = {
+        "iot_profile": getattr(args, "iot_profile", TRANSPORT_PROFILE),
+        "iot_seed": getattr(args, "iot_seed", DEFAULT_IOT_SEED),
+        "sensor_period_seconds": getattr(args, "sensor_period", 10),
+    }
+    for key, requested in expected.items():
+        if manifest.get(key) != requested:
+            raise BackendError(
+                f"persisted Amber workload {key} does not match the requested value"
+            )
 
 
 def _run_amber_workload(
@@ -282,6 +351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(arguments)
     try:
+        _validate_persisted_iot_identity(args)
         if args.command == "research" and getattr(args, "iot_profile", None) is not None:
             return _dispatch_amber_research(args)
         with _selected_iot_runtime(args):
