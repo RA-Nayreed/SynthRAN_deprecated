@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -16,6 +17,13 @@ from synthran.amber_experiment_runtime import (
 from synthran.dependencies import DependencyLock
 from synthran.experiment import load_jsonl as load_telemetry_jsonl
 from synthran.fiveg_ansible import NetworkInventory
+from synthran.iot_publisher import (
+    install_replay_start_gate,
+    release_replay_start_gate,
+    remove_replay_start_gate,
+    wait_replay_start_origin,
+)
+from synthran.iot_source import load_source_events
 from synthran.research import (
     LOAD_RESULT_SCHEMA,
     NETWORK_SAMPLE_SCHEMA,
@@ -49,7 +57,6 @@ from synthran.research.v2 import (
     research_summary_artifact,
     save_research_experiment_v2,
     save_research_summary_v2,
-    select_measurement_telemetry,
 )
 
 
@@ -66,8 +73,17 @@ def _utc_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _parse_utc(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        )
+    except ValueError as exc:
+        raise ResearchError("research artifact contains an invalid UTC timestamp") from exc
+
+
 class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
-    """Run warmup, fixed measurement instrumentation, and load explicitly."""
+    """Prepare instrumentation, release source time zero, then measure exactly."""
 
     def __init__(
         self,
@@ -98,6 +114,7 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
         self.pre_report: Any | None = None
         self.post_report: Any | None = None
         self.pre_target_ready = False
+        self.replay_origin_monotonic_s: float | None = None
         self._instrumentation_stopped = False
         self._stopped = False
 
@@ -147,6 +164,12 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
                 raise ResearchError(
                     f"research load server exited unexpectedly with code {exit_code}"
                 )
+
+    def _wait_until(self, deadline: float) -> None:
+        while time.monotonic() < deadline:
+            self._health_check()
+            time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+        self._health_check()
 
     def _write_path_evidence(self, *, cleanup_reproved: bool | None = None) -> None:
         assert self.context is not None
@@ -201,7 +224,7 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
             protocol=self.spec.load.protocol,
             parallel_flows=self.spec.load.parallel_flows,
             duration_seconds=(
-                self.spec.measurement.duration_seconds + _LOAD_RUNTIME_HEADROOM_SECONDS
+                self.spec.total_source_seconds + _LOAD_RUNTIME_HEADROOM_SECONDS
             ),
             repository_root=self.repository_root,
             log_path=paths["load_client_log"],
@@ -257,6 +280,8 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
         )
         self._prove_pre_window(paths)
 
+        # Start samplers before source time zero. Their persisted records are
+        # filtered to the exact UTC measurement window after the run.
         self.sampler = ResearchNetworkSampler(
             inventory=self.inventory,
             network_run_id=self.context.network_run_id,
@@ -271,7 +296,7 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
             ue_pod=self.context.ue_pod,
             target=self.spec.probe_target or "",
             duration_seconds=(
-                self.spec.measurement.duration_seconds + _LOAD_RUNTIME_HEADROOM_SECONDS
+                self.spec.total_source_seconds + _LOAD_RUNTIME_HEADROOM_SECONDS
             ),
             interval_seconds=self.spec.measurement.probe_interval_seconds,
             repository_root=self.repository_root,
@@ -281,14 +306,8 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
     def run(self, context: AmberRuntimeContext) -> Mapping[str, Any]:
         self.context = context
         paths = self._paths()
-        if self.spec.measurement.warmup_seconds:
-            self._report(f"warmup: {self.spec.measurement.warmup_seconds}s")
-            warmup_deadline = time.monotonic() + self.spec.measurement.warmup_seconds
-            while time.monotonic() < warmup_deadline:
-                time.sleep(min(0.25, warmup_deadline - time.monotonic()))
-
         try:
-            self._report("measurement path: verifying...")
+            self._report("measurement path: preparing before source time zero...")
             self._start_instrumentation(paths)
             self._report("measurement path: ready")
         except Exception as exc:
@@ -296,22 +315,33 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
             self._write_path_evidence()
             raise
 
-        self.window_started_at = _utc_now()
-        self._report(f"measurement window: {self.spec.measurement.duration_seconds}s")
-        deadline = time.monotonic() + self.spec.measurement.duration_seconds
+        # MQTT clients and start canaries are already accepted, but the replay
+        # worker is held on this gate. Releasing it establishes exact source t=0.
+        release_replay_start_gate(context.run_id)
+        self.replay_origin_monotonic_s = wait_replay_start_origin(context.run_id)
+
         try:
-            while time.monotonic() < deadline:
-                self._health_check()
-                time.sleep(min(0.25, deadline - time.monotonic()))
+            if self.spec.measurement.warmup_seconds:
+                self._report(f"warmup: {self.spec.measurement.warmup_seconds}s")
+                self._wait_until(
+                    self.replay_origin_monotonic_s
+                    + self.spec.measurement.warmup_seconds
+                )
+
+            self.window_started_at = _utc_now()
+            self._report(f"measurement window: {self.spec.measurement.duration_seconds}s")
+            measurement_deadline = (
+                self.replay_origin_monotonic_s + self.spec.total_source_seconds
+            )
+            self._wait_until(measurement_deadline)
             self.window_ended_at = _utc_now()
-            self._health_check()
-            assert self.context is not None
+
             self.post_report = _require_network_ready(
                 inventory=self.inventory,
                 lock=self.lock,
-                network_run_id=self.context.network_run_id,
-                ue_pod=self.context.ue_pod,
-                pdu_address=self.context.pdu_address,
+                network_run_id=context.network_run_id,
+                ue_pod=context.ue_pod,
+                pdu_address=context.pdu_address,
             )
             self._write_path_evidence()
         except Exception as exc:
@@ -326,6 +356,7 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
             {
                 "schema": MEASUREMENT_WINDOW_SCHEMA_V2,
                 "run_id": context.run_id,
+                "alignment": "publisher-start-gate",
                 "warmup_seconds": self.spec.measurement.warmup_seconds,
                 "requested_duration_seconds": self.spec.measurement.duration_seconds,
                 "started_at_utc": _utc_text(self.window_started_at),
@@ -342,6 +373,9 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
                 paths["network"].name if paths["network"].is_file() else None
             ),
             "load": paths["load"].name if paths["load"].is_file() else None,
+            "source_clock_alignment": "publisher-start-gate",
+            "source_start_ms": self.spec.measurement.warmup_seconds * 1000,
+            "source_end_ms": self.spec.total_source_seconds * 1000,
             "pre_window_network_ready": bool(
                 self.pre_report is not None and getattr(self.pre_report, "ready", False)
             ),
@@ -430,10 +464,51 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _load_window(run_directory: Path) -> tuple[datetime, datetime, int, int]:
+    try:
+        value = json.loads(
+            (run_directory / "measurement-window.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ResearchError("measurement-window evidence is unavailable") from exc
+    if not isinstance(value, Mapping) or value.get("alignment") != "publisher-start-gate":
+        raise ResearchError("measurement window is not source-clock aligned")
+    try:
+        started = _parse_utc(str(value["started_at_utc"]))
+        ended = _parse_utc(str(value["ended_at_utc"]))
+        source_start = int(value["source_start_ms"])
+        source_end = int(value["source_end_ms"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ResearchError("measurement-window evidence is malformed") from exc
+    if ended <= started or source_end <= source_start:
+        raise ResearchError("measurement-window bounds are invalid")
+    return started, ended, source_start, source_end
+
+
+def _filter_utc_records(
+    records: list[dict[str, Any]],
+    *,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    selected: list[dict[str, Any]] = []
+    for record in records:
+        raw = record.get("observed_at_utc")
+        if not isinstance(raw, str):
+            continue
+        observed = _parse_utc(raw)
+        if start <= observed <= end:
+            selected.append(record)
+    return selected
+
+
 def _measurement_metrics(run_directory: Path) -> dict[str, Any]:
+    started, ended, _, _ = _load_window(run_directory)
     probe_records = load_jsonl(run_directory / "probe.jsonl", schema=PROBE_SCHEMA)
-    network_records = load_jsonl(
-        run_directory / "network-samples.jsonl", schema=NETWORK_SAMPLE_SCHEMA
+    network_records = _filter_utc_records(
+        load_jsonl(run_directory / "network-samples.jsonl", schema=NETWORK_SAMPLE_SCHEMA),
+        start=started,
+        end=ended,
     )
     load_records = load_jsonl(run_directory / "load.jsonl", schema=LOAD_RESULT_SCHEMA)
     rtts = [
@@ -441,11 +516,11 @@ def _measurement_metrics(run_directory: Path) -> dict[str, Any]:
         for record in probe_records
         if record.get("rtt_ms") is not None
     ]
-    loads = [
-        float(record["achieved_bps"])
-        for record in load_records
-        if record.get("achieved_bps") is not None
-    ]
+    loads = []
+    for record in load_records:
+        raw = record.get("achieved_bps", record.get("bits_per_second"))
+        if raw is not None:
+            loads.append(float(raw))
     return {
         "probe_records": len(probe_records),
         "mean_rtt_ms": _mean(rtts),
@@ -453,6 +528,29 @@ def _measurement_metrics(run_directory: Path) -> dict[str, Any]:
         "load_records": len(load_records),
         "mean_achieved_load_bps": _mean(loads),
     }
+
+
+def _publisher_pairs(run_directory: Path) -> list[tuple[str, int]]:
+    path = run_directory / "publisher-events.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ResearchError("publisher event evidence is unavailable") from exc
+    pairs: list[tuple[str, int]] = []
+    for number, line in enumerate(lines, start=1):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ResearchError(f"publisher event line {number} is invalid JSON") from exc
+        if (
+            isinstance(value, Mapping)
+            and value.get("kind") == "telemetry"
+            and value.get("success") is True
+            and isinstance(value.get("sensor_id"), str)
+            and isinstance(value.get("sequence"), int)
+        ):
+            pairs.append((str(value["sensor_id"]), int(value["sequence"])))
+    return pairs
 
 
 def execute_amber_research_experiment(
@@ -467,7 +565,7 @@ def execute_amber_research_experiment(
     run_root: Path,
     progress: TextIO | None = None,
 ) -> Path:
-    """Execute Amber source + research instrumentation without runtime overrides."""
+    """Execute one source-clock-aligned Amber controlled experiment."""
 
     lifecycle = AmberResearchMeasurementLifecycle(
         spec=spec,
@@ -476,23 +574,27 @@ def execute_amber_research_experiment(
         repository_root=repository_root,
         progress=progress,
     )
-    result = execute_amber_experiment(
-        inventory=inventory,
-        lock=lock,
-        dependency_root=dependency_root,
-        network_manifest=network_manifest,
-        network_evidence=network_evidence,
-        run_id=spec.run_id,
-        repository_root=repository_root,
-        run_root=run_root,
-        collection_seconds=spec.total_source_seconds,
-        minimum_per_sensor=1,
-        iot_profile=spec.iot_profile,
-        iot_seed=spec.iot_seed,
-        sensor_period_seconds=spec.sensor_period_seconds,
-        measurement_lifecycle=lifecycle,
-        progress=progress,
-    )
+    install_replay_start_gate(spec.run_id)
+    try:
+        result = execute_amber_experiment(
+            inventory=inventory,
+            lock=lock,
+            dependency_root=dependency_root,
+            network_manifest=network_manifest,
+            network_evidence=network_evidence,
+            run_id=spec.run_id,
+            repository_root=repository_root,
+            run_root=run_root,
+            collection_seconds=spec.total_source_seconds,
+            minimum_per_sensor=1,
+            iot_profile=spec.iot_profile,
+            iot_seed=spec.iot_seed,
+            sensor_period_seconds=spec.sensor_period_seconds,
+            measurement_lifecycle=lifecycle,
+            progress=progress,
+        )
+    finally:
+        remove_replay_start_gate(spec.run_id)
     run_directory = result.run_directory
 
     try:
@@ -508,10 +610,32 @@ def execute_amber_research_experiment(
     if not isinstance(reconciliation, Mapping):
         raise ResearchError("Amber research run is missing transport reconciliation")
 
+    _, _, source_start_ms, source_end_ms = _load_window(run_directory)
+    source_events = load_source_events(run_directory / "amber-source-events.jsonl")
+    measurement_source = [
+        event
+        for event in source_events
+        if source_start_ms <= event.planned_at_ms < source_end_ms
+    ]
+    expected_measurement_opportunities = (
+        self_count := spec.sensor_count
+    ) * (
+        (spec.measurement.duration_seconds * 1000)
+        // (spec.sensor_period_seconds * 1000)
+    )
+    if len(measurement_source) != expected_measurement_opportunities:
+        raise ResearchError(
+            "measurement source window does not contain the expected opportunity count"
+        )
+
     telemetry = load_telemetry_jsonl(
         run_directory / "telemetry.jsonl", expected_run_id=spec.run_id
     )
-    measurement_telemetry = select_measurement_telemetry(spec, telemetry)
+    measurement_telemetry = [
+        record
+        for record in telemetry
+        if source_start_ms <= int(record["sensor_time_ms"]) < source_end_ms
+    ]
     measurement_jsonl = run_directory / "measurement-telemetry.jsonl"
     with measurement_jsonl.open("w", encoding="utf-8", newline="\n") as stream:
         for record in measurement_telemetry:
@@ -535,16 +659,33 @@ def execute_amber_research_experiment(
         ),
     )
 
-    source_loss = int(reconciliation.get("source_loss_count", 0))
-    transport_loss = int(reconciliation.get("transport_loss_count", 0))
-    duplicate_count = int(reconciliation.get("duplicate_count", 0))
-    planned = int(reconciliation.get("planned_count", 0))
-    decoded = int(reconciliation.get("decoded_count", 0))
-    published = int(reconciliation.get("published_count", 0))
-    received = int(reconciliation.get("central_received_count", 0))
+    planned_keys = {event.key for event in measurement_source}
+    decoded_keys = {event.key for event in measurement_source if event.decoded}
+    published_pairs_all = _publisher_pairs(run_directory)
+    published_pairs = [pair for pair in published_pairs_all if pair in planned_keys]
+    published_keys = set(published_pairs)
+    central_pairs = [
+        (str(record["sensor_id"]), int(record["sequence"]))
+        for record in measurement_telemetry
+    ]
+    central_keys = set(central_pairs)
+    source_loss = len(planned_keys - decoded_keys)
+    transport_loss = len(decoded_keys - central_keys)
+    duplicate_count = len(central_pairs) - len(central_keys)
+    unexpected_count = len(central_keys - decoded_keys)
+    published_missing = len(decoded_keys - published_keys)
+    outcome_counts = Counter(event.outcome for event in measurement_source)
+
+    full_transport_valid = bool(
+        reconciliation.get("valid") is True
+        and int(reconciliation.get("transport_loss_count", 0)) == 0
+        and int(reconciliation.get("duplicate_count", 0)) == 0
+        and int(reconciliation.get("unexpected_central_count", 0)) == 0
+    )
     measurement_evidence = transport.get("measurement")
     path_valid = bool(
         isinstance(measurement_evidence, Mapping)
+        and measurement_evidence.get("source_clock_alignment") == "publisher-start-gate"
         and measurement_evidence.get("pre_window_network_ready") is True
         and measurement_evidence.get("pre_window_target_ready") is True
         and measurement_evidence.get("post_window_network_ready") is True
@@ -552,30 +693,51 @@ def execute_amber_research_experiment(
     )
     infrastructure_valid = bool(
         iot_evidence.get("ready") is True
+        and full_transport_valid
         and transport_loss == 0
         and duplicate_count == 0
+        and unexpected_count == 0
+        and published_missing == 0
         and path_valid
     )
-    scientific_valid = infrastructure_valid and (
-        spec.iot_profile != "transport-v1" or len(measurement_telemetry) > 0
+    scientific_valid = bool(
+        infrastructure_valid
+        and len(measurement_source) == expected_measurement_opportunities
+        and (spec.iot_profile != "transport-v1" or source_loss == 0)
+    )
+
+    metrics = _measurement_metrics(run_directory)
+    metrics.update(
+        {
+            "source_window_start_ms": source_start_ms,
+            "source_window_end_ms": source_end_ms,
+            "source_outcomes": dict(sorted(outcome_counts.items())),
+            "measurement_transmitted": sum(event.transmitted for event in measurement_source),
+            "measurement_decoded": len(decoded_keys),
+            "measurement_unexpected_central": unexpected_count,
+            "measurement_published_missing": published_missing,
+            "full_run_reconciliation": dict(reconciliation),
+        }
     )
     summary = research_summary_artifact(
         spec,
         profile_digest=profile_digest,
-        planned_opportunities=planned,
-        decoded_opportunities=decoded,
-        published_events=published,
-        received_events=received,
+        planned_opportunities=len(planned_keys),
+        decoded_opportunities=len(decoded_keys),
+        published_events=len(published_keys),
+        received_events=len(central_keys),
         source_loss=source_loss,
         transport_loss=transport_loss,
         duplicate_count=duplicate_count,
         measurement_received_events=len(measurement_telemetry),
         infrastructure_valid=infrastructure_valid,
         scientific_valid=scientific_valid,
-        extra=_measurement_metrics(run_directory),
+        extra=metrics,
     )
     summary_path = run_directory / "research-summary-v2.json"
     save_research_summary_v2(summary_path, summary)
     if not infrastructure_valid:
         raise ResearchError("Amber research run failed its infrastructure validity gate")
+    if not scientific_valid:
+        raise ResearchError("Amber research run failed its scientific validity gate")
     return summary_path
