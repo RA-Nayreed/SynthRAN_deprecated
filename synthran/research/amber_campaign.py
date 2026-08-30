@@ -10,7 +10,6 @@ from typing import Any, Mapping, Sequence, TextIO
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
-    clear_run_energy_treatment,
 )
 from synthran.dependencies import DependencyLock
 from synthran.fiveg_ansible import NetworkInventory
@@ -141,21 +140,18 @@ def execute_amber_campaign(
                 flush=True,
             )
         try:
-            try:
-                summary_path = execute_amber_research_experiment(
-                    spec=spec,
-                    inventory=inventory,
-                    lock=lock,
-                    dependency_root=dependency_root,
-                    network_manifest=network_manifest,
-                    network_evidence=network_evidence,
-                    repository_root=repository_root,
-                    run_root=result_root,
-                    progress=progress,
-                )
-                summary = _read_summary(summary_path)
-            finally:
-                clear_run_energy_treatment(spec.run_id)
+            summary_path = execute_amber_research_experiment(
+                spec=spec,
+                inventory=inventory,
+                lock=lock,
+                dependency_root=dependency_root,
+                network_manifest=network_manifest,
+                network_evidence=network_evidence,
+                repository_root=repository_root,
+                run_root=result_root,
+                progress=progress,
+            )
+            summary = _read_summary(summary_path)
         except Exception as exc:
             atomic_json(
                 result_path,
