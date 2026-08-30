@@ -91,21 +91,19 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
         self.assertEqual(expected, research_spec.energy_treatment)
         self.assertEqual(expected, source_spec.energy_treatment)
 
-    def test_public_research_surface_has_no_energy_calibration_subcommand(self) -> None:
-        parser = cli._parser()
-        root = cli._top_level_subparsers(parser)
-        research = root.choices["research"]
-        research_commands = cli._subparsers(research).choices
-        self.assertNotIn("energy-calibrate", research_commands)
-        self.assertIn("plan", research_commands)
-        self.assertIn("run", research_commands)
-        self.assertIn("campaign-run", research_commands)
+    def test_public_surface_has_no_research_or_energy_calibration_command(self) -> None:
+        root = cli._subparsers(cli._parser())
+        self.assertNotIn("research", root.choices)
+        self.assertNotIn("energy-calibrate", root.choices)
+        self.assertIn("run", root.choices)
+        self.assertIn("calibrate", root.choices)
+        self.assertIn("analyze", root.choices)
 
-    def test_research_plan_carries_energy_treatment_directly(self) -> None:
+    def test_run_plan_carries_energy_treatment_directly(self) -> None:
         args = cli._parser().parse_args(
             [
-                "research",
-                "plan",
+                "run",
+                "--plan",
                 "--campaign-id",
                 "ambient-energy-plan-campaign",
                 "--network-run-id",
