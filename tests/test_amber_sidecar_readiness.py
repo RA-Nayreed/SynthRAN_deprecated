@@ -7,6 +7,7 @@ from synthran.amber_experiment_runtime import (
     _edge_bridge_connected,
     _restart_edge_sidecar_and_wait,
     _wait_edge_bridge_connected,
+    _wait_unique_remote_listener,
 )
 
 
@@ -76,6 +77,45 @@ class AmberSidecarReadinessTests(unittest.TestCase):
             )
 
         self.assertEqual(connected.call_count, 3)
+
+    def test_central_forward_wait_records_one_remote_listener_pid(self) -> None:
+        inventory = object()
+        process = MagicMock()
+        process.name = "central-forward"
+        process.process.poll.return_value = None
+        with (
+            patch(
+                "synthran.amber_experiment_runtime._remote_listener_pids",
+                side_effect=({18885: ()}, {18885: (321,)}),
+            ) as listeners,
+            patch("synthran.amber_experiment_runtime.time.sleep"),
+        ):
+            observed = _wait_unique_remote_listener(
+                inventory,
+                18885,
+                process=process,
+                timeout_seconds=30,
+            )
+
+        self.assertEqual((321,), observed)
+        self.assertEqual(2, listeners.call_count)
+
+    def test_central_forward_wait_rejects_ambiguous_remote_ownership(self) -> None:
+        inventory = object()
+        process = MagicMock()
+        process.name = "central-forward"
+        process.process.poll.return_value = None
+        with patch(
+            "synthran.amber_experiment_runtime._remote_listener_pids",
+            return_value={18885: (321, 322)},
+        ):
+            with self.assertRaisesRegex(Exception, "ambiguous"):
+                _wait_unique_remote_listener(
+                    inventory,
+                    18885,
+                    process=process,
+                    timeout_seconds=30,
+                )
 
 
 if __name__ == "__main__":
