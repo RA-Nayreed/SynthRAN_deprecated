@@ -27,17 +27,6 @@ from synthran.r2lab.stale_claim import retire_if_lease_absent
 from synthran.slices_controller import SlicesControllerError, verify_slices_controller
 
 
-PUBLIC_COMMANDS = (
-    "run",
-    "doctor",
-    "inspect",
-    "logs",
-    "stop",
-    "research",
-    "deps",
-    "dev",
-)
-
 _EXECUTABLE_DEVICES = tuple(sorted(name for name, profile in RADIOS.items() if profile.executable))
 _EXECUTABLE_UES = tuple(sorted(name for name, profile in UES.items() if profile.executable))
 
@@ -92,25 +81,6 @@ def configure_operator_parser(parser: argparse.ArgumentParser) -> None:
     logs.add_argument("--run-id", required=True)
     logs.add_argument("--follow", action="store_true")
     logs.add_argument("--tail", type=int, default=200)
-
-    stop = commands.add_parser("stop", help="stop or release resources owned by one run")
-    stop.add_argument("--run-id", required=True)
-    stop.add_argument(
-        "--slice",
-        dest="r2lab_slice",
-        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-    )
-    stop.add_argument("--owner", default=os.environ.get("SYNTHRAN_OWNER"))
-    stop.add_argument("--allocation-id", default=os.environ.get("SYNTHRAN_ALLOCATION_ID"))
-    stop.add_argument(
-        "--known-hosts",
-        type=Path,
-        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
-    )
-    stop.add_argument("--timeout", type=int, default=300)
-    stop.add_argument("--json", action="store_true")
-
-    command_runtime._add_research_parser(commands)
 
     deps = commands.add_parser("deps", help="manage immutable external dependencies")
     deps_commands = deps.add_subparsers(dest="deps_command", required=True)
@@ -323,12 +293,12 @@ def logs_command(args: argparse.Namespace) -> int:
             return 0
 
 
-def stop_command(args: argparse.Namespace) -> int:
+def release_command(args: argparse.Namespace) -> int:
     run_root = Path(".synthran/r2lab")
     run_directory = run_root / args.run_id
     if not run_directory.exists():
         payload = {
-            "schema": "synthran/stop/v1",
+            "schema": "synthran/release/v1",
             "run_id": args.run_id,
             "released": False,
             "detail": "no active physical claim found; virtual workloads clean up within their run",
@@ -337,7 +307,7 @@ def stop_command(args: argparse.Namespace) -> int:
         return 0
     if not args.r2lab_slice:
         raise BackendError(
-            "physical stop requires --slice or SYNTHRAN_R2LAB_SLICE"
+            "physical release requires --slice or SYNTHRAN_R2LAB_SLICE"
         )
 
     topology = load_topology(run_root=run_root, run_id=args.run_id).validate()
@@ -351,7 +321,7 @@ def stop_command(args: argparse.Namespace) -> int:
     )
     if retirement is not None:
         result = {
-            "schema": "synthran/stop/v1",
+            "schema": "synthran/release/v1",
             "run_id": args.run_id,
             "radio": topology.radio,
             "ue": topology.ue,
@@ -373,7 +343,7 @@ def stop_command(args: argparse.Namespace) -> int:
 
     if not args.owner or args.known_hosts is None:
         raise BackendError(
-            "physical cleanup with a current lease requires --owner/SYNTHRAN_OWNER "
+            "physical release with a current lease requires --owner/SYNTHRAN_OWNER "
             "and --known-hosts/SYNTHRAN_SLICES_KNOWN_HOSTS"
         )
     known_hosts = Path(args.known_hosts).expanduser().resolve()
@@ -401,7 +371,7 @@ def stop_command(args: argparse.Namespace) -> int:
         stop_gnb=stop,
     )
     result = {
-        "schema": "synthran/stop/v1",
+        "schema": "synthran/release/v1",
         "run_id": args.run_id,
         "radio": topology.radio,
         "ue": topology.ue,
@@ -423,10 +393,8 @@ def dispatch(args: argparse.Namespace) -> int:
             return inspect_command(args)
         if args.command == "logs":
             return logs_command(args)
-        if args.command == "stop":
-            return stop_command(args)
-        if args.command == "research":
-            return command_runtime._dispatch_research(args)
+        if args.command == "release":
+            return release_command(args)
         if args.command == "deps":
             return command_runtime._deps_sync(args)
         if args.command == "dev" and args.dev_command == "privacy":
