@@ -7,10 +7,10 @@ from unittest.mock import patch
 
 from synthran.fiveg_ansible import InventoryHost, NetworkInventory
 from synthran.iot_edge_transport import (
-    OwnedProcess,
     RfsimEdgeTransportAdapter,
     RfsimEdgeTransportSession,
     _local_forward_command,
+    _remote_listener_probe_command,
 )
 from synthran.iot_source import MQTTEndpoint
 
@@ -62,6 +62,18 @@ class RfsimEdgeTransportTests(unittest.TestCase):
         self.assertIn("-N", command)
         self.assertNotIn("0.0.0.0", rendered)
 
+    def test_listener_probe_reads_socket_tables_without_connecting(self) -> None:
+        with patch(
+            "synthran.iot_edge_transport.ssh_command",
+            return_value=("ssh", "root@core.example", "python3"),
+        ):
+            command = _remote_listener_probe_command(inventory(), port=18886)
+        rendered = " ".join(command)
+        self.assertIn("/proc/net/tcp", rendered)
+        self.assertIn("49C6", rendered)
+        self.assertNotIn("socket.connect", rendered)
+        self.assertNotIn("connect((", rendered)
+
     def test_adapter_owns_edge_forward_ingress_and_local_forward(self) -> None:
         stopped: list[str] = []
         started: list[tuple[str, tuple[str, ...]]] = []
@@ -87,7 +99,15 @@ class RfsimEdgeTransportTests(unittest.TestCase):
             ), patch(
                 "synthran.iot_edge_transport._wait_remote_tcp",
             ), patch(
+                "synthran.iot_edge_transport._wait_remote_listener",
+            ), patch(
                 "synthran.iot_edge_transport._wait_local_tcp",
+            ), patch(
+                "synthran.iot_edge_transport._remote_port_is_closed",
+                return_value=True,
+            ), patch(
+                "synthran.iot_edge_transport._local_port_is_closed",
+                return_value=True,
             ), patch(
                 "synthran.iot_edge_transport.ssh_command",
                 side_effect=fake_ssh,
@@ -119,6 +139,24 @@ class RfsimEdgeTransportTests(unittest.TestCase):
             self.assertIn("--target-port 18883", ingress_text)
             self.assertIn("127.0.0.1:18886:127.0.0.1:18886", local_text)
             self.assertNotIn("0.0.0.0", edge_text + ingress_text + local_text)
+
+    def test_busy_owned_ports_fail_closed_before_process_start(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = RfsimEdgeTransportAdapter(
+                inventory=inventory(),
+                repository_root=Path(directory),
+            )
+            with patch(
+                "synthran.iot_edge_transport._remote_port_is_closed",
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(Exception, "already owned"):
+                    adapter.start(
+                        run_id="amber-rfsim-test",
+                        ue_pod="srsran-ue-test",
+                        remote_workspace="/tmp/synthran/amber-rfsim-test",
+                        run_directory=Path(directory) / "run",
+                    )
 
     def test_cleanup_stops_owned_processes_in_reverse_order(self) -> None:
         stopped: list[str] = []
