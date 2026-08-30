@@ -101,9 +101,13 @@ class AmberEnergyCalibrationTests(unittest.TestCase):
                 )
             result = json.loads(result_path.read_text(encoding="utf-8"))
 
+        self.assertTrue(result["target_band_found"])
+        self.assertTrue(result["treatment_response_observed"])
+        self.assertTrue(result["calibration_valid"])
         self.assertEqual(0.5, result["recommended"]["power_scale"])
         self.assertEqual(0.25, result["recommended"]["energy_loss_ratio"])
         self.assertTrue(result["recommended"]["target_band_match"])
+        self.assertEqual(0.5, result["closest_observed"]["power_scale"])
         rows = {row["power_scale"]: row for row in result["runs"]}
         self.assertEqual(0.0, rows[1.0]["energy_loss_ratio"])
         self.assertEqual(0.25, rows[0.5]["energy_loss_ratio"])
@@ -114,7 +118,41 @@ class AmberEnergyCalibrationTests(unittest.TestCase):
             {"external": 2, "wpt": 2},
             rows[0.5]["selected_harvest_source_counts"],
         )
+        self.assertEqual(
+            {"external": 0.5, "wpt": 0.5},
+            rows[0.5]["selected_harvest_source_fractions"],
+        )
         self.assertEqual("p05000", rows[0.5]["artifact_directory"])
+
+    def test_calibration_does_not_recommend_out_of_band_single_scale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch(
+                "synthran.research.energy_calibration.AmberSourceAdapter",
+                _FakeAmberSourceAdapter,
+            ):
+                result_path = execute_energy_calibration(
+                    calibration_id="ambient-energy-no-band-test",
+                    network_run_id="accepted-rfsim-network",
+                    scales=(1.0,),
+                    seed=424242,
+                    sensor_period_seconds=10,
+                    warmup_seconds=30,
+                    duration_seconds=40,
+                    target_energy_loss_min=0.20,
+                    target_energy_loss_max=0.30,
+                    repository_root=root,
+                    dependency_root=root / ".deps",
+                    calibration_root=root / "calibrations",
+                )
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(result["target_band_found"])
+        self.assertIsNone(result["treatment_response_observed"])
+        self.assertFalse(result["calibration_valid"])
+        self.assertIsNone(result["recommended"])
+        self.assertEqual(1.0, result["closest_observed"]["power_scale"])
+        self.assertFalse(result["closest_observed"]["target_band_match"])
 
 
 if __name__ == "__main__":
