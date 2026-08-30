@@ -117,6 +117,47 @@ def _add_research_parser(
     calibrate.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
     calibrate.add_argument("--out", type=Path, required=True)
 
+    energy_calibrate = sub.add_parser(
+        "energy-calibrate",
+        help="calibrate Ambient-IoT harvested-energy treatment offline",
+    )
+    energy_calibrate.add_argument("--calibration-id", required=True)
+    energy_calibrate.add_argument("--network-run-id", required=True)
+    energy_calibrate.add_argument(
+        "--scales",
+        default="1.0,0.75,0.5,0.33,0.25",
+        help="comma-separated external harvested-power multipliers",
+    )
+    energy_calibrate.add_argument("--seed", type=int, default=424242)
+    energy_calibrate.add_argument("--sensor-period", type=int, default=10)
+    energy_calibrate.add_argument("--warmup-seconds", type=int, default=30)
+    energy_calibrate.add_argument("--duration-seconds", type=int, default=180)
+    energy_calibrate.add_argument(
+        "--energy-node-variation",
+        type=float,
+        default=0.0,
+        help="deterministic per-node harvested-power variation fraction in [0,0.5]",
+    )
+    energy_calibrate.add_argument(
+        "--target-energy-loss-min",
+        type=float,
+        default=0.15,
+        help="lower bound of the desired measurement-window energy-loss ratio",
+    )
+    energy_calibrate.add_argument(
+        "--target-energy-loss-max",
+        type=float,
+        default=0.35,
+        help="upper bound of the desired measurement-window energy-loss ratio",
+    )
+    energy_calibrate.add_argument("--deps-root", type=Path, default=Path(".deps"))
+    energy_calibrate.add_argument(
+        "--calibration-root",
+        type=Path,
+        default=Path(".synthran/energy-calibrations"),
+        help=argparse.SUPPRESS,
+    )
+
     campaign_plan = sub.add_parser(
         "campaign-plan", help="create a deterministic blocked campaign schedule"
     )
