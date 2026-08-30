@@ -116,9 +116,12 @@ class FoundationTests(unittest.TestCase):
         for heading in (
             "One command surface",
             "Virtual run",
+            "Controlled run on an accepted RFSIM path",
+            "Campaigns",
+            "Capacity calibration",
+            "Analyze",
             "Physical R2Lab run",
             "Live progress and logs",
-            "Research",
             "Documentation",
             "Capability boundary",
         ):
