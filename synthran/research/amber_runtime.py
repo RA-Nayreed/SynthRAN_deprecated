@@ -98,6 +98,7 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
         self.pre_report: Any | None = None
         self.post_report: Any | None = None
         self.pre_target_ready = False
+        self._instrumentation_stopped = False
         self._stopped = False
 
     def _report(self, message: str) -> None:
@@ -352,6 +353,10 @@ class AmberResearchMeasurementLifecycle(AmberMeasurementLifecycle):
         }
 
     def _stop_instrumentation(self, paths: Mapping[str, Path]) -> None:
+        if self._instrumentation_stopped:
+            return
+        self._instrumentation_stopped = True
+
         if self.sampler is not None:
             try:
                 self.sampler.stop()
