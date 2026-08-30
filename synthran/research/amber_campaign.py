@@ -1,4 +1,4 @@
-"""Sequential Amber v2 research campaign execution and analysis."""
+"""Sequential Amber v2 campaign execution and analysis."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from synthran.dependencies import DependencyLock
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.research import LoadSpec, MeasurementSpec, ResearchCampaign, ResearchError, atomic_json
 from synthran.research.amber_runtime import execute_amber_research_experiment
+from synthran.research.campaign_runtime import CampaignRuntimeSession
 from synthran.research.v2 import (
     AmberResearchSpec,
     RESEARCH_SUMMARY_SCHEMA_V2,
@@ -68,9 +69,9 @@ def _read_summary(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ResearchError(f"unable to read Amber research summary {path}") from exc
+        raise ResearchError(f"unable to read Amber run summary {path}") from exc
     if not isinstance(value, dict) or value.get("schema") != RESEARCH_SUMMARY_SCHEMA_V2:
-        raise ResearchError(f"Amber research summary {path} has an unsupported schema")
+        raise ResearchError(f"Amber run summary {path} has an unsupported schema")
     return value
 
 
@@ -95,7 +96,7 @@ def execute_amber_campaign(
     load_port: int,
     progress: TextIO | None = None,
 ) -> Path:
-    """Execute the persisted blocked schedule using one fixed Amber treatment."""
+    """Execute one immutable campaign schedule using one fixed Amber treatment."""
 
     result_root = run_root.resolve()
     completed: list[dict[str, Any]] = []
@@ -110,96 +111,106 @@ def execute_amber_campaign(
         else None
     )
 
-    for scheduled in campaign.runs:
-        load = _load_for_condition(
-            campaign,
-            scheduled.condition,
-            reference_capacity_bps=reference_capacity_bps,
-            parallel_flows=parallel_flows,
-            server_port=load_port,
-        )
-        spec = AmberResearchSpec(
-            campaign_id=campaign.campaign_id,
-            run_id=scheduled.run_id,
-            network_run_id=campaign.network_run_id,
-            condition=scheduled.condition,
-            iot_profile=iot_profile,
-            iot_seed=scheduled.seed,
-            sensor_period_seconds=sensor_period_seconds,
-            energy_power_scale=energy_power_scale,
-            energy_node_variation=energy_node_variation,
-            measurement=measurement,
-            load=load,
-            probe_target=target,
-        )
-        if progress is not None:
-            print(
-                f"[synthran] research: campaign run {scheduled.ordinal}/{len(campaign.runs)} "
-                f"{scheduled.run_id}",
-                file=progress,
-                flush=True,
+    # Campaign runtime stability belongs to campaign execution, not to the CLI
+    # launcher. This scope preserves one UE/gNB/PDU epoch across all scheduled
+    # treatments and restores the accepted network exactly once on exit.
+    with CampaignRuntimeSession(
+        campaign=campaign,
+        inventory=inventory,
+        lock=lock,
+        run_root=result_root,
+        target=target,
+    ):
+        for scheduled in campaign.runs:
+            load = _load_for_condition(
+                campaign,
+                scheduled.condition,
+                reference_capacity_bps=reference_capacity_bps,
+                parallel_flows=parallel_flows,
+                server_port=load_port,
             )
-        try:
-            summary_path = execute_amber_research_experiment(
-                spec=spec,
-                inventory=inventory,
-                lock=lock,
-                dependency_root=dependency_root,
-                network_manifest=network_manifest,
-                network_evidence=network_evidence,
-                repository_root=repository_root,
-                run_root=result_root,
-                progress=progress,
+            spec = AmberResearchSpec(
+                campaign_id=campaign.campaign_id,
+                run_id=scheduled.run_id,
+                network_run_id=campaign.network_run_id,
+                condition=scheduled.condition,
+                iot_profile=iot_profile,
+                iot_seed=scheduled.seed,
+                sensor_period_seconds=sensor_period_seconds,
+                energy_power_scale=energy_power_scale,
+                energy_node_variation=energy_node_variation,
+                measurement=measurement,
+                load=load,
+                probe_target=target,
             )
-            summary = _read_summary(summary_path)
-        except Exception as exc:
+            if progress is not None:
+                print(
+                    f"[synthran] campaign: run {scheduled.ordinal}/{len(campaign.runs)} "
+                    f"{scheduled.run_id}",
+                    file=progress,
+                    flush=True,
+                )
+            try:
+                summary_path = execute_amber_research_experiment(
+                    spec=spec,
+                    inventory=inventory,
+                    lock=lock,
+                    dependency_root=dependency_root,
+                    network_manifest=network_manifest,
+                    network_evidence=network_evidence,
+                    repository_root=repository_root,
+                    run_root=result_root,
+                    progress=progress,
+                )
+                summary = _read_summary(summary_path)
+            except Exception as exc:
+                atomic_json(
+                    result_path,
+                    {
+                        "schema": AMBER_CAMPAIGN_RESULT_SCHEMA,
+                        "campaign_id": campaign.campaign_id,
+                        "network_run_id": campaign.network_run_id,
+                        "iot_source": "amber",
+                        "iot_profile": iot_profile,
+                        "energy_treatment": energy_treatment,
+                        "completed": completed,
+                        "failed_run_id": scheduled.run_id,
+                        "failure": str(exc),
+                    },
+                )
+                raise
+            if summary.get("iot_seed") != scheduled.seed:
+                raise ResearchError("Amber campaign summary seed does not match schedule")
+            if summary.get("condition") != scheduled.condition:
+                raise ResearchError("Amber campaign summary condition does not match schedule")
+            if summary.get("energy_treatment") != energy_treatment:
+                raise ResearchError("Amber campaign summary energy treatment does not match campaign")
+            summaries.append(summary)
+            identity = require_consistent_campaign_summaries(summaries)
+            completed.append(
+                {
+                    "ordinal": scheduled.ordinal,
+                    "run_id": scheduled.run_id,
+                    "condition": scheduled.condition,
+                    "iot_seed": scheduled.seed,
+                    "summary": str(summary_path),
+                }
+            )
             atomic_json(
                 result_path,
                 {
                     "schema": AMBER_CAMPAIGN_RESULT_SCHEMA,
                     "campaign_id": campaign.campaign_id,
                     "network_run_id": campaign.network_run_id,
-                    "iot_source": "amber",
-                    "iot_profile": iot_profile,
+                    "iot_source": identity[0],
+                    "iot_profile": identity[1],
+                    "profile_digest": identity[2],
                     "energy_treatment": energy_treatment,
                     "completed": completed,
-                    "failed_run_id": scheduled.run_id,
-                    "failure": str(exc),
+                    "failed_run_id": None,
+                    "failure": None,
                 },
             )
-            raise
-        if summary.get("iot_seed") != scheduled.seed:
-            raise ResearchError("Amber campaign summary seed does not match schedule")
-        if summary.get("condition") != scheduled.condition:
-            raise ResearchError("Amber campaign summary condition does not match schedule")
-        if summary.get("energy_treatment") != energy_treatment:
-            raise ResearchError("Amber campaign summary energy treatment does not match campaign")
-        summaries.append(summary)
-        identity = require_consistent_campaign_summaries(summaries)
-        completed.append(
-            {
-                "ordinal": scheduled.ordinal,
-                "run_id": scheduled.run_id,
-                "condition": scheduled.condition,
-                "iot_seed": scheduled.seed,
-                "summary": str(summary_path),
-            }
-        )
-        atomic_json(
-            result_path,
-            {
-                "schema": AMBER_CAMPAIGN_RESULT_SCHEMA,
-                "campaign_id": campaign.campaign_id,
-                "network_run_id": campaign.network_run_id,
-                "iot_source": identity[0],
-                "iot_profile": identity[1],
-                "profile_digest": identity[2],
-                "energy_treatment": energy_treatment,
-                "completed": completed,
-                "failed_run_id": None,
-                "failure": None,
-            },
-        )
 
     if len(completed) != len(campaign.runs):
         raise ResearchError("Amber campaign did not complete every scheduled run")
