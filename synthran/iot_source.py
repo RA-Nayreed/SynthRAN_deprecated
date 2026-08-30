@@ -1,9 +1,9 @@
 """Portable IoT source contracts and offline Amber plan preparation.
 
 This module deliberately places the portable boundary above source-specific radio
-mechanisms. Cooja remains the accepted live path until the Amber transport
-phases are proven; new v2 artifacts never claim RPL, 6LoWPAN, SLIP, a PDU
-address, or a UE interface as properties of the IoT source.
+mechanisms. Cooja remains the accepted live path until the Amber transport is
+proven; new v2 artifacts never claim RPL, 6LoWPAN, SLIP, a PDU address, or a UE
+interface as properties of the IoT source.
 """
 
 from __future__ import annotations
@@ -483,7 +483,7 @@ def reconcile_source_and_transport(
 
 
 class AmberSourceAdapter:
-    """Prepare immutable Amber event plans; live replay is added in Phase 2."""
+    """Prepare immutable Amber event plans for the portable source runtime."""
 
     def __init__(
         self,
