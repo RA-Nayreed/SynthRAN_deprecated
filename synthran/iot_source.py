@@ -87,6 +87,12 @@ class MQTTEndpoint:
 class CollectorBarrier(Protocol):
     def wait_ready(self) -> None: ...
 
+    def wait_start_canaries(
+        self,
+        sensor_ids: Iterable[str] | None = None,
+        timeout: float | None = None,
+    ) -> None: ...
+
 
 class IoTSourceSession(Protocol):
     def stop(self) -> None: ...
@@ -482,6 +488,21 @@ def reconcile_source_and_transport(
     )
 
 
+class _AmberSourceSession:
+    """Portable wrapper around the concrete paced Amber MQTT replay session."""
+
+    def __init__(self, replay: Any) -> None:
+        self.replay = replay
+
+    def stop(self) -> None:
+        self.replay.stop()
+
+    def evidence(self) -> Mapping[str, Any]:
+        value = self.replay.evidence()
+        to_dict = getattr(value, "to_dict", None)
+        return dict(to_dict()) if callable(to_dict) else dict(value)
+
+
 class AmberSourceAdapter:
     """Prepare immutable Amber event plans for the portable source runtime."""
 
@@ -680,7 +701,11 @@ class AmberSourceAdapter:
         mqtt_endpoint: MQTTEndpoint,
         collector_barrier: CollectorBarrier,
     ) -> IoTSourceSession:
-        del plan, mqtt_endpoint, collector_barrier
-        raise IoTSourceError(
-            "live Amber replay is not enabled on the contracts-only branch"
-        )
+        from synthran.iot_publisher import AmberReplaySession
+
+        replay = AmberReplaySession(
+            plan=plan,
+            endpoint=mqtt_endpoint,
+            collector_barrier=collector_barrier,
+        ).start()
+        return _AmberSourceSession(replay)
