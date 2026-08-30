@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from synthran.ambient_contract import ambient_model_descriptor
+from synthran.ambient_contract import (
+    ENERGY_TRACE_SHA256,
+    ambient_model_descriptor,
+)
 from synthran.amber_planner import (
     _collision_resolution,
     _per_node_uplink,
@@ -19,7 +22,7 @@ from synthran.iot_source import (
 
 class AmbientScientificContractTests(unittest.TestCase):
     def test_profile_digest_contains_complete_result_affecting_contract(self) -> None:
-        trace = "a" * 64
+        trace = ENERGY_TRACE_SHA256
         model = ambient_model_descriptor(trace)
         self.assertEqual("current-frame-only", model["access"]["frame_scope"])
         self.assertEqual(16, model["access"]["slots"])
@@ -33,8 +36,14 @@ class AmbientScientificContractTests(unittest.TestCase):
             model["energy"]["simulation_replay"],
         )
         self.assertEqual(
-            "not-encoded-by-amber-energy-contract",
-            model["energy"]["source_trace_acquisition_period"],
+            {
+                "rows": 2999,
+                "first": 0.0,
+                "last": 2.998,
+                "step": 0.001,
+                "units": "undeclared-in-workbook",
+            },
+            model["energy"]["trace_time_axis"],
         )
         self.assertEqual("max", model["energy"]["combine_mode"])
         self.assertTrue(model["collision"]["sic"])
@@ -58,6 +67,10 @@ class AmbientScientificContractTests(unittest.TestCase):
         )
         self.assertEqual(model, descriptor["model"])
         self.assertEqual(64, len(profile_digest(descriptor)))
+
+    def test_profile_rejects_a_different_energy_workbook(self) -> None:
+        with self.assertRaisesRegex(ValueError, "pinned scientific contract"):
+            ambient_model_descriptor("a" * 64)
 
     def test_voltage_lookup_uses_requested_instant_not_period_end(self) -> None:
         cap = SimpleNamespace(
