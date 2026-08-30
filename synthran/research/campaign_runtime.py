@@ -9,6 +9,7 @@ final campaign cleanup restores the accepted base network exactly once.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -16,7 +17,6 @@ from typing import Any, Mapping
 import synthran.amber_experiment_runtime as amber_runtime
 import synthran.experiment.runtime as base_runtime
 from synthran.dependencies import load_lock
-from synthran.experiment import ExperimentError
 from synthran.experiment.resources import (
     EDGE_VOLUME,
     RUN_LABEL,
@@ -24,7 +24,11 @@ from synthran.experiment.resources import (
     render_edge_cleanup_patch as canonical_edge_cleanup_patch,
 )
 from synthran.fiveg_ansible import NetworkInventory, load_inventory
-from synthran.network.rfsim import RfsimRuntimeState
+from synthran.network.rfsim import (
+    RfsimRuntimeState,
+    _current_pdu_address,
+    _discover_pod,
+)
 from synthran.research import ResearchError, atomic_json
 
 
@@ -68,8 +72,12 @@ def _load_campaign(path: Path) -> CampaignIdentity:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ResearchError("campaign runtime requires a readable campaign file") from exc
-    if not isinstance(value, dict) or value.get("schema") != "synthran/research-campaign/v1alpha1":
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != "synthran/research-campaign/v1alpha1"
+    ):
         raise ResearchError("campaign runtime requires a persisted campaign specification")
+
     campaign_id = value.get("campaign_id")
     network_run_id = value.get("network_run_id")
     raw_runs = value.get("runs")
@@ -79,6 +87,7 @@ def _load_campaign(path: Path) -> CampaignIdentity:
         raise ResearchError("campaign runtime specification has no network run ID")
     if not isinstance(raw_runs, list) or not raw_runs:
         raise ResearchError("campaign runtime specification has no scheduled runs")
+
     run_ids: list[str] = []
     for item in raw_runs:
         run_id = item.get("run_id") if isinstance(item, dict) else None
@@ -126,7 +135,7 @@ class CampaignRuntimeSession:
         self._original_amber_edge_patch = None
         self._original_amber_objects = None
         self._original_amber_config = None
-        self._original_amber_restart = None
+        self._original_amber_restart_and_wait = None
 
     @property
     def campaign_id(self) -> str:
@@ -152,8 +161,6 @@ class CampaignRuntimeSession:
 
     @property
     def campaign_edge_config_name(self) -> str:
-        import hashlib
-
         suffix = hashlib.sha256(self.campaign_id.encode("utf-8")).hexdigest()[:12]
         return f"synthran-exp-edge-{suffix}"
 
@@ -170,20 +177,20 @@ class CampaignRuntimeSession:
         self._original_amber_edge_patch = amber_runtime.render_edge_patch
         self._original_amber_objects = amber_runtime.render_experiment_objects
         self._original_amber_config = amber_runtime.render_edge_mosquitto_config
-        self._original_amber_restart = amber_runtime._restart_edge_sidecar
+        self._original_amber_restart_and_wait = amber_runtime._restart_edge_sidecar_and_wait
 
-        # Per-run cleanup must leave the campaign-owned sidecar in place. The
-        # base cleanup function resolves these globals at call time.
+        # Per-run cleanup leaves the campaign-owned sidecar in place and proves
+        # that the same UE/PDU epoch is still active instead of restarting it.
         base_runtime.render_edge_cleanup_patch = lambda: {}
         base_runtime.reconcile_rfsim_runtime = self._reconcile_runtime
 
-        # Amber imports its runtime hooks directly, so bind the same campaign
-        # contract at the actual Amber execution boundary as well.
+        # Amber imported these hooks directly, so bind the campaign contract at
+        # the actual Amber execution boundary as well.
         amber_runtime.render_edge_patch = self._render_edge_patch
         amber_runtime.render_experiment_objects = self._render_experiment_objects
         amber_runtime.render_edge_mosquitto_config = self._render_edge_config
         amber_runtime.reconcile_rfsim_runtime = self._reconcile_runtime
-        amber_runtime._restart_edge_sidecar = self._reload_edge_sidecar
+        amber_runtime._restart_edge_sidecar_and_wait = self._reload_edge_sidecar_and_wait
 
         self._entered = True
         self._write_evidence(final=False)
@@ -198,7 +205,7 @@ class CampaignRuntimeSession:
         assert self._original_amber_edge_patch is not None
         assert self._original_amber_objects is not None
         assert self._original_amber_config is not None
-        assert self._original_amber_restart is not None
+        assert self._original_amber_restart_and_wait is not None
 
         base_runtime.render_edge_cleanup_patch = self._original_cleanup_patch
         base_runtime.reconcile_rfsim_runtime = self._original_base_reconcile
@@ -206,7 +213,7 @@ class CampaignRuntimeSession:
         amber_runtime.render_edge_patch = self._original_amber_edge_patch
         amber_runtime.render_experiment_objects = self._original_amber_objects
         amber_runtime.render_edge_mosquitto_config = self._original_amber_config
-        amber_runtime._restart_edge_sidecar = self._original_amber_restart
+        amber_runtime._restart_edge_sidecar_and_wait = self._original_amber_restart_and_wait
 
         try:
             self._restore_base_runtime()
@@ -279,10 +286,8 @@ class CampaignRuntimeSession:
         if len(edge_matches) != 1:
             raise ResearchError("campaign could not identify exactly one edge MQTT ConfigMap")
         edge = edge_matches[0]
-        metadata = edge["metadata"]
-        metadata["name"] = self.campaign_edge_config_name
-        labels = metadata.setdefault("labels", {})
-        labels[RUN_LABEL] = self.campaign_id
+        edge["metadata"]["name"] = self.campaign_edge_config_name
+        edge["metadata"].setdefault("labels", {})[RUN_LABEL] = self.campaign_id
         return tuple(objects)
 
     def _render_edge_config(
@@ -320,15 +325,8 @@ class CampaignRuntimeSession:
             self._write_evidence(final=False)
             return state
 
-        ue_pod = base_runtime._discover_ue_deployment(inventory, network_run_id)
-        # _discover_ue_deployment returns the deployment, so verify the actual
-        # run-owned UE pod separately through the canonical RFSIM discovery.
-        del ue_pod
-        current = self._original_amber_reconcile
-        # Do not invoke full reconciliation after the first run: that restarts
-        # the radio epoch. Prove the existing pod/PDU directly instead.
-        from synthran.network.rfsim import _current_pdu_address, _discover_pod
-
+        # Full reconciliation would restart the radio epoch. Subsequent runs
+        # therefore prove that the existing run-owned UE pod and PDU are stable.
         current_ue_pod = _discover_pod(
             inventory,
             component="ue",
@@ -341,21 +339,29 @@ class CampaignRuntimeSession:
             raise ResearchError("campaign PDU address changed between scheduled runs")
         return self.stable.to_state()
 
-    def _reload_edge_sidecar(self, inventory: NetworkInventory, pod: str) -> None:
+    def _reload_edge_sidecar_and_wait(
+        self,
+        inventory: NetworkInventory,
+        pod: str,
+        *,
+        timeout_seconds: int = 60,
+    ) -> None:
         if self.stable is not None and pod != self.stable.ue_pod:
             raise ResearchError("campaign MQTT reload targeted a different UE pod")
-        before = base_runtime._container_restart_count(
+        before, _, _, _ = amber_runtime._edge_sidecar_status(inventory, pod)
+        self._original_amber_restart_and_wait(
             inventory,
             pod,
-            amber_runtime.EDGE_CONTAINER,
+            timeout_seconds=timeout_seconds,
         )
-        self._original_amber_restart(inventory, pod)
-        after = base_runtime._wait_container_restart(
+        after, container_ready, pod_ready, running = amber_runtime._edge_sidecar_status(
             inventory,
             pod,
-            amber_runtime.EDGE_CONTAINER,
-            before,
         )
+        if after <= before or not (container_ready and pod_ready and running):
+            raise ResearchError(
+                "campaign MQTT reload did not prove a new Ready sidecar instance"
+            )
         self.reloads.append(
             {
                 "run_id": self.current_run_id,
@@ -370,7 +376,6 @@ class CampaignRuntimeSession:
         if self.inventory is None or self.lock is None:
             raise ResearchError("campaign cleanup has no inventory or dependency lock")
         if self.stable is None:
-            self.cleanup_valid = True
             self.base_network_reproved = None
             return
 
