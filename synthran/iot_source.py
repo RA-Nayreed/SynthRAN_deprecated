@@ -20,6 +20,7 @@ from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
     ambient_model_descriptor,
+    consume_run_energy_treatment,
     validate_energy_treatment,
 )
 from synthran.dependencies import DependencyError, GitDependency, load_lock
@@ -153,7 +154,25 @@ class IoTSourceSpec:
             for character in self.topic_prefix
         ):
             raise IoTSourceError("topic prefix contains unsupported characters")
+
         if self.profile == AMBIENT_PROFILE:
+            registered = consume_run_energy_treatment(self.run_id)
+            if registered is not None:
+                explicit = (
+                    float(self.energy_power_scale),
+                    float(self.energy_node_variation),
+                )
+                defaults = (
+                    DEFAULT_ENERGY_POWER_SCALE,
+                    DEFAULT_ENERGY_NODE_VARIATION,
+                )
+                if explicit == defaults:
+                    object.__setattr__(self, "energy_power_scale", registered[0])
+                    object.__setattr__(self, "energy_node_variation", registered[1])
+                elif explicit != registered:
+                    raise IoTSourceError(
+                        "live Amber source energy treatment does not match its research specification"
+                    )
             try:
                 validate_energy_treatment(
                     self.energy_power_scale,
