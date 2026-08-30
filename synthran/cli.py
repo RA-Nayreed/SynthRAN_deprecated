@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import json
 import sys
 from typing import Iterator, Sequence
 
@@ -17,13 +18,20 @@ from synthran.iot_source import (
 )
 from synthran.operator import configure_operator_parser, dispatch
 from synthran.r2lab.resources import R2LabTopologyResourceError
+from synthran.research import LoadSpec, MeasurementSpec, ResearchError
+from synthran.research.amber_runtime import execute_amber_research_experiment
+from synthran.research.v2 import AmberResearchSpec
 
 
-def _top_level_subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
+def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             return action
-    raise BackendError("SynthRAN parser does not expose top-level commands")
+    raise BackendError("SynthRAN parser does not expose command choices")
+
+
+def _top_level_subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
+    return _subparsers(parser)
 
 
 def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
@@ -55,6 +63,23 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
         default=10,
         help="IoT sensing/publication period in seconds",
     )
+
+    research = root.choices.get("research")
+    if research is None:
+        raise BackendError("SynthRAN parser does not expose the research command")
+    research_sub = _subparsers(research)
+    for name in ("plan", "run", "campaign-run"):
+        child = research_sub.choices.get(name)
+        if child is None:
+            raise BackendError(f"SynthRAN research parser does not expose {name}")
+        child.add_argument(
+            "--iot-profile",
+            choices=(TRANSPORT_PROFILE, AMBIENT_PROFILE),
+            default=None,
+            help=(
+                "select Amber research v2; omit for immutable legacy Cooja v1 behavior"
+            ),
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -101,6 +126,73 @@ def _run_amber_workload(
     return 0 if result.ready else 2
 
 
+def _amber_research_spec(args: argparse.Namespace) -> AmberResearchSpec:
+    loaded = args.condition != "baseline"
+    return AmberResearchSpec(
+        campaign_id=args.campaign_id,
+        run_id=args.run_id,
+        network_run_id=args.network_run_id,
+        condition=args.condition,
+        iot_profile=args.iot_profile,
+        iot_seed=args.seed,
+        sensor_period_seconds=args.sensor_period,
+        measurement=MeasurementSpec(
+            warmup_seconds=args.warmup_seconds,
+            duration_seconds=args.duration_seconds,
+            sample_interval_seconds=args.sample_interval,
+            probe_interval_seconds=args.probe_interval,
+        ),
+        load=LoadSpec(
+            enabled=loaded,
+            target_bps=args.target_bps if loaded else None,
+            target_fraction=args.target_fraction if loaded else None,
+            reference_capacity_bps=(
+                args.reference_capacity_bps if loaded else None
+            ),
+            parallel_flows=args.parallel_flows,
+            server_port=args.load_port,
+        ),
+        probe_target=args.probe_target,
+    )
+
+
+def _dispatch_amber_research(args: argparse.Namespace) -> int:
+    if args.research_command == "plan":
+        value = {
+            "schema": "synthran/research-request/v2alpha1",
+            **_amber_research_spec(args).to_request_dict(),
+        }
+        print(json.dumps(value, indent=2, sort_keys=True))
+        print("\nExecution action: none")
+        return 0
+    if args.research_command == "run":
+        spec = _amber_research_spec(args)
+        manifest, evidence = command_runtime._network_paths(
+            args.network_run_root,
+            args.network_run_id,
+        )
+        summary_path = execute_amber_research_experiment(
+            spec=spec,
+            inventory=command_runtime.load_inventory(args.inventory),
+            lock=command_runtime.load_lock(args.lock),
+            dependency_root=args.deps_root,
+            network_manifest=manifest,
+            network_evidence=evidence,
+            repository_root=command_runtime.repository_root(),
+            run_root=args.run_root,
+            progress=sys.stdout,
+        )
+        print(f"Amber research summary: {summary_path}")
+        return 0
+    if args.research_command == "campaign-run":
+        raise ResearchError(
+            "Amber campaign execution is not enabled until the v2 campaign runner is installed"
+        )
+    raise ResearchError(
+        "--iot-profile is supported on research plan, run, and campaign-run only"
+    )
+
+
 @contextmanager
 def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
     if args.command != "run" or getattr(args, "iot_source", "cooja") == "cooja":
@@ -132,8 +224,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(arguments)
     try:
+        if args.command == "research" and getattr(args, "iot_profile", None) is not None:
+            return _dispatch_amber_research(args)
         with _selected_iot_runtime(args):
             return dispatch(args)
-    except (BackendError, R2LabTopologyResourceError) as exc:
+    except (BackendError, ResearchError, R2LabTopologyResourceError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
