@@ -37,7 +37,7 @@ export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
 export SYNTHRAN_OWNER='YOUR_SLICES_USERNAME'
 ```
 
-A run selects that project, creates or reuses the provider experiment associated with its run ID, acquires the Post5G prefix, and verifies the resulting provider network.
+A full lifecycle run selects that project, creates or reuses the provider experiment associated with its run ID, acquires the Post5G prefix, and verifies the resulting provider network.
 
 You may override the provider experiment with `--slices-experiment`, but the normal path is to let it match the run ID.
 
@@ -102,7 +102,7 @@ provider context
 -> live authority preflight
 -> Open5GS + srsRAN/RFSIM deployment
 -> srsUE/PDU path proof
--> deterministic ten-sensor workload
+-> selected IoT workload
 -> acceptance evidence
 ```
 
@@ -140,7 +140,7 @@ provider context
 -> selected UE setup/connect through pinned 5g_ansible roles
 -> registration + PDU proof
 -> route-bound user-plane proof
--> deterministic ten-sensor workload
+-> selected IoT workload
 -> acceptance evidence
 -> exact physical cleanup
 ```
@@ -151,7 +151,7 @@ If a previous run owns the current Open5GS namespace and automatic ownership han
 
 ## 6. Watch progress
 
-Every run records a sanitized JSONL event stream:
+Every lifecycle run records a sanitized JSONL event stream:
 
 ```text
 .synthran/events/<run-id>.jsonl
@@ -169,7 +169,7 @@ or inspect the latest persisted messages later:
 synthran logs --run-id "$RUN_ID" --tail 200
 ```
 
-Long Ansible work uses one shared formatter across virtual deployment, physical Open5GS work, and physical UE setup/connect/stop. Routine Ansible chatter is suppressed; meaningful tasks, failures, and heartbeats remain visible.
+Long Ansible work uses one shared formatter across virtual deployment, physical Open5GS work, and physical UE setup/connect/cleanup. Routine Ansible chatter is suppressed; meaningful tasks, failures, and heartbeats remain visible.
 
 `--quiet` suppresses terminal progress but does not disable event persistence.
 
@@ -183,27 +183,27 @@ The command discovers the persisted evidence associated with the run and reports
 
 Do not use a historical PDU address, pod name, reservation ID, allocation ID, or lease observation as current mutation authority. Persisted evidence proves the historical run; live control always refreshes current state.
 
-## 8. Stop or recover exact physical resources
+## 8. Release exact physical resources
 
 If a physical run fails before its normal cleanup or was intentionally left active:
 
 ```zsh
-synthran stop \
+synthran release \
   --run-id "$RUN_ID" \
   --slice "$SYNTHRAN_R2LAB_SLICE" \
   --owner "$SYNTHRAN_OWNER" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 ```
 
-Cleanup is run-scoped. It may stop the run-owned gNB and release only the radio/UE resources bound to that run. If ownership cannot be proven, cleanup fails rather than broadening its target.
+Release is run-scoped. It may stop the run-owned gNB and release only the radio/UE resources bound to that run. If ownership cannot be proven, release fails rather than broadening its target.
 
 Never substitute wildcard Kubernetes deletion, global radio power-off, guessed allocation IDs, `pkill`, or `killall` for exact cleanup.
 
-For RFSIM, workload cleanup is normally part of run execution and there is no persistent physical claim to release.
+For RFSIM, transient experiment cleanup is normally part of `run` and there is no persistent physical claim to release.
 
-## 9. Research measurements
+## 9. Controlled measurements
 
-The current controlled measurement implementation is validated on accepted RFSIM network evidence.
+Controlled measurement is a mode of `run`, not a second command namespace. The current controlled implementation is validated on accepted RFSIM network evidence.
 
 After an accepted virtual run, the generated inventory is normally:
 
@@ -213,7 +213,7 @@ After an accepted virtual run, the generated inventory is normally:
 
 and the accepted virtual network evidence uses the same run ID under `.synthran/runs/`.
 
-### Calibrate the external peer
+### Measure reference RAN/UE-path capacity
 
 Choose a prepared peer outside the 5G core host. See `research-measurement-peer.md`.
 
@@ -223,7 +223,7 @@ export INVENTORY=".synthran/preparations/$NETWORK_RUN/hosts.ini"
 export MEASUREMENT_PEER_IP='PEER_IPV4'
 export CALIBRATION='.synthran/research/capacity.json'
 
-synthran research calibrate \
+synthran calibrate \
   --inventory "$INVENTORY" \
   --network-run-id "$NETWORK_RUN" \
   --target "$MEASUREMENT_PEER_IP" \
@@ -231,25 +231,46 @@ synthran research calibrate \
   --out "$CALIBRATION"
 ```
 
+`calibrate` measures the accepted RAN/UE path. It does not calibrate AMBER energy.
+
+### Execute one controlled run
+
+```zsh
+synthran run \
+  --campaign-id ambient-study-01 \
+  --network-run-id "$NETWORK_RUN" \
+  --run-id ambient-baseline-01 \
+  --condition baseline \
+  --iot-profile ambient-v1 \
+  --seed 424242 \
+  --sensor-period 10 \
+  --warmup-seconds 30 \
+  --duration-seconds 180 \
+  --sample-interval 1 \
+  --probe-interval 1 \
+  --probe-target "$MEASUREMENT_PEER_IP" \
+  --inventory "$INVENTORY"
+```
+
+For `ambient-v1`, `--energy-power-scale` and `--energy-node-variation` are explicit source-model treatments. Add `--plan` to render the immutable request without executing it.
+
 ### Build and execute a campaign
+
+The deterministic campaign schedule is persisted automatically before execution, so there is no separate campaign-plan/campaign-run command pair.
 
 ```zsh
 export REFERENCE_BPS=$(jq -r '.reference_capacity_bps' "$CALIBRATION")
 export CAMPAIGN_ID='campaign-001'
-export CAMPAIGN_FILE=".synthran/campaigns/$CAMPAIGN_ID.json"
 
-synthran research campaign-plan \
+synthran run \
   --campaign-id "$CAMPAIGN_ID" \
   --network-run-id "$NETWORK_RUN" \
   --seeds 424242,424243,424244 \
   --conditions 'baseline,load50=0.5,load80=0.8,load95=0.95' \
   --campaign-seed 12345 \
-  --out "$CAMPAIGN_FILE"
-
-synthran research campaign-run \
-  --campaign "$CAMPAIGN_FILE" \
+  --iot-profile ambient-v1 \
   --inventory "$INVENTORY" \
-  --target "$MEASUREMENT_PEER_IP" \
+  --probe-target "$MEASUREMENT_PEER_IP" \
   --reference-capacity-bps "$REFERENCE_BPS" \
   --sensor-period 5 \
   --warmup-seconds 30 \
@@ -260,17 +281,19 @@ synthran research campaign-run \
   --load-port 5220
 ```
 
-Analyze persisted valid runs:
+Use the same command with `--plan` to persist and inspect the deterministic schedule without execution. A later invocation may use `--campaign .synthran/campaigns/$CAMPAIGN_ID.json` to execute that exact schedule.
+
+Analyze completed runs with the separate read-only verb:
 
 ```zsh
 mkdir -p .synthran/reports
 
-synthran research analyze \
-  --campaign "$CAMPAIGN_FILE" \
+synthran analyze \
+  --campaign ".synthran/campaigns/$CAMPAIGN_ID.json" \
   --out ".synthran/reports/$CAMPAIGN_ID-analysis.json"
 ```
 
-Physical deterministic workload support does not yet imply physical controlled-load campaign acceptance. Do not point the current research campaign commands at a physical run and claim parity without a reviewed physical measurement implementation and accepted evidence.
+Physical deterministic workload support does not yet imply physical controlled-load campaign acceptance. Do not point the current controlled campaign path at a physical run and claim parity without a reviewed physical measurement implementation and accepted evidence.
 
 ## 10. Preserve evidence
 
