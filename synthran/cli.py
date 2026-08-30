@@ -14,7 +14,6 @@ from synthran.amber_experiment_runtime import execute_amber_experiment
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
-    clear_run_energy_treatment,
 )
 from synthran.backends import run as run_backend
 from synthran.backends.base import BackendError
@@ -32,10 +31,6 @@ from synthran.research.amber_campaign import (
     execute_amber_campaign,
 )
 from synthran.research.amber_runtime import execute_amber_research_experiment
-from synthran.research.energy_calibration import (
-    execute_energy_calibration,
-    parse_energy_scales,
-)
 from synthran.research.v2 import AmberResearchSpec
 
 
@@ -259,66 +254,35 @@ def _amber_research_spec(args: argparse.Namespace) -> AmberResearchSpec:
     )
 
 
-def _dispatch_amber_energy_calibration(args: argparse.Namespace) -> int:
-    result_path = execute_energy_calibration(
-        calibration_id=args.calibration_id,
-        network_run_id=args.network_run_id,
-        scales=parse_energy_scales(args.scales),
-        seed=args.seed,
-        sensor_period_seconds=args.sensor_period,
-        warmup_seconds=args.warmup_seconds,
-        duration_seconds=args.duration_seconds,
-        energy_node_variation=args.energy_node_variation,
-        target_energy_loss_min=args.target_energy_loss_min,
-        target_energy_loss_max=args.target_energy_loss_max,
-        repository_root=command_runtime.repository_root(),
-        dependency_root=args.deps_root,
-        calibration_root=args.calibration_root,
-    )
-    payload = _read_json_object(
-        result_path,
-        label="Amber energy calibration result",
-    )
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    print(f"Amber energy calibration: {result_path}")
-    return 0
-
-
 def _dispatch_amber_research(args: argparse.Namespace) -> int:
     if args.research_command == "plan":
         spec = _amber_research_spec(args)
-        try:
-            value = {
-                "schema": "synthran/research-request/v2alpha1",
-                **spec.to_request_dict(),
-            }
-            print(json.dumps(value, indent=2, sort_keys=True))
-            print("\nExecution action: none")
-            return 0
-        finally:
-            clear_run_energy_treatment(spec.run_id)
+        value = {
+            "schema": "synthran/research-request/v2alpha1",
+            **spec.to_request_dict(),
+        }
+        print(json.dumps(value, indent=2, sort_keys=True))
+        print("\nExecution action: none")
+        return 0
     if args.research_command == "run":
         spec = _amber_research_spec(args)
-        try:
-            manifest, evidence = command_runtime._network_paths(
-                args.network_run_root,
-                args.network_run_id,
-            )
-            summary_path = execute_amber_research_experiment(
-                spec=spec,
-                inventory=command_runtime.load_inventory(args.inventory),
-                lock=command_runtime.load_lock(args.lock),
-                dependency_root=args.deps_root,
-                network_manifest=manifest,
-                network_evidence=evidence,
-                repository_root=command_runtime.repository_root(),
-                run_root=args.run_root,
-                progress=sys.stdout,
-            )
-            print(f"Amber research summary: {summary_path}")
-            return 0
-        finally:
-            clear_run_energy_treatment(spec.run_id)
+        manifest, evidence = command_runtime._network_paths(
+            args.network_run_root,
+            args.network_run_id,
+        )
+        summary_path = execute_amber_research_experiment(
+            spec=spec,
+            inventory=command_runtime.load_inventory(args.inventory),
+            lock=command_runtime.load_lock(args.lock),
+            dependency_root=args.deps_root,
+            network_manifest=manifest,
+            network_evidence=evidence,
+            repository_root=command_runtime.repository_root(),
+            run_root=args.run_root,
+            progress=sys.stdout,
+        )
+        print(f"Amber research summary: {summary_path}")
+        return 0
     if args.research_command == "campaign-run":
         campaign = command_runtime._load_campaign(args.campaign)
         manifest, evidence = command_runtime._network_paths(
@@ -416,8 +380,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(arguments)
     try:
         _validate_persisted_iot_identity(args)
-        if args.command == "research" and args.research_command == "energy-calibrate":
-            return _dispatch_amber_energy_calibration(args)
         if args.command == "research" and getattr(args, "iot_profile", None) is not None:
             return _dispatch_amber_research(args)
         with _selected_iot_runtime(args):
