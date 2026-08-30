@@ -27,7 +27,15 @@ class AmbientScientificContractTests(unittest.TestCase):
             "listening-sensing-processing-wait-slot-transmitting",
             model["controller"]["data_path"],
         )
-        self.assertEqual(1, model["energy"]["trace_sample_period_ms"])
+        self.assertEqual(1, model["energy"]["simulation_row_period_ms"])
+        self.assertEqual(
+            "one-trace-row-per-simulation-millisecond",
+            model["energy"]["simulation_replay"],
+        )
+        self.assertEqual(
+            "not-encoded-by-amber-energy-contract",
+            model["energy"]["source_trace_acquisition_period"],
+        )
         self.assertEqual("max", model["energy"]["combine_mode"])
         self.assertTrue(model["collision"]["sic"])
         self.assertEqual(3.0, model["collision"]["required_sinr_db"])
