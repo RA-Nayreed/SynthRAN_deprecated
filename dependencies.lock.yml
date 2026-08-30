@@ -1,11 +1,11 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-08-25T03:43:36Z",
+  "resolved_at_utc": "2026-08-27T05:58:00Z",
   "git": {
     "fiveg_ansible": {
-      "url": "https://github.com/sopnode/5g_ansible.git",
-      "commit": "a0149fc0dde39e2872945a0f3c91e804ece52d4f",
-      "checkout": "5g_ansible",
+      "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
+      "commit": "82c0a4a461d68ce0b096a3fd652aa05841434cf0",
+      "checkout": "5g_ansible-r2lab",
       "sync": true,
       "role": "network deployment adapter target",
       "license": "NOASSERTION"

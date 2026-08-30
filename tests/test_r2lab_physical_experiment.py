@@ -61,9 +61,17 @@ class R2LabPhysicalScenarioTests(unittest.TestCase):
         pod = deployment["spec"]["template"]["spec"]
         self.assertTrue(pod["hostNetwork"])
         self.assertEqual("sopnode-f1", pod["nodeSelector"]["kubernetes.io/hostname"])
-        image = pod["containers"][0]["image"]
+        container = pod["containers"][0]
+        image = container["image"]
         self.assertIn("@sha256:", image)
-        self.assertEqual(18884, pod["containers"][0]["ports"][0]["hostPort"])
+        self.assertEqual(18884, container["ports"][0]["hostPort"])
+        readiness = container["readinessProbe"]
+        self.assertNotIn("tcpSocket", readiness)
+        self.assertIn("exec", readiness)
+        command = " ".join(readiness["exec"]["command"])
+        self.assertIn("/proc/net/tcp", command)
+        self.assertIn(":49C4", command)
+        self.assertIn('0A', command)
 
 
 class R2LabPhysicalRelayTests(unittest.TestCase):

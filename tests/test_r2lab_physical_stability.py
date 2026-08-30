@@ -5,14 +5,6 @@ import tempfile
 import unittest
 
 from synthran.r2lab.foundation_topology import REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS
-from synthran.r2lab.hardware import PhysicalTopology
-from synthran.r2lab.n3xx import (
-    OPEN5GS_GNB_N2_N3_ADDRESS,
-    OPEN5GS_N3_NETWORK,
-    OPEN5GS_RU_NETWORK,
-    R2LabN3xxError,
-    _validate_render,
-)
 from synthran.r2lab.ue_ansible import (
     R2LabUeAnsibleError,
     _apply_connect_convergence,
@@ -35,53 +27,21 @@ UPSTREAM_MBIM_BLOCK = '''        - name: "MBIM: stop.sh + start.sh on {{ ue_item
 
 class PhysicalFoundationOwnershipTests(unittest.TestCase):
     def test_open5gs_foundation_owns_only_n3network(self) -> None:
-        self.assertEqual((OPEN5GS_N3_NETWORK,), REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS)
-        self.assertNotIn(OPEN5GS_RU_NETWORK, REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS)
+        self.assertEqual(("n3network",), REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS)
+        self.assertNotIn("ru-network", REQUIRED_PHYSICAL_NETWORK_ATTACHMENTS)
 
-    def test_n3xx_render_still_requires_ru_network(self) -> None:
-        topology = PhysicalTopology(
-            core_node="sopnode-f2",
-            ran_node="sopnode-f3",
-            radio="n300",
-            ue="qfit07",
-        ).validate()
-        ru_address = "192.168.235.240"
-        valid = f'''
-apiVersion: apps/v1
-kind: Deployment
-spec:
-  replicas: 0
-  strategy:
-    type: Recreate
-  template:
-    spec:
-      nodeName: sopnode-f3
-      containers:
-        - name: gnb
-          image: example/srsran:locked
-metadata:
-  annotations:
-    k8s.v1.cni.cncf.io/networks: '[{{"name":"{OPEN5GS_N3_NETWORK}","ips":["{OPEN5GS_GNB_N2_N3_ADDRESS}/24"]}},{{"name":"{OPEN5GS_RU_NETWORK}","ips":["{ru_address}/24"]}}]'
-'''
-        _validate_render(
-            text=valid,
-            topology=topology,
-            repository="example/srsran",
-            tag="locked",
-            digest=None,
-            ru_pod_address=ru_address,
+    def test_physical_gnb_deployment_is_delegated_to_upstream_roles(self) -> None:
+        playbook = Path("deploy/ansible/r2lab-srsran-gnb.yml").read_text(encoding="utf-8")
+
+        self.assertIn("name: 5g/srsRAN/config", playbook)
+        self.assertIn("name: 5g/srsRAN/deploy", playbook)
+        self.assertIn("tasks_from: deploy_gnb.yml", playbook)
+        self.assertIn("synthran.run/id={{ synthran_run_id }}", playbook)
+        self.assertIn(
+            "synthran.io/deployment-authority=fiveg_ansible:{{ synthran_fiveg_ansible_commit }}",
+            playbook,
         )
-        with self.assertRaisesRegex(R2LabN3xxError, "RU network attachment"):
-            _validate_render(
-                text=valid.replace(
-                    f'"name":"{OPEN5GS_RU_NETWORK}"', '"name":"missing-ru"'
-                ),
-                topology=topology,
-                repository="example/srsran",
-                tag="locked",
-                digest=None,
-                ru_pod_address=ru_address,
-            )
+        self.assertNotIn("helm upgrade", playbook)
 
 
 class MbimConvergenceHardeningTests(unittest.TestCase):

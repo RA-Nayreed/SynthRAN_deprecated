@@ -230,10 +230,22 @@ def _effective_timeout(action: UeRoleAction, requested: int) -> int:
 
 
 def _apply_connect_convergence(path: Path) -> None:
+    """Accept upstream-owned QFIT convergence; patch only the reviewed legacy role."""
+
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise R2LabUeAnsibleError("pinned UE connect role is unavailable") from exc
+
+    upstream_owned = (
+        "MBIM: initialize QFIT modem {{ ue_item }} after switch-on",
+        "'init.sh'",
+        "MBIM: connect initialized QFIT {{ ue_item }}",
+        "'start.sh -F {{ current_dnn }} -q'",
+    )
+    if all(marker in source for marker in upstream_owned):
+        return
+
     if source.count(_UPSTREAM_MBIM_BLOCK) != 1:
         raise R2LabUeAnsibleError(
             "pinned UE connect role drifted from the reviewed MBIM bring-up contract"

@@ -22,16 +22,18 @@ from synthran.r2lab.acceptance import (
     R2LabAcceptanceError,
 )
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
+from synthran.r2lab.live_cluster import prove_user_plane
 from synthran.r2lab.physical_inventory import load_physical_inventory
 from synthran.r2lab.resources import load_topology
-from synthran.r2lab.ue import (
-    R2LabPhysicalUeError,
-    execute_physical_workload_handoff,
-    prove_physical_user_plane,
-)
+from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.r2lab.ue_activation import (
     activate_physical_ue,
     recover_retryable_transport_failure,
+)
+from synthran.r2lab.workload_boundary import execute_physical_workload_handoff
+from synthran.r2lab.workload_retry import (
+    R2LabWorkloadRetryError,
+    next_workload_attempt_id,
 )
 from synthran.utils.environment import scoped_environment
 
@@ -195,20 +197,17 @@ def continue_physical_path(
         if evidence.acceptance.next_stage is PhysicalAcceptanceStage.USER_PLANE:
             if progress is not None:
                 print("[synthran] physical-user-plane: running...", file=progress, flush=True)
-            user_plane = prove_physical_user_plane(
+            user_plane = prove_user_plane(
                 evidence=evidence,
                 slice_name=slice_name,
-                owner=owner,
-                allocation_id=allocation_id,
-                known_hosts=known_hosts,
                 peer=peer,
                 run_root=run_root,
                 r2lab_runner=r2lab_runner,
                 cluster_runner=cluster_runner,
-                evidence_path=evidence_path,
                 timeout_seconds=timeout_seconds,
             )
             evidence = user_plane.evidence
+            evidence.write_json(evidence_path)
             user_plane_proven = user_plane.probe.proven
             _write_json(
                 physical_directory / "physical-user-plane.json",
@@ -263,6 +262,12 @@ def run_physical_workload(
                 "physical workload requires an accepted UE/PDU/user-plane path"
             )
 
+        effective_workload_id = next_workload_attempt_id(
+            workload_id,
+            physical_run_id=run_id,
+            physical_run_root=run_root,
+            experiment_root=experiment_root,
+        )
         topology = load_topology(run_root=run_root, run_id=run_id).validate()
         inventory = load_physical_inventory(inventory_path, topology=topology)
         config = PhysicalExperimentConfig(
@@ -271,7 +276,7 @@ def run_physical_workload(
             lock=load_lock(lock_path),
             dependency_root=deps_root,
             repository_root=repository_root(),
-            workload_id=workload_id,
+            workload_id=effective_workload_id,
             run_root=experiment_root,
             physical_run_root=run_root,
             collection_seconds=collection_seconds,
@@ -306,11 +311,17 @@ def run_physical_workload(
         )
         return PhysicalWorkloadSummary(
             run_id=run_id,
-            workload_id=workload_id,
+            workload_id=effective_workload_id,
             evidence_path=evidence_path,
             workload_result_path=workload_result_path,
             accepted=accepted,
             cleanup_proven=(result.cleanup_proven if result is not None else False),
         )
-    except (R2LabAcceptanceError, R2LabPhysicalUeError, OSError, ValueError) as exc:
+    except (
+        R2LabAcceptanceError,
+        R2LabPhysicalUeError,
+        R2LabWorkloadRetryError,
+        OSError,
+        ValueError,
+    ) as exc:
         raise R2LabPhysicalLifecycleError(str(exc)) from exc

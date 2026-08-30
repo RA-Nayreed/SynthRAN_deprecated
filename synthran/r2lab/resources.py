@@ -1,9 +1,4 @@
-"""Topology-driven R2Lab resource ownership and live authority.
-
-This module owns claims, lease checks, exact hardware power state, and strict
-management reachability. UE modem/setup mechanics are delegated to the pinned
-5g-Ansible roles.
-"""
+"""Topology-driven R2Lab resource ownership and live hardware state."""
 
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ import tempfile
 import time
 from typing import Callable, Mapping, Sequence, TextIO
 
-from synthran.live_preflight import CommandResult, verify_allocations, verify_reservation
+from synthran.live_preflight import CommandResult
 from synthran.network.runtime import validate_run_id
 from synthran.r2lab.controller import gateway_command, subprocess_runner
 from synthran.r2lab.hardware import PhysicalTopology, R2LabHardwareError, UeProfile, topology_path
@@ -254,15 +249,12 @@ def _wait_management(
 class PhysicalAuthority:
     run_id: str
     topology: PhysicalTopology
-    lease_verified: bool
     radio_state: str
     ue_state: str
 
     def validate(self) -> "PhysicalAuthority":
         validate_run_id(self.run_id)
         self.topology.validate()
-        if self.lease_verified is not True:
-            raise R2LabTopologyResourceError("R2Lab lease authority is not current")
         if self.radio_state != "on":
             raise R2LabTopologyResourceError("selected physical radio is not proven on")
         if self.ue_state != "ready":
@@ -395,12 +387,10 @@ def _prepare_qfit(
     profile: UeProfile,
     provider: Runner,
     runner: Runner,
-    require_lease: Callable[[str], None],
     sleeper: Sleeper,
     timeout_seconds: int,
 ) -> None:
     node = qfit_node_number(profile.name)
-    require_lease("lease-before-qfit-state")
     status = provider(("rhubarbe", "status", str(node)), timeout_seconds)
     observed = parse_qfit_status(
         "\n".join(part for part in (status.stdout, status.stderr) if part),
@@ -409,7 +399,6 @@ def _prepare_qfit(
     if observed.state is PowerState.UNKNOWN:
         raise R2LabTopologyResourceError("selected qfit power state is unknown")
     if observed.state is PowerState.OFF:
-        require_lease("lease-before-qfit-image-load")
         if provider(("rhubarbe", "load", "-i", QFIT_IMAGE, str(node)), 300).returncode != 0:
             raise R2LabTopologyResourceError("selected qfit image load returned nonzero")
         status = provider(("rhubarbe", "status", str(node)), timeout_seconds)
@@ -426,7 +415,6 @@ def _prepare_qfit(
         qfit=profile.name, runner=provider, timeout_seconds=timeout_seconds
     )
     if usb.state is PowerState.OFF:
-        require_lease("lease-before-qfit-usb")
         transition = execute_verified_qfit_usb_transition(
             qfit=profile.name,
             requested_state=PowerState.ON,
@@ -460,8 +448,6 @@ def prepare_physical_resources(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     progress: TextIO | None = None,
 ) -> PreparedPhysicalRun:
-    """Claim exact hardware and prepare UE management without custom modem actuation."""
-
     from synthran.r2lab.ue_ansible import R2LabUeAnsibleError, execute_selected_ue_role
 
     validate_run_id(run_id)
@@ -483,10 +469,6 @@ def prepare_physical_resources(
         if progress is not None:
             print(f"[synthran] {message}", file=progress, flush=True)
 
-    def require_lease(stage: str) -> None:
-        report(stage)
-        _lease(slice_name, runner, timeout_seconds)
-
     try:
         _atomic_json(topology_file, _topology_payload(topology))
         claim_path = _write_claim(
@@ -495,8 +477,9 @@ def prepare_physical_resources(
             slice_name=slice_name,
             topology=topology,
         )
+        _lease(slice_name, runner, timeout_seconds)
+        report("R2Lab lease accepted")
 
-        require_lease("lease-before-radio")
         radio = execute_verified_pdu_transition(
             resource=topology.radio,
             requested_state=PowerState.ON,
@@ -513,12 +496,10 @@ def prepare_physical_resources(
                 profile=profile,
                 provider=provider,
                 runner=runner,
-                require_lease=require_lease,
                 sleeper=sleeper,
                 timeout_seconds=timeout_seconds,
             )
         elif profile.kind == "qhat":
-            require_lease("lease-before-qhat-setup")
             try:
                 execute_selected_ue_role(
                     run_id=run_id,
@@ -532,7 +513,6 @@ def prepare_physical_resources(
                 )
             except R2LabUeAnsibleError as exc:
                 raise R2LabTopologyResourceError(str(exc)) from exc
-            require_lease("lease-after-qhat-setup")
             _prove_qhat_on(profile=profile, provider=provider, timeout_seconds=timeout_seconds)
             _wait_management(
                 slice_name=slice_name,
@@ -545,7 +525,6 @@ def prepare_physical_resources(
         else:
             raise R2LabTopologyResourceError("selected UE kind is outside the canonical physical path")
 
-        require_lease("lease-final")
         manifest = {
             "schema": RUN_SCHEMA,
             "run_id": run_id,
@@ -587,8 +566,6 @@ def reconcile_physical_resources(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     progress: TextIO | None = None,
 ) -> PhysicalAuthority:
-    """Restore one exact claimed physical run to its required live resource state."""
-
     from synthran.r2lab.ue_ansible import R2LabUeAnsibleError, execute_selected_ue_role
 
     validate_run_id(run_id)
@@ -608,14 +585,10 @@ def reconcile_physical_resources(
         if progress is not None:
             print(f"[synthran] {message}", file=progress, flush=True)
 
-    def require_lease(stage: str) -> None:
-        report(stage)
-        _lease(slice_name, runner, timeout_seconds)
+    _lease(slice_name, runner, timeout_seconds)
+    report("R2Lab lease accepted")
 
-    require_lease("lease-before-radio-reconcile")
-    radio_result = provider(
-        ("rhubarbe", "pdu", "status", topology.radio), timeout_seconds
-    )
+    radio_result = provider(("rhubarbe", "pdu", "status", topology.radio), timeout_seconds)
     radio = parse_pdu_status(
         "\n".join(part for part in (radio_result.stdout, radio_result.stderr) if part),
         resource=topology.radio,
@@ -623,7 +596,6 @@ def reconcile_physical_resources(
     if radio.state is PowerState.UNKNOWN:
         raise R2LabTopologyResourceError("selected physical radio power state is unknown")
     if radio.state is PowerState.OFF:
-        require_lease("lease-before-radio-power-on")
         transition = execute_verified_pdu_transition(
             resource=topology.radio,
             requested_state=PowerState.ON,
@@ -643,7 +615,6 @@ def reconcile_physical_resources(
             profile=profile,
             provider=provider,
             runner=runner,
-            require_lease=require_lease,
             sleeper=sleeper,
             timeout_seconds=timeout_seconds,
         )
@@ -672,7 +643,6 @@ def reconcile_physical_resources(
             else:
                 management_ready = True
         if not management_ready:
-            require_lease("lease-before-qhat-setup")
             try:
                 execute_selected_ue_role(
                     run_id=run_id,
@@ -686,7 +656,6 @@ def reconcile_physical_resources(
                 )
             except R2LabUeAnsibleError as exc:
                 raise R2LabTopologyResourceError(str(exc)) from exc
-            require_lease("lease-after-qhat-setup")
             _prove_qhat_on(profile=profile, provider=provider, timeout_seconds=timeout_seconds)
             _wait_management(
                 slice_name=slice_name,
@@ -699,7 +668,6 @@ def reconcile_physical_resources(
     else:
         raise R2LabTopologyResourceError("selected UE kind is outside the canonical physical path")
 
-    require_lease("lease-final")
     authority = verify_physical_authority(
         run_id=run_id,
         slice_name=slice_name,
@@ -719,8 +687,6 @@ def verify_physical_authority(
     runner: Runner = subprocess_runner,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> PhysicalAuthority:
-    """Refresh current lease, exact claim, radio, and UE management state."""
-
     topology = load_topology(run_root=run_root, run_id=run_id)
     _require_claim(
         run_root=run_root,
@@ -728,11 +694,8 @@ def verify_physical_authority(
         slice_name=slice_name,
         topology=topology,
     )
-    _lease(slice_name, runner, timeout_seconds)
     provider = _remote_runner(slice_name, runner)
-    radio_result = provider(
-        ("rhubarbe", "pdu", "status", topology.radio), timeout_seconds
-    )
+    radio_result = provider(("rhubarbe", "pdu", "status", topology.radio), timeout_seconds)
     radio = parse_pdu_status(
         "\n".join(part for part in (radio_result.stdout, radio_result.stderr) if part),
         resource=topology.radio,
@@ -751,122 +714,9 @@ def verify_physical_authority(
     return PhysicalAuthority(
         run_id=run_id,
         topology=topology,
-        lease_verified=True,
         radio_state="on",
         ue_state="ready",
     ).validate()
-
-
-def verify_selected_allocation(
-    *,
-    topology: PhysicalTopology,
-    runner: Runner,
-    owner: str,
-    allocation_id: str | None,
-    timeout_seconds: int,
-) -> str:
-    try:
-        return verify_allocations(
-            runner=runner,
-            allocation_id=allocation_id,
-            owner=owner,
-            nodes=set(topology.nodes),
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-    except Exception as exc:
-        raise R2LabTopologyResourceError(
-            "current SLICES allocation for the selected compute nodes was not proven"
-        ) from exc
-
-
-def claim_selected_allocation(
-    *,
-    run_id: str,
-    slice_name: str,
-    topology: PhysicalTopology,
-    r2lab_runner: Runner,
-    allocation_runner: Runner,
-    owner: str,
-    allocation_id: str | None,
-    timeout_seconds: int,
-    run_root: Path = Path(".synthran/r2lab"),
-) -> str:
-    """Reuse one exact allocation or reclaim only the selected reserved nodes."""
-
-    try:
-        return verify_selected_allocation(
-            topology=topology,
-            runner=allocation_runner,
-            owner=owner,
-            allocation_id=allocation_id,
-            timeout_seconds=timeout_seconds,
-        )
-    except R2LabTopologyResourceError:
-        if allocation_id is not None:
-            raise
-
-    verify_physical_authority(
-        run_id=run_id,
-        slice_name=slice_name,
-        run_root=run_root,
-        runner=r2lab_runner,
-        timeout_seconds=min(timeout_seconds, 300),
-    )
-    try:
-        reservation_id = verify_reservation(
-            runner=allocation_runner,
-            reservation_id=None,
-            owner=owner,
-            nodes=set(topology.nodes),
-            now=datetime.now(timezone.utc),
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-    except Exception as exc:
-        raise R2LabTopologyResourceError(
-            "active SLICES reservation for the selected compute nodes was not proven"
-        ) from exc
-
-    for node in topology.nodes:
-        verify_physical_authority(
-            run_id=run_id,
-            slice_name=slice_name,
-            run_root=run_root,
-            runner=r2lab_runner,
-            timeout_seconds=min(timeout_seconds, 300),
-        )
-        verify_reservation(
-            runner=allocation_runner,
-            reservation_id=reservation_id,
-            owner=owner,
-            nodes=set(topology.nodes),
-            now=datetime.now(timezone.utc),
-            timeout_seconds=min(timeout_seconds, 60),
-        )
-        result = allocation_runner(
-            ("pos", "allocations", "free", "-k", node), min(timeout_seconds, 60)
-        )
-        if result.returncode != 0:
-            raise R2LabTopologyResourceError(f"allocation release for {node} returned nonzero")
-
-    verify_physical_authority(
-        run_id=run_id,
-        slice_name=slice_name,
-        run_root=run_root,
-        runner=r2lab_runner,
-        timeout_seconds=min(timeout_seconds, 300),
-    )
-    result = allocation_runner(
-        ("pos", "allocations", "allocate", *topology.nodes), min(timeout_seconds, 60)
-    )
-    if result.returncode != 0:
-        raise R2LabTopologyResourceError("selected compute allocation creation returned nonzero")
-    return verify_selected_allocation(
-        topology=topology,
-        runner=allocation_runner,
-        owner=owner,
-        allocation_id=None,
-        timeout_seconds=timeout_seconds,
-    )
 
 
 def release_physical_resources(
@@ -879,8 +729,6 @@ def release_physical_resources(
     stop_gnb: Callable[[], object] | None = None,
     progress: TextIO | None = None,
 ) -> dict[str, object]:
-    """Release only exact selected hardware after proving each resulting state."""
-
     topology = load_topology(run_root=run_root, run_id=run_id)
     claim = _require_claim(
         run_root=run_root,
@@ -894,11 +742,13 @@ def release_physical_resources(
         if progress is not None:
             print(f"[synthran] {message}", file=progress, flush=True)
 
+    _lease(slice_name, runner, timeout_seconds)
+    report("R2Lab lease accepted for release")
+
     if stop_gnb is not None:
         report("gNB scale-to-zero")
         stop_gnb()
 
-    _lease(slice_name, runner, timeout_seconds)
     profile = topology.ue_profile
     if profile.kind == "qfit":
         usb = execute_verified_qfit_usb_transition(
@@ -909,7 +759,6 @@ def release_physical_resources(
         )
         if not usb.confirmed:
             raise R2LabTopologyResourceError("selected qfit USB rail was not proven off")
-        _lease(slice_name, runner, timeout_seconds)
         host = execute_verified_qfit_transition(
             qfit=profile.name,
             requested_state=PowerState.OFF,
@@ -928,7 +777,6 @@ def release_physical_resources(
         if not ue.confirmed:
             raise R2LabTopologyResourceError("selected qhat was not proven off")
 
-    _lease(slice_name, runner, timeout_seconds)
     radio = execute_verified_pdu_transition(
         resource=topology.radio,
         requested_state=PowerState.OFF,
