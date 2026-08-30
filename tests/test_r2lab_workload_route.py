@@ -12,8 +12,9 @@ from synthran.r2lab.hardware import UES
 
 
 class PhysicalWorkloadRouteTests(unittest.TestCase):
+    @patch("synthran.r2lab.controller._configured_identity", return_value=None)
     @patch("synthran.experiment.r2lab._run")
-    def test_route_probe_forces_wwan0_like_the_relay(self, run) -> None:
+    def test_route_probe_forces_wwan0_like_the_relay(self, run, _identity) -> None:
         run.return_value = CommandResult(
             0,
             '[{"dst":"172.28.2.77","dev":"wwan0","prefsrc":"12.1.0.2"}]',
@@ -25,8 +26,9 @@ class PhysicalWorkloadRouteTests(unittest.TestCase):
         rendered = " ".join(run.call_args.args[0])
         self.assertIn("ip -j route get 172.28.2.77 oif wwan0", rendered)
 
+    @patch("synthran.r2lab.controller._configured_identity", return_value=None)
     @patch("synthran.experiment.r2lab._run")
-    def test_route_probe_failure_names_exact_precondition(self, run) -> None:
+    def test_route_probe_failure_names_exact_precondition(self, run, _identity) -> None:
         run.return_value = CommandResult(2, "", "opaque remote failure")
 
         with self.assertRaisesRegex(
