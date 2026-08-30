@@ -15,11 +15,17 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 class DependencyLockTests(unittest.TestCase):
     def test_repository_lock_is_valid_and_immutable(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
-        self.assertEqual(4, len(lock.git))
+        self.assertEqual(5, len(lock.git))
         self.assertTrue(all(len(item.commit) == 40 for item in lock.git))
-        self.assertEqual(2, sum(item.sync for item in lock.git))
+        self.assertEqual(3, sum(item.sync for item in lock.git))
+        self.assertIn("amber", {item.name for item in lock.git})
+        self.assertEqual(
+            "08dd6bd445e607ad3accf4e9a2dff51a499ebdf9",
+            next(item.commit for item in lock.git if item.name == "amber"),
+        )
         self.assertEqual("3.12.13", lock.raw["conda"]["packages"]["python"]["version"])
         self.assertEqual("21.0.9", lock.raw["conda"]["packages"]["openjdk"]["version"])
+        self.assertEqual("4.1.1", lock.raw["conda"]["packages"]["simpy"]["version"])
 
     def test_dry_run_selects_direct_dependencies_without_writing(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
@@ -31,6 +37,7 @@ class DependencyLockTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("fiveg_ansible", rendered)
         self.assertIn("contiki_ng", rendered)
+        self.assertIn("amber", rendered)
         self.assertNotIn("open5gs_k8s", rendered)
 
     def test_dry_run_all_includes_transitive_dependencies(self) -> None:
@@ -62,6 +69,7 @@ class DependencyLockTests(unittest.TestCase):
         self.assertIn("fiveg_ansible", rendered)
         self.assertIn("srsran_helm", rendered)
         self.assertNotIn("contiki_ng", rendered)
+        self.assertNotIn("amber", rendered)
         self.assertNotIn("open5gs_k8s", rendered)
 
     def test_unknown_selected_dependency_is_rejected(self) -> None:
