@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 import inspect
 import json
 from pathlib import Path
@@ -55,10 +56,7 @@ class R2LabIoTWorkloadTests(unittest.TestCase):
             interface="wwan0",
         )
         sensors = [f"sensor-{index:02d}" for index in range(1, 11)]
-        events = [
-            SimpleNamespace(key=(sensor, 1), decoded=True)
-            for sensor in sensors
-        ]
+        events = [SimpleNamespace(key=(sensor, 1), decoded=True) for sensor in sensors]
         records = [
             {
                 "schema": "synthran/telemetry/v1alpha1",
@@ -70,7 +68,6 @@ class R2LabIoTWorkloadTests(unittest.TestCase):
             }
             for index, sensor in enumerate(sensors, start=1)
         ]
-        plan_holder: dict[str, object] = {}
 
         def prepare(spec, duration, run_directory):
             evidence_path = run_directory / "iot-evidence-v2.json"
@@ -89,7 +86,7 @@ class R2LabIoTWorkloadTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            plan = SimpleNamespace(
+            return SimpleNamespace(
                 spec=spec,
                 duration_seconds=duration,
                 amber_commit="b" * 40,
@@ -99,8 +96,6 @@ class R2LabIoTWorkloadTests(unittest.TestCase):
                 evidence_path=evidence_path,
                 source_loss_count=source_loss,
             )
-            plan_holder["plan"] = plan
-            return plan
 
         source_adapter = MagicMock()
         source_adapter.prepare.side_effect = prepare
@@ -145,57 +140,104 @@ class R2LabIoTWorkloadTests(unittest.TestCase):
         )
         forward = MagicMock()
         reproof_values = [delivery_reproof, True] if delivery_reproof else [False, True]
-        with patch.dict("os.environ", {"CONDA_DEFAULT_ENV": "synthran"}), patch(
-            "synthran.r2lab.iot_workload._validate_ue", return_value=SimpleNamespace()
-        ), patch(
-            "synthran.r2lab.iot_workload.load_topology", return_value=topology
-        ), patch(
-            "synthran.r2lab.iot_workload._core_address", return_value="10.0.0.2"
-        ), patch(
-            "synthran.r2lab.iot_workload._probe_ssh_forwarding"
-        ), patch(
-            "synthran.r2lab.iot_workload._prove_ue_route"
-        ), patch(
-            "synthran.r2lab.iot_workload._ue_relay_process_count", return_value=0
-        ), patch(
-            "synthran.r2lab.iot_workload._remote_port_is_closed", return_value=True
-        ), patch(
-            "synthran.r2lab.iot_workload._local_port_is_closed", return_value=True
-        ), patch(
-            "synthran.r2lab.iot_workload.AmberSourceAdapter", return_value=source_adapter
-        ), patch(
-            "synthran.r2lab.iot_workload.render_physical_central_objects", return_value=()
-        ), patch(
-            "synthran.r2lab.iot_workload._central_rollout"
-        ), patch(
-            "synthran.r2lab.iot_workload._ue_counter",
-            side_effect=[100, 50, tx_after, 60],
-        ), patch(
-            "synthran.r2lab.iot_workload._local_forward_command",
-            return_value=("ssh", "forward"),
-        ), patch(
-            "synthran.r2lab.iot_workload._start_process", return_value=forward
-        ), patch(
-            "synthran.r2lab.iot_workload._wait_local_tcp"
-        ), patch(
-            "synthran.r2lab.iot_workload.PortableMqttCollectorSession",
-            return_value=collector,
-        ), patch(
-            "synthran.r2lab.iot_workload.R2LabIoTTransportAdapter",
-            return_value=transport_adapter,
-        ), patch(
-            "synthran.r2lab.iot_workload.AmberReplaySession", return_value=publisher
-        ), patch(
-            "synthran.r2lab.iot_workload.reconcile_source_and_transport",
-            return_value=reconciliation,
-        ), patch(
-            "synthran.r2lab.iot_workload._network_reproof",
-            side_effect=reproof_values,
-        ) as reproof, patch(
-            "synthran.r2lab.iot_workload.write_parquet"
-        ), patch(
-            "synthran.r2lab.iot_workload._delete_experiment_objects"
-        ):
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict("os.environ", {"CONDA_DEFAULT_ENV": "synthran"}))
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload._validate_ue",
+                    return_value=SimpleNamespace(),
+                )
+            )
+            stack.enter_context(
+                patch("synthran.r2lab.iot_workload.load_topology", return_value=topology)
+            )
+            stack.enter_context(
+                patch("synthran.r2lab.iot_workload._core_address", return_value="10.0.0.2")
+            )
+            stack.enter_context(patch("synthran.r2lab.iot_workload._probe_ssh_forwarding"))
+            stack.enter_context(patch("synthran.r2lab.iot_workload._prove_ue_route"))
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload._ue_relay_process_count",
+                    return_value=0,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload._remote_port_is_closed",
+                    return_value=True,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload._local_port_is_closed",
+                    return_value=True,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload.AmberSourceAdapter",
+                    return_value=source_adapter,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload.render_physical_central_objects",
+                    return_value=(),
+                )
+            )
+            stack.enter_context(patch("synthran.r2lab.iot_workload._central_rollout"))
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload._ue_counter",
+                    side_effect=[100, 50, tx_after, 60],
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload._local_forward_command",
+                    return_value=("ssh", "forward"),
+                )
+            )
+            stack.enter_context(
+                patch("synthran.r2lab.iot_workload._start_process", return_value=forward)
+            )
+            stack.enter_context(patch("synthran.r2lab.iot_workload._wait_local_tcp"))
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload.PortableMqttCollectorSession",
+                    return_value=collector,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload.R2LabIoTTransportAdapter",
+                    return_value=transport_adapter,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload.AmberReplaySession",
+                    return_value=publisher,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload.reconcile_source_and_transport",
+                    return_value=reconciliation,
+                )
+            )
+            reproof = stack.enter_context(
+                patch(
+                    "synthran.r2lab.iot_workload._network_reproof",
+                    side_effect=reproof_values,
+                )
+            )
+            stack.enter_context(patch("synthran.r2lab.iot_workload.write_parquet"))
+            stack.enter_context(
+                patch("synthran.r2lab.iot_workload._delete_experiment_objects")
+            )
             result = execute_physical_iot_workload(context, config=config)
         return result, config.run_root / config.workload_id, reproof
 
