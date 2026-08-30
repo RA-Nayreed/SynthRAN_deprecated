@@ -88,7 +88,7 @@ class PhysicalIoTLifecycleTests(unittest.TestCase):
             self.assertEqual(root / "r2lab", kwargs["physical_run_root"])
             build_executor.assert_called_once_with(config)
             self.assertIs(executor, handoff.call_args.kwargs["executor"])
-            self.assertEqual("physical-001", handoff.call_args.kwargs["evidence"].run_id if hasattr(handoff.call_args.kwargs["evidence"], "run_id") else "physical-001")
+            self.assertIs(evidence, handoff.call_args.kwargs["evidence"])
             self.assertTrue(summary.accepted)
             self.assertTrue(summary.cleanup_proven)
             self.assertEqual("workload-001", summary.workload_id)
