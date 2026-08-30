@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
+    consume_run_energy_treatment,
     register_run_energy_treatment,
     validate_energy_treatment,
 )
@@ -17,6 +18,7 @@ from synthran.iot_source import (
     AMBIENT_PROFILE,
     SUPPORTED_PROFILES,
     TRANSPORT_PROFILE,
+    IoTSourceSpec,
 )
 from synthran.research import (
     CONDITION_RE,
@@ -31,6 +33,36 @@ from synthran.research import (
 
 RESEARCH_EXPERIMENT_SCHEMA_V2 = "synthran/research-experiment/v2alpha1"
 RESEARCH_SUMMARY_SCHEMA_V2 = "synthran/research-summary/v2alpha1"
+
+
+# The established live executor constructs IoTSourceSpec from its accepted
+# transport signature. Carry the run-scoped research treatment into that
+# immutable source spec at construction time, then consume it exactly once.
+_ORIGINAL_IOT_SOURCE_POST_INIT = IoTSourceSpec.__post_init__
+if not getattr(IoTSourceSpec, "_synthran_energy_treatment_aware", False):
+    def _energy_treatment_aware_source_post_init(self: IoTSourceSpec) -> None:
+        registered = consume_run_energy_treatment(self.run_id)
+        if registered is not None:
+            scale, variation = registered
+            observed = (
+                float(self.energy_power_scale),
+                float(self.energy_node_variation),
+            )
+            defaults = (
+                DEFAULT_ENERGY_POWER_SCALE,
+                DEFAULT_ENERGY_NODE_VARIATION,
+            )
+            if observed == defaults:
+                object.__setattr__(self, "energy_power_scale", scale)
+                object.__setattr__(self, "energy_node_variation", variation)
+            elif observed != registered:
+                raise ResearchError(
+                    "live Amber source energy treatment does not match its research specification"
+                )
+        _ORIGINAL_IOT_SOURCE_POST_INIT(self)
+
+    IoTSourceSpec.__post_init__ = _energy_treatment_aware_source_post_init
+    setattr(IoTSourceSpec, "_synthran_energy_treatment_aware", True)
 
 
 @dataclass(frozen=True)
