@@ -72,6 +72,7 @@ from synthran.iot_source import (
     reconcile_source_and_transport,
 )
 from synthran.network_runtime import verify_network_path
+from synthran.pdu_transport_probe import wait_pdu_bound_tcp_connected
 from synthran.rfsim_runtime import reconcile_rfsim_runtime
 
 
@@ -658,6 +659,25 @@ def execute_amber_experiment(
             pdu_address=runtime_state.pdu_address,
         )
         _add_ue_route(inventory, ue_pod, core_address)
+        try:
+            wait_pdu_bound_tcp_connected(
+                inventory,
+                ue_pod,
+                pdu_address=transport_context.pdu_address,
+                remote_address=core_address,
+                remote_port=CENTRAL_PORT,
+            )
+        except Exception as exc:
+            _collect_rollout_diagnostics(
+                inventory,
+                network_run_id=transport_context.network_run_id,
+                log_path=logs / "amber-pdu-central-tcp-diagnostics.log",
+                private_paths=(repository_root, dependency_root, run_directory, inventory.path),
+            )
+            raise ExperimentError(
+                "Amber PDU-bound TCP path to central MQTT is not ready; diagnostics saved"
+            ) from exc
+
         edge_config = render_edge_mosquitto_config(
             transport_context,
             central_broker_address=core_address,
@@ -692,7 +712,7 @@ def execute_amber_experiment(
                 private_paths=(repository_root, dependency_root, run_directory, inventory.path),
             )
             raise ExperimentError(
-                "Amber edge MQTT bridge did not connect over the accepted 5G path; diagnostics saved"
+                "Amber PDU-bound TCP path was proven but edge MQTT bridge did not connect; diagnostics saved"
             ) from exc
 
         after_patch = verify_network_path(
