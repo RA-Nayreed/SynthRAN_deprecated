@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from synthran.ambient_contract import ALOHA_SLOT_RULE
 from synthran.iot_source import (
     AMBIENT_PROFILE,
     AmberSourceAdapter,
@@ -59,6 +60,20 @@ class AmberPlanInvariantTests(unittest.TestCase):
                 all(event.details.get("uplink_dbm") is not None for event in plan.events)
             )
 
+            collect_events = [
+                event for event in plan.events if event.details.get("collect_received") is True
+            ]
+            self.assertTrue(collect_events)
+            self.assertTrue(
+                all(event.details.get("aloha_slot_rule") == ALOHA_SLOT_RULE for event in collect_events)
+            )
+            self.assertTrue(
+                all(
+                    event.details.get("aloha_frame_index") == event.sequence - 1
+                    for event in collect_events
+                )
+            )
+
             transmitted = [event for event in plan.events if event.transmitted]
             self.assertTrue(transmitted, "corrected ambient plan produced no transmissions")
             self.assertTrue(
@@ -76,10 +91,6 @@ class AmberPlanInvariantTests(unittest.TestCase):
                     for event in plan.events
                 )
             )
-            collect_events = [
-                event for event in plan.events if event.details.get("collect_received") is True
-            ]
-            self.assertTrue(collect_events)
             self.assertTrue(
                 all(
                     event.details.get("capacitor_voltage_collect_v") is not None
@@ -91,6 +102,16 @@ class AmberPlanInvariantTests(unittest.TestCase):
             model = scenario["profile"]["model"]
             self.assertEqual("current-frame-only", model["access"]["frame_scope"])
             self.assertEqual(16, model["access"]["slots"])
+            self.assertEqual(
+                "deterministic-uniform-hash",
+                model["access"]["slot_selection"],
+            )
+            self.assertEqual(ALOHA_SLOT_RULE, model["access"]["slot_rule"])
+            self.assertEqual(
+                ["iot_seed", "node_id", "frame_index"],
+                model["access"]["slot_key"],
+            )
+            self.assertTrue(model["access"]["energy_treatment_invariant"])
             self.assertEqual(
                 "listening-sensing-processing-wait-slot-transmitting",
                 model["controller"]["data_path"],
