@@ -9,7 +9,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from synthran.research import MeasurementSpec
-from synthran.research.amber_runtime import execute_amber_research_experiment
+from synthran.research.amber_runtime import (
+    AmberResearchMeasurementLifecycle,
+    execute_amber_research_experiment,
+)
 from synthran.research.v2 import AmberResearchSpec, RESEARCH_SUMMARY_SCHEMA_V2
 
 
@@ -18,6 +21,38 @@ class AmberResearchRuntimeTests(unittest.TestCase):
         source = inspect.getsource(execute_amber_research_experiment)
         self.assertNotIn("_runtime_overrides", source)
         self.assertNotIn("_RUNTIME_OVERRIDE_LOCK", source)
+
+    def test_research_cleanup_is_idempotent(self) -> None:
+        spec = AmberResearchSpec(
+            campaign_id="amber-campaign",
+            run_id="amber-research",
+            network_run_id="network-run",
+            condition="baseline",
+            measurement=MeasurementSpec(warmup_seconds=0, duration_seconds=30),
+            probe_target="198.51.100.1",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = AmberResearchMeasurementLifecycle(
+                spec=spec,
+                inventory=MagicMock(),
+                lock=MagicMock(),
+                repository_root=root,
+            )
+            lifecycle.context = SimpleNamespace(
+                run_id=spec.run_id,
+                network_run_id=spec.network_run_id,
+                ue_pod="srsran-ue-test",
+                pdu_address="10.45.0.2",
+                run_directory=root,
+            )
+            with patch(
+                "synthran.research.amber_runtime._parse_probe_log"
+            ) as parse_probe:
+                lifecycle.stop()
+                lifecycle.stop()
+            parse_probe.assert_called_once()
+            self.assertTrue(lifecycle._instrumentation_stopped)
 
     def test_run_passes_explicit_lifecycle_and_total_source_duration(self) -> None:
         spec = AmberResearchSpec(
