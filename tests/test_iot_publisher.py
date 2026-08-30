@@ -76,9 +76,15 @@ class FakeClient:
 class Barrier:
     def __init__(self) -> None:
         self.ready_calls = 0
+        self.start_calls = 0
+        self.sensor_ids: tuple[str, ...] = ()
 
     def wait_ready(self) -> None:
         self.ready_calls += 1
+
+    def wait_start_canaries(self, sensor_ids) -> None:
+        self.start_calls += 1
+        self.sensor_ids = tuple(sensor_ids)
 
 
 def make_plan(root: Path, *, planned_at_ms: tuple[int, ...] = (0, 1000)) -> PreparedIoTPlan:
@@ -148,11 +154,14 @@ class AmberReplayTests(unittest.TestCase):
             session.stop()
 
             self.assertEqual(1, barrier.ready_calls)
+            self.assertEqual(1, barrier.start_calls)
+            self.assertEqual(10, len(barrier.sensor_ids))
             self.assertEqual(10, evidence.client_count)
             self.assertEqual(10, evidence.connected_clients)
             self.assertEqual(10, evidence.start_canaries)
             self.assertEqual(10, evidence.end_canaries)
             self.assertEqual(20, evidence.published_events)
+            self.assertEqual(20, len(session.published_pairs()))
             self.assertTrue(evidence.timing_valid)
             self.assertTrue(evidence.complete)
             self.assertTrue(all(client.disconnected for client in clients))
@@ -211,6 +220,25 @@ class AmberReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(IoTSourceError, "sensor-05"):
                 session.start()
             self.assertTrue(all(client.disconnected for client in clients))
+
+    def test_missing_start_barrier_fails_closed_before_telemetry(self) -> None:
+        class ReadyOnly:
+            def wait_ready(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            records: list[tuple[str, str, int]] = []
+            session = AmberReplaySession(
+                plan=make_plan(root),
+                endpoint=MQTTEndpoint("127.0.0.1", 18886),
+                collector_barrier=ReadyOnly(),
+                client_factory=lambda client_id: FakeClient(client_id, records),
+                clock=FakeClock(),
+            )
+            with self.assertRaisesRegex(IoTSourceError, "start-canary barrier"):
+                session.start()
+            self.assertEqual([], [record for record in records if "/sensor/" in record[0]])
 
 
 if __name__ == "__main__":
