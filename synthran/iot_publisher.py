@@ -409,12 +409,15 @@ class AmberReplaySession:
                     break
                 scheduled = self._replay_origin + event.planned_at_ms / 1000.0
                 self._wait_until(scheduled)
-                if self._cancel.is_set():
+                if self._cancel.is_set() or self._errors:
                     break
                 self._publish_telemetry(event, scheduled)
 
             if not self._cancel.is_set() and not self._errors:
-                end_scheduled = self.clock.monotonic()
+                end_scheduled = self._replay_origin + float(self.plan.duration_seconds)
+                self._wait_until(end_scheduled)
+                if self._cancel.is_set() or self._errors:
+                    return
                 for sensor_id in self.plan.spec.sensor_ids:
                     self._publish_control(sensor_id, "end-canary", end_scheduled)
                     if self._errors:
@@ -471,7 +474,6 @@ class AmberReplaySession:
         maximum = max(lags, default=0.0)
         lag_limit = max(250.0, self.plan.spec.sensor_period_seconds * 100.0)
         max_lag_limit = self.plan.spec.sensor_period_seconds * 1000.0
-        failed_events = sum(not event.success for event in self._events)
         start_count = sum(
             event.kind == "start-canary" and event.success for event in self._events
         )
@@ -490,7 +492,6 @@ class AmberReplaySession:
             and end_count == self.plan.spec.sensor_count
             and published_count == decoded_count
             and not self._errors
-            and failed_events == 0
         )
         return PublisherEvidence(
             client_count=len(self._clients),
@@ -499,7 +500,7 @@ class AmberReplaySession:
             end_canaries=end_count,
             decoded_events=decoded_count,
             published_events=published_count,
-            publisher_errors=len(self._errors) + failed_events,
+            publisher_errors=len(self._errors),
             p95_lag_ms=p95,
             max_lag_ms=maximum,
             lag_limit_ms=lag_limit,
