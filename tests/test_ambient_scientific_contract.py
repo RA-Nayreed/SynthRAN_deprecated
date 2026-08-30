@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import unittest
 
 from synthran.ambient_contract import (
+    ALOHA_SLOT_RULE,
     ENERGY_TRACE_SHA256,
     ambient_model_descriptor,
 )
@@ -26,6 +27,13 @@ class AmbientScientificContractTests(unittest.TestCase):
         model = ambient_model_descriptor(trace)
         self.assertEqual("current-frame-only", model["access"]["frame_scope"])
         self.assertEqual(16, model["access"]["slots"])
+        self.assertEqual("deterministic-uniform-hash", model["access"]["slot_selection"])
+        self.assertEqual(ALOHA_SLOT_RULE, model["access"]["slot_rule"])
+        self.assertEqual(
+            ["iot_seed", "node_id", "frame_index"],
+            model["access"]["slot_key"],
+        )
+        self.assertTrue(model["access"]["energy_treatment_invariant"])
         self.assertEqual(
             "listening-sensing-processing-wait-slot-transmitting",
             model["controller"]["data_path"],
