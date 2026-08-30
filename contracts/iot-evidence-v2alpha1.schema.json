@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synthran.local/contracts/iot-evidence-v2alpha1.schema.json",
+  "title": "SynthRAN portable IoT evidence v2alpha1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema",
+    "run_id",
+    "iot_source",
+    "iot_profile",
+    "iot_seed",
+    "profile_digest",
+    "amber_commit",
+    "amber_checkout_clean",
+    "energy_trace_sha256",
+    "planned_count",
+    "decoded_count",
+    "source_loss_count",
+    "live_transport"
+  ],
+  "properties": {
+    "schema": {"const": "synthran/iot-evidence/v2alpha1"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 63},
+    "iot_source": {"const": "amber"},
+    "iot_profile": {"enum": ["transport-v1", "ambient-v1"]},
+    "iot_seed": {"type": "integer", "minimum": 0},
+    "profile_digest": {"pattern": "^[0-9a-f]{64}$"},
+    "amber_commit": {"pattern": "^[0-9a-f]{40}$"},
+    "amber_checkout_clean": {"const": true},
+    "energy_trace_sha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"pattern": "^[0-9a-f]{64}$"}
+      ]
+    },
+    "planned_count": {"type": "integer", "minimum": 0},
+    "decoded_count": {"type": "integer", "minimum": 0},
+    "source_loss_count": {"type": "integer", "minimum": 0},
+    "planner_stdout": {"type": "string"},
+    "live_transport": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object"}
+      ]
+    }
+  }
+}
