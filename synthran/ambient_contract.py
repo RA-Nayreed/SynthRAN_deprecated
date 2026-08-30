@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from typing import Any
 
 
@@ -41,8 +40,6 @@ ENERGY_TRACE_TIME_LAST = 2.998
 ENERGY_TRACE_TIME_STEP = 0.001
 ENERGY_TRACE_TIME_UNITS = "undeclared-in-workbook"
 
-ENERGY_POWER_SCALE_ENV = "SYNTHRAN_AMBER_ENERGY_POWER_SCALE"
-ENERGY_NODE_VARIATION_ENV = "SYNTHRAN_AMBER_ENERGY_NODE_VARIATION"
 DEFAULT_ENERGY_POWER_SCALE = 1.0
 DEFAULT_ENERGY_NODE_VARIATION = 0.0
 MAX_ENERGY_NODE_VARIATION = 0.5
@@ -77,43 +74,30 @@ NOISE_FIGURE_DB = 6.0
 BANDWIDTH_HZ = 100e6
 
 
-def _environment_float(name: str, default: float) -> float:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
+def validate_energy_treatment(
+    power_scale: float,
+    node_variation: float,
+) -> tuple[float, float]:
+    """Validate and normalize the explicit Ambient-IoT energy treatment."""
+
     try:
-        value = float(raw)
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a finite decimal number") from exc
-    if value != value or value in (float("inf"), float("-inf")):
-        raise ValueError(f"{name} must be finite")
-    return value
-
-
-def energy_treatment() -> tuple[float, float]:
-    """Return the explicit Ambient-IoT harvested-energy treatment.
-
-    The treatment scales only the external environmental harvested power. WPT
-    remains governed by AMBER's radio model. Optional per-node variation is a
-    deterministic symmetric multiplier around one and never consumes AMBER's
-    simulation RNG stream.
-    """
-
-    power_scale = _environment_float(
-        ENERGY_POWER_SCALE_ENV,
-        DEFAULT_ENERGY_POWER_SCALE,
-    )
-    node_variation = _environment_float(
-        ENERGY_NODE_VARIATION_ENV,
-        DEFAULT_ENERGY_NODE_VARIATION,
-    )
-    if not 0.0 < power_scale <= 1.0:
+        scale = float(power_scale)
+        variation = float(node_variation)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Ambient energy treatment must contain decimal numbers") from exc
+    if not math_is_finite(scale) or not math_is_finite(variation):
+        raise ValueError("Ambient energy treatment values must be finite")
+    if not 0.0 < scale <= 1.0:
         raise ValueError("Ambient energy power scale must be in (0, 1]")
-    if not 0.0 <= node_variation <= MAX_ENERGY_NODE_VARIATION:
+    if not 0.0 <= variation <= MAX_ENERGY_NODE_VARIATION:
         raise ValueError(
             f"Ambient energy node variation must be in [0, {MAX_ENERGY_NODE_VARIATION}]"
         )
-    return power_scale, node_variation
+    return scale, variation
+
+
+def math_is_finite(value: float) -> bool:
+    return value == value and value not in (float("inf"), float("-inf"))
 
 
 def deterministic_node_energy_factor(
@@ -125,8 +109,7 @@ def deterministic_node_energy_factor(
 
     if seed < 0 or node_id < 0:
         raise ValueError("energy factor seed and node ID must be non-negative")
-    if not 0.0 <= variation <= MAX_ENERGY_NODE_VARIATION:
-        raise ValueError("energy factor variation is outside the accepted range")
+    _, variation = validate_energy_treatment(1.0, variation)
     if variation == 0.0:
         return 1.0
     digest = hashlib.sha256(
@@ -136,12 +119,20 @@ def deterministic_node_energy_factor(
     return 1.0 + variation * (2.0 * unit - 1.0)
 
 
-def ambient_model_descriptor(energy_trace_sha256: str) -> dict[str, Any]:
-    """Return every result-affecting fixed assumption in ``ambient-v1``."""
+def ambient_model_descriptor(
+    energy_trace_sha256: str,
+    *,
+    energy_power_scale: float = DEFAULT_ENERGY_POWER_SCALE,
+    energy_node_variation: float = DEFAULT_ENERGY_NODE_VARIATION,
+) -> dict[str, Any]:
+    """Return every result-affecting assumption in ``ambient-v1``."""
 
     if energy_trace_sha256 != ENERGY_TRACE_SHA256:
         raise ValueError("ambient energy trace does not match the pinned scientific contract")
-    power_scale, node_variation = energy_treatment()
+    power_scale, node_variation = validate_energy_treatment(
+        energy_power_scale,
+        energy_node_variation,
+    )
     energy: dict[str, Any] = {
         "mode": ENERGY_MODE,
         "combine_mode": ENERGY_COMBINE_MODE,
@@ -162,8 +153,6 @@ def ambient_model_descriptor(energy_trace_sha256: str) -> dict[str, Any]:
         "shared_environmental_trace": True,
     }
     # Preserve the accepted scale=1, zero-variation profile identity exactly.
-    # A non-default treatment is result-affecting and therefore enters the
-    # descriptor/profile digest explicitly.
     if (
         power_scale != DEFAULT_ENERGY_POWER_SCALE
         or node_variation != DEFAULT_ENERGY_NODE_VARIATION
