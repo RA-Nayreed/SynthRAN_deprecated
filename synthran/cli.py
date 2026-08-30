@@ -48,22 +48,16 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
     if run is None:
         raise BackendError("SynthRAN parser does not expose the run command")
     run.add_argument(
-        "--iot-source",
-        choices=(AMBER_SOURCE_ID,),
-        default=AMBER_SOURCE_ID,
-        help="IoT source implementation",
-    )
-    run.add_argument(
         "--iot-profile",
         choices=(TRANSPORT_PROFILE, AMBIENT_PROFILE),
         default=TRANSPORT_PROFILE,
-        help="IoT source profile",
+        help="Amber IoT source profile",
     )
     run.add_argument(
         "--iot-seed",
         type=int,
         default=DEFAULT_IOT_SEED,
-        help="IoT source seed",
+        help="Amber IoT source seed",
     )
     run.add_argument(
         "--sensor-period",
@@ -84,7 +78,7 @@ def _augment_iot_options(parser: argparse.ArgumentParser) -> None:
             "--iot-profile",
             choices=(TRANSPORT_PROFILE, AMBIENT_PROFILE),
             default=TRANSPORT_PROFILE,
-            help="IoT research profile",
+            help="Amber IoT research profile",
         )
 
 
@@ -300,6 +294,7 @@ def _dispatch_amber_research(args: argparse.Namespace) -> int:
 
 @contextmanager
 def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
+    """Bind the unified run backend to Amber for this invocation only."""
     if args.command != "run":
         yield
         return
