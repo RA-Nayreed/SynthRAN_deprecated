@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from synthran.ambient_contract import (
+    DEFAULT_ENERGY_NODE_VARIATION,
+    DEFAULT_ENERGY_POWER_SCALE,
+    validate_energy_treatment,
+)
 from synthran.iot_source import (
     AMBER_SOURCE_ID,
     AMBIENT_PROFILE,
@@ -39,6 +44,8 @@ class AmberResearchSpec:
     iot_seed: int = 424242
     sensor_period_seconds: int = 10
     sensor_count: int = 10
+    energy_power_scale: float = DEFAULT_ENERGY_POWER_SCALE
+    energy_node_variation: float = DEFAULT_ENERGY_NODE_VARIATION
     measurement: MeasurementSpec = MeasurementSpec()
     load: LoadSpec = LoadSpec()
     probe_target: str | None = None
@@ -56,6 +63,21 @@ class AmberResearchSpec:
             raise ResearchError("sensor period must be between 1 and 3600 seconds")
         if self.sensor_count != 10:
             raise ResearchError("controlled Amber research requires exactly 10 sensors")
+        if self.iot_profile == AMBIENT_PROFILE:
+            try:
+                validate_energy_treatment(
+                    self.energy_power_scale,
+                    self.energy_node_variation,
+                )
+            except ValueError as exc:
+                raise ResearchError(str(exc)) from exc
+        elif (
+            self.energy_power_scale != DEFAULT_ENERGY_POWER_SCALE
+            or self.energy_node_variation != DEFAULT_ENERGY_NODE_VARIATION
+        ):
+            raise ResearchError(
+                "energy treatment is valid only for the ambient-v1 profile"
+            )
         if self.condition == "baseline" and self.load.enabled:
             raise ResearchError("baseline condition must not enable background load")
         if self.condition != "baseline" and not self.load.enabled:
@@ -66,6 +88,15 @@ class AmberResearchSpec:
     @property
     def total_source_seconds(self) -> int:
         return self.measurement.warmup_seconds + self.measurement.duration_seconds
+
+    @property
+    def energy_treatment(self) -> dict[str, float] | None:
+        if self.iot_profile != AMBIENT_PROFILE:
+            return None
+        return {
+            "external_power_scale": float(self.energy_power_scale),
+            "node_variation_fraction": float(self.energy_node_variation),
+        }
 
     def to_request_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +109,7 @@ class AmberResearchSpec:
             "iot_seed": self.iot_seed,
             "sensor_period_seconds": self.sensor_period_seconds,
             "sensor_count": self.sensor_count,
+            "energy_treatment": self.energy_treatment,
             "measurement": self.measurement.to_dict(),
             "load": self.load.to_dict(),
             "probe_target": self.probe_target,
@@ -150,6 +182,7 @@ def research_summary_artifact(
         "iot_seed": spec.iot_seed,
         "profile_digest": profile_digest,
         "sensor_period_seconds": spec.sensor_period_seconds,
+        "energy_treatment": spec.energy_treatment,
         "measurement": spec.measurement.to_dict(),
         "source": {
             "planned_opportunities": planned_opportunities,
