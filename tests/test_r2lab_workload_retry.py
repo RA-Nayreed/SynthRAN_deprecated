@@ -186,8 +186,12 @@ class PhysicalWorkloadRetryTests(unittest.TestCase):
             recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
             self.assertTrue(recovery["cleanup_proven"])
             self.assertEqual("central-broker-stage-only", recovery["scope"])
+            self.assertIn(18886, recovery["checks"]["reserved_core_ports_free"])
             self.assertTrue(any("kubectl delete deployment,configmap" in call for call in runner.calls))
             self.assertTrue(any("ssh root@sopnode-f2" in call for call in runner.calls))
+            self.assertTrue(
+                any("python3" in call and "18886" in call for call in runner.calls)
+            )
             self.assertFalse(any("-F /dev/null" in call for call in runner.calls))
             self.assertEqual(
                 f"{RUN_ID}-w2",
