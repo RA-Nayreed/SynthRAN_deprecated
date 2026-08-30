@@ -297,21 +297,209 @@ def _local_port_is_closed(port: int) -> bool:
     return not _proc_has_listener(port)
 
 
+def _remote_listener_pids(
+    inventory: NetworkInventory,
+    ports: Sequence[int],
+) -> dict[int, tuple[int, ...]]:
+    wanted = tuple(sorted({int(port) for port in ports}))
+    if not wanted:
+        return {}
+    script = r'''
+import json, os, sys
+ports = {int(value) for value in sys.argv[1:]}
+inodes = {port: set() for port in ports}
+for table in ('/proc/net/tcp', '/proc/net/tcp6'):
+    try:
+        lines = open(table, encoding='ascii', errors='replace').read().splitlines()[1:]
+    except OSError:
+        continue
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 10 or fields[3] != '0A':
+            continue
+        try:
+            port = int(fields[1].rsplit(':', 1)[1], 16)
+        except (ValueError, IndexError):
+            continue
+        if port in ports:
+            inodes[port].add(fields[9])
+result = {port: set() for port in ports}
+for entry in os.listdir('/proc'):
+    if not entry.isdigit():
+        continue
+    fd_root = f'/proc/{entry}/fd'
+    try:
+        names = os.listdir(fd_root)
+    except (FileNotFoundError, PermissionError, OSError):
+        continue
+    for name in names:
+        try:
+            target = os.readlink(f'{fd_root}/{name}')
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        if not target.startswith('socket:[') or not target.endswith(']'):
+            continue
+        inode = target[8:-1]
+        for port, values in inodes.items():
+            if inode in values:
+                result[port].add(int(entry))
+print(json.dumps({str(port): sorted(values) for port, values in result.items()}, sort_keys=True))
+'''
+    try:
+        command = ssh_command(
+            inventory.core_node,
+            "python3",
+            "-c",
+            script,
+            *(str(port) for port in wanted),
+        )
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    result = _run(command, timeout_seconds=10)
+    if result.returncode != 0:
+        raise ExperimentError("remote listener ownership probe failed")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ExperimentError("remote listener ownership probe returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ExperimentError("remote listener ownership probe returned invalid data")
+    observed: dict[int, tuple[int, ...]] = {}
+    for port in wanted:
+        values = payload.get(str(port), [])
+        if not isinstance(values, list) or not all(
+            isinstance(value, int) and value > 1 for value in values
+        ):
+            raise ExperimentError("remote listener ownership probe returned invalid PIDs")
+        observed[port] = tuple(sorted(set(values)))
+    return observed
+
+
+def _signal_remote_pids(
+    inventory: NetworkInventory,
+    pids: Sequence[int],
+    *,
+    signal_number: int,
+) -> None:
+    targets = tuple(sorted({int(pid) for pid in pids if int(pid) > 1}))
+    if not targets:
+        return
+    script = r'''
+import os, sys
+signum = int(sys.argv[1])
+for value in sys.argv[2:]:
+    try:
+        os.kill(int(value), signum)
+    except (ProcessLookupError, PermissionError, ValueError):
+        pass
+'''
+    try:
+        command = ssh_command(
+            inventory.core_node,
+            "python3",
+            "-c",
+            script,
+            str(signal_number),
+            *(str(pid) for pid in targets),
+        )
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    result = _run(command, timeout_seconds=10)
+    if result.returncode != 0:
+        raise ExperimentError("owned remote listener termination failed")
+
+
+def _reap_owned_remote_listeners(
+    inventory: NetworkInventory,
+    owned: Mapping[int, Sequence[int]],
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    ports = tuple(sorted(owned))
+    if not ports:
+        return ()
+    try:
+        current = _remote_listener_pids(inventory, ports)
+    except Exception as exc:
+        return (f"remote listener ownership reproof failed: {exc}",)
+
+    for signum, wait_seconds in ((signal.SIGTERM, 3.0), (signal.SIGKILL, 2.0)):
+        targets: set[int] = set()
+        for port in ports:
+            expected = set(int(pid) for pid in owned.get(port, ()))
+            targets.update(expected.intersection(current.get(port, ())))
+        if targets:
+            try:
+                _signal_remote_pids(
+                    inventory,
+                    tuple(sorted(targets)),
+                    signal_number=int(signum),
+                )
+            except Exception as exc:
+                errors.append(f"owned remote listener termination failed: {exc}")
+                break
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline:
+            try:
+                current = _remote_listener_pids(inventory, ports)
+            except Exception as exc:
+                errors.append(f"remote listener ownership reproof failed: {exc}")
+                return tuple(errors)
+            if not any(
+                set(int(pid) for pid in owned.get(port, ())).intersection(
+                    current.get(port, ())
+                )
+                for port in ports
+            ):
+                break
+            time.sleep(0.25)
+        else:
+            continue
+        break
+
+    try:
+        current = _remote_listener_pids(inventory, ports)
+    except Exception as exc:
+        errors.append(f"remote listener ownership reproof failed: {exc}")
+        return tuple(errors)
+    for port in ports:
+        remaining = current.get(port, ())
+        if remaining:
+            expected = set(int(pid) for pid in owned.get(port, ()))
+            unexpected = tuple(pid for pid in remaining if pid not in expected)
+            owned_remaining = tuple(pid for pid in remaining if pid in expected)
+            if owned_remaining:
+                errors.append(
+                    f"owned remote listener on port {port} remained after cleanup"
+                )
+            if unexpected:
+                errors.append(
+                    f"remote port {port} is now owned by an unrecognized process"
+                )
+    return tuple(errors)
+
+
 class RfsimEdgeTransportSession:
     def __init__(
         self,
         *,
         inventory: NetworkInventory,
         endpoint: MQTTEndpoint,
+        edge_forward_port: int,
         remote_ingress_port: int,
         snapshot_remote_path: str,
         processes: list[OwnedProcess],
+        owned_remote_pids: Mapping[int, Sequence[int]],
     ) -> None:
         self.inventory = inventory
         self._endpoint = endpoint
+        self.edge_forward_port = edge_forward_port
         self.remote_ingress_port = remote_ingress_port
         self.snapshot_remote_path = snapshot_remote_path
         self.processes = processes
+        self.owned_remote_pids = {
+            int(port): tuple(sorted({int(pid) for pid in pids}))
+            for port, pids in owned_remote_pids.items()
+        }
         self._cleanup_errors: list[str] = []
         self._stopped = False
 
@@ -347,17 +535,34 @@ class RfsimEdgeTransportSession:
                 process.stop()
             except Exception as exc:
                 self._cleanup_errors.append(f"{process.name}: {exc}")
-        deadline = time.monotonic() + 5.0
+
+        deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
-            if _local_port_is_closed(self._endpoint.port) and _remote_port_is_closed(
-                self.inventory, self.remote_ingress_port
+            if (
+                _local_port_is_closed(self._endpoint.port)
+                and _remote_port_is_closed(self.inventory, self.remote_ingress_port)
+                and _remote_port_is_closed(self.inventory, self.edge_forward_port)
             ):
                 break
             time.sleep(0.25)
+
+        if not (
+            _remote_port_is_closed(self.inventory, self.remote_ingress_port)
+            and _remote_port_is_closed(self.inventory, self.edge_forward_port)
+        ):
+            self._cleanup_errors.extend(
+                _reap_owned_remote_listeners(
+                    self.inventory,
+                    self.owned_remote_pids,
+                )
+            )
+
         if not _local_port_is_closed(self._endpoint.port):
             self._cleanup_errors.append("local publisher forward still listens")
         if not _remote_port_is_closed(self.inventory, self.remote_ingress_port):
             self._cleanup_errors.append("remote counted ingress still listens")
+        if not _remote_port_is_closed(self.inventory, self.edge_forward_port):
+            self._cleanup_errors.append("remote edge MQTT forward still listens")
         self._stopped = True
 
     def evidence(self) -> Mapping[str, Any]:
@@ -377,6 +582,10 @@ class RfsimEdgeTransportSession:
                 "host": "127.0.0.1",
                 "port": self.remote_ingress_port,
                 "snapshot": snapshot,
+            },
+            "remote_edge_forward": {
+                "host": "127.0.0.1",
+                "port": self.edge_forward_port,
             },
             "owned_processes": [process.name for process in self.processes],
             "stopped": self._stopped,
@@ -420,6 +629,10 @@ class RfsimEdgeTransportAdapter:
             raise ExperimentError(
                 "RFSIM Amber ingress port is already owned by another process"
             )
+        if not _remote_port_is_closed(self.inventory, self.edge_forward_port):
+            raise ExperimentError(
+                "RFSIM Amber edge-forward port is already owned by another process"
+            )
         if not _local_port_is_closed(self.local_port):
             raise ExperimentError(
                 "RFSIM Amber local publisher port is already owned by another process"
@@ -429,6 +642,7 @@ class RfsimEdgeTransportAdapter:
         snapshot_remote = f"{remote_workspace}/amber-ingress-snapshot.json"
         logs = run_directory / "logs"
         processes: list[OwnedProcess] = []
+        owned_remote_pids: dict[int, tuple[int, ...]] = {}
 
         edge_command = ssh_command(
             self.inventory.core_node,
@@ -451,6 +665,13 @@ class RfsimEdgeTransportAdapter:
                 port=self.edge_forward_port,
                 process=edge_forward,
             )
+            edge_owners = _remote_listener_pids(
+                self.inventory,
+                (self.edge_forward_port,),
+            ).get(self.edge_forward_port, ())
+            if not edge_owners:
+                raise ExperimentError("RFSIM edge MQTT forward ownership could not be proven")
+            owned_remote_pids[self.edge_forward_port] = edge_owners
 
             ingress_command = (
                 f"exec python3 {shlex.quote(ingress_helper)} "
@@ -477,6 +698,13 @@ class RfsimEdgeTransportAdapter:
                 port=self.remote_ingress_port,
                 process=ingress,
             )
+            ingress_owners = _remote_listener_pids(
+                self.inventory,
+                (self.remote_ingress_port,),
+            ).get(self.remote_ingress_port, ())
+            if not ingress_owners:
+                raise ExperimentError("RFSIM counted ingress ownership could not be proven")
+            owned_remote_pids[self.remote_ingress_port] = ingress_owners
 
             local_forward = _start_process(
                 "RFSIM Amber publisher SSH forward",
@@ -496,12 +724,16 @@ class RfsimEdgeTransportAdapter:
         except Exception:
             for process in reversed(processes):
                 process.stop()
+            if owned_remote_pids:
+                _reap_owned_remote_listeners(self.inventory, owned_remote_pids)
             raise
 
         return RfsimEdgeTransportSession(
             inventory=self.inventory,
             endpoint=MQTTEndpoint("127.0.0.1", self.local_port),
+            edge_forward_port=self.edge_forward_port,
             remote_ingress_port=self.remote_ingress_port,
             snapshot_remote_path=snapshot_remote,
             processes=processes,
+            owned_remote_pids=owned_remote_pids,
         )
