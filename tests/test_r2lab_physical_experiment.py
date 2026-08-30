@@ -75,7 +75,8 @@ class R2LabPhysicalScenarioTests(unittest.TestCase):
 
 
 class R2LabPhysicalRelayTests(unittest.TestCase):
-    def test_qfit_relay_command_is_strict_and_binds_outbound_socket_to_wwan0(self) -> None:
+    @patch("synthran.r2lab.controller._configured_identity", return_value=None)
+    def test_qfit_relay_command_is_strict_and_binds_outbound_socket_to_wwan0(self, _identity) -> None:
         command = build_physical_ue_stdio_relay_command(
             slice_name="oulu_user",
             ue="qfit07",
@@ -92,7 +93,8 @@ class R2LabPhysicalRelayTests(unittest.TestCase):
         self.assertIn("physical-iot-001", rendered)
         self.assertIn("198.51.100.10", rendered)
 
-    def test_qmi_qhat_uses_the_same_interface_bound_relay_contract(self) -> None:
+    @patch("synthran.r2lab.controller._configured_identity", return_value=None)
+    def test_qmi_qhat_uses_the_same_interface_bound_relay_contract(self, _identity) -> None:
         command = build_physical_ue_stdio_relay_command(
             slice_name="oulu_user",
             ue="qhat23",
