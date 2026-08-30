@@ -5,7 +5,7 @@ import json
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from synthran.dependencies import GitDependency
 from synthran.iot_source import (
@@ -19,6 +19,7 @@ from synthran.iot_source import (
     IoTSourceError,
     IoTSourceEvent,
     IoTSourceSpec,
+    MQTTEndpoint,
     profile_descriptor,
     profile_digest,
     reconcile_source_and_transport,
@@ -55,16 +56,8 @@ class IoTSourceContractTests(unittest.TestCase):
             )
 
     def test_profile_digest_is_seed_independent_but_period_sensitive(self) -> None:
-        first = IoTSourceSpec(
-            run_id="amber-a",
-            network_run_id="network-test",
-            seed=1,
-        )
-        second = IoTSourceSpec(
-            run_id="amber-b",
-            network_run_id="network-test",
-            seed=99,
-        )
+        first = IoTSourceSpec(run_id="amber-a", network_run_id="network-test", seed=1)
+        second = IoTSourceSpec(run_id="amber-b", network_run_id="network-test", seed=99)
         changed_period = IoTSourceSpec(
             run_id="amber-c",
             network_run_id="network-test",
@@ -296,10 +289,31 @@ class AmberSourceAdapterTests(unittest.TestCase):
             self.assertNotIn("serial_socket_port", scenario)
             self.assertIsNone(evidence["live_transport"])
 
-    def test_live_start_is_explicitly_gated_on_contracts_branch(self) -> None:
+    def test_live_start_returns_portable_session_wrapper(self) -> None:
         adapter = AmberSourceAdapter(repository_root=REPOSITORY_ROOT)
-        with self.assertRaisesRegex(IoTSourceError, "not enabled"):
-            adapter.start(None, None, None)  # type: ignore[arg-type]
+        plan = MagicMock()
+        endpoint = MQTTEndpoint("127.0.0.1", 18886)
+        barrier = MagicMock()
+        replay = MagicMock()
+        replay.start.return_value = replay
+        replay.evidence.return_value.to_dict.return_value = {
+            "client_count": 10,
+            "complete": True,
+        }
+        with patch("synthran.iot_publisher.AmberReplaySession", return_value=replay) as cls:
+            session = adapter.start(plan, endpoint, barrier)
+        cls.assert_called_once_with(
+            plan=plan,
+            endpoint=endpoint,
+            collector_barrier=barrier,
+        )
+        replay.start.assert_called_once_with()
+        self.assertEqual(
+            {"client_count": 10, "complete": True},
+            session.evidence(),
+        )
+        session.stop()
+        replay.stop.assert_called_once_with()
 
 
 if __name__ == "__main__":
