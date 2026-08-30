@@ -126,8 +126,19 @@ class FoundationTests(unittest.TestCase):
             "Capability boundary",
         ):
             self.assertIn(heading, readme)
-        self.assertIn("synthran run --radio rfsim", readme)
-        self.assertIn("synthran run --radio r2lab", readme)
+
+        virtual = readme.split("## Virtual run", 1)[1].split(
+            "## Controlled run on an accepted RFSIM path", 1
+        )[0]
+        self.assertIn("synthran run", virtual)
+        self.assertIn("--radio rfsim", virtual)
+
+        physical = readme.split("## Physical R2Lab run", 1)[1].split(
+            "## Live progress and logs", 1
+        )[0]
+        self.assertIn("synthran run", physical)
+        self.assertIn("--radio r2lab", physical)
+
         for name in (
             "architecture.md",
             "backend-contract.md",
