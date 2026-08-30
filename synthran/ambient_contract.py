@@ -27,7 +27,7 @@ ENERGY_MODE = "hybrid"
 ENERGY_COMBINE_MODE = "max"
 ENERGY_TRACE_COLUMN = "V_IM"
 ENERGY_TRACE_RESISTANCE_OHM = 5000.0
-ENERGY_TRACE_SAMPLE_PERIOD_MS = 1
+ENERGY_TRACE_SIMULATION_ROW_PERIOD_MS = 1
 ENERGY_TRACE_LOOPS = True
 
 CAPACITANCE_F = 300e-6
@@ -94,7 +94,9 @@ def ambient_model_descriptor(energy_trace_sha256: str) -> dict[str, Any]:
             "trace_sha256": energy_trace_sha256,
             "trace_column": ENERGY_TRACE_COLUMN,
             "trace_resistance_ohm": ENERGY_TRACE_RESISTANCE_OHM,
-            "trace_sample_period_ms": ENERGY_TRACE_SAMPLE_PERIOD_MS,
+            "simulation_row_period_ms": ENERGY_TRACE_SIMULATION_ROW_PERIOD_MS,
+            "simulation_replay": "one-trace-row-per-simulation-millisecond",
+            "source_trace_acquisition_period": "not-encoded-by-amber-energy-contract",
             "trace_loops": ENERGY_TRACE_LOOPS,
             "shared_environmental_trace": True,
         },
