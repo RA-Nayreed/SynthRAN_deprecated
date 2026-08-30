@@ -42,6 +42,10 @@ class OperatorBoundaryTests(unittest.TestCase):
                         "rfsim",
                         "--run-id",
                         "boundary-test-001",
+                        "--core-node",
+                        "sopnode-f2",
+                        "--ran-node",
+                        "sopnode-f3",
                     ]
                 ),
             )
