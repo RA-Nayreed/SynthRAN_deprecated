@@ -6,8 +6,11 @@ import unittest
 
 from synthran import cli
 from synthran.ambient_contract import (
+    ALOHA_SLOT_RULE,
+    ALOHA_SLOTS,
     ENERGY_TRACE_SHA256,
     ambient_model_descriptor,
+    deterministic_aloha_slot,
     deterministic_node_energy_factor,
     validate_energy_treatment,
 )
@@ -23,9 +26,14 @@ from synthran.research.v2 import AmberResearchSpec
 
 
 class AmbientEnergyTreatmentContractTests(unittest.TestCase):
-    def test_default_treatment_preserves_existing_profile_descriptor(self) -> None:
+    def test_default_treatment_preserves_explicit_access_contract(self) -> None:
         descriptor = ambient_model_descriptor(ENERGY_TRACE_SHA256)
         self.assertNotIn("treatment", descriptor["energy"])
+        access = descriptor["access"]
+        self.assertEqual("deterministic-uniform-hash", access["slot_selection"])
+        self.assertEqual(ALOHA_SLOT_RULE, access["slot_rule"])
+        self.assertEqual(["iot_seed", "node_id", "frame_index"], access["slot_key"])
+        self.assertTrue(access["energy_treatment_invariant"])
 
     def test_non_default_treatment_is_explicit_in_profile_descriptor(self) -> None:
         descriptor = ambient_model_descriptor(
@@ -47,6 +55,24 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
         self.assertNotEqual(first, other)
         self.assertGreaterEqual(first, 0.85)
         self.assertLessEqual(first, 1.15)
+
+    def test_aloha_slot_rule_is_stable_bounded_and_seeded(self) -> None:
+        expected = [11, 13, 2, 1, 11, 12, 2, 4, 14, 1]
+        actual = [deterministic_aloha_slot(424242, 3, frame) for frame in range(10)]
+        self.assertEqual(expected, actual)
+        self.assertTrue(all(0 <= slot < ALOHA_SLOTS for slot in actual))
+        self.assertEqual(
+            actual,
+            [deterministic_aloha_slot(424242, 3, frame) for frame in range(10)],
+        )
+        self.assertNotEqual(
+            actual,
+            [deterministic_aloha_slot(424243, 3, frame) for frame in range(10)],
+        )
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            deterministic_aloha_slot(424242, -1, 0)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            deterministic_aloha_slot(424242, 0, 0, 0)
 
     def test_invalid_energy_treatment_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "power scale"):
@@ -131,7 +157,7 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
             spec.energy_treatment,
         )
 
-    def test_pinned_amber_plan_records_energy_treatment_and_provenance(self) -> None:
+    def test_pinned_amber_plan_records_treatment_and_preserves_aloha_opportunities(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
         amber_checkout = repository_root / ".deps" / "amber"
         if not (amber_checkout / ".git").exists():
@@ -170,6 +196,20 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
             },
             stressed.spec.energy_treatment,
         )
+
+        def offered_slots(plan):
+            return {
+                (event.planned_at_ms, event.sensor_id): event.slot_index
+                for event in plan.events
+                if event.details.get("collect_received") is True
+            }
+
+        control_slots = offered_slots(control)
+        stressed_slots = offered_slots(stressed)
+        self.assertTrue(control_slots)
+        self.assertEqual(control_slots, stressed_slots)
+        self.assertTrue(all(slot is not None for slot in control_slots.values()))
+
         collect_events = [
             event
             for event in stressed.events
@@ -178,6 +218,15 @@ class AmbientEnergyTreatmentContractTests(unittest.TestCase):
         self.assertTrue(collect_events)
         self.assertTrue(
             all(event.details.get("energy_power_scale") == 0.5 for event in collect_events)
+        )
+        self.assertTrue(
+            all(event.details.get("aloha_slot_rule") == ALOHA_SLOT_RULE for event in collect_events)
+        )
+        self.assertTrue(
+            all(
+                event.details.get("aloha_frame_index") == event.sequence - 1
+                for event in collect_events
+            )
         )
         self.assertTrue(
             all(
