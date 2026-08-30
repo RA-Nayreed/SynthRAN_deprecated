@@ -6,8 +6,7 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-from synthran.cli import _parser, _selected_iot_runtime
-from synthran.operator import PUBLIC_COMMANDS
+from synthran.cli import PUBLIC_COMMANDS, _parser, _selected_iot_runtime
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -31,19 +30,36 @@ class CliTests(unittest.TestCase):
         )
 
     def test_public_surface_is_intentionally_small(self) -> None:
-        self.assertEqual(set(PUBLIC_COMMANDS), _top_level_choices(_parser()))
-        self.assertEqual(
-            {"run", "doctor", "inspect", "logs", "stop", "research", "deps", "dev"},
-            set(PUBLIC_COMMANDS),
-        )
+        expected = {
+            "run",
+            "doctor",
+            "calibrate",
+            "inspect",
+            "logs",
+            "analyze",
+            "release",
+            "deps",
+            "dev",
+        }
+        self.assertEqual(expected, set(PUBLIC_COMMANDS))
+        self.assertEqual(expected, _top_level_choices(_parser()))
 
     def test_removed_command_groups_do_not_parse(self) -> None:
         parser = _parser()
-        for command in ("r2lab", "network", "experiment", "slices", "privacy", "hooks"):
+        for command in (
+            "research",
+            "stop",
+            "r2lab",
+            "network",
+            "experiment",
+            "slices",
+            "privacy",
+            "hooks",
+        ):
             with self.subTest(command=command), self.assertRaises(SystemExit):
                 parser.parse_args([command])
 
-    def test_run_selects_rfsim_and_defaults_to_cooja_source(self) -> None:
+    def test_full_lifecycle_run_selects_rfsim_and_defaults_to_cooja(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -59,41 +75,132 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual("run", args.command)
         self.assertEqual("rfsim", args.radio)
-        self.assertIsNone(args.device)
-        self.assertIsNone(args.ue)
         self.assertEqual("cooja", args.iot_source)
         self.assertEqual("transport-v1", args.iot_profile)
         self.assertEqual(424242, args.iot_seed)
         self.assertEqual(10, args.sensor_period)
+        self.assertEqual(1.0, args.energy_power_scale)
+        self.assertEqual(0.0, args.energy_node_variation)
 
-    def test_run_parses_explicit_amber_profile_seed_and_period(self) -> None:
+    def test_controlled_ambient_measurement_is_a_run(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
-                "--radio",
-                "rfsim",
-                "--core-node",
-                "sopnode-f2",
-                "--ran-node",
-                "sopnode-f3",
+                "--campaign-id",
+                "campaign-001",
+                "--network-run-id",
+                "virtual-001",
                 "--run-id",
-                "amber-001",
-                "--iot-source",
-                "amber",
+                "measurement-001",
+                "--condition",
+                "baseline",
+                "--inventory",
+                "hosts.ini",
+                "--probe-target",
+                "198.51.100.1",
                 "--iot-profile",
                 "ambient-v1",
-                "--iot-seed",
-                "17",
+                "--seed",
+                "77",
                 "--sensor-period",
-                "12",
+                "20",
+                "--energy-power-scale",
+                "0.42",
             ]
         )
-        self.assertEqual("amber", args.iot_source)
+        self.assertEqual("run", args.command)
+        self.assertIsNone(args.radio)
+        self.assertEqual("virtual-001", args.network_run_id)
+        self.assertEqual("baseline", args.condition)
         self.assertEqual("ambient-v1", args.iot_profile)
-        self.assertEqual(17, args.iot_seed)
-        self.assertEqual(12, args.sensor_period)
+        self.assertEqual(77, args.iot_seed)
+        self.assertEqual(20, args.sensor_period)
+        self.assertEqual(0.42, args.energy_power_scale)
 
-    def test_cooja_selection_does_not_replace_experiment_runtime(self) -> None:
+    def test_run_plan_replaces_research_plan(self) -> None:
+        args = _parser().parse_args(
+            [
+                "run",
+                "--plan",
+                "--campaign-id",
+                "campaign-001",
+                "--network-run-id",
+                "virtual-001",
+                "--run-id",
+                "measurement-001",
+                "--condition",
+                "baseline",
+                "--iot-profile",
+                "ambient-v1",
+            ]
+        )
+        self.assertTrue(args.plan)
+        self.assertEqual("run", args.command)
+
+    def test_campaign_plan_and_execution_share_run_surface(self) -> None:
+        args = _parser().parse_args(
+            [
+                "run",
+                "--campaign-id",
+                "campaign-001",
+                "--network-run-id",
+                "virtual-001",
+                "--seeds",
+                "1,2,3",
+                "--conditions",
+                "baseline,load50=0.5",
+                "--campaign-seed",
+                "123",
+                "--inventory",
+                "hosts.ini",
+                "--probe-target",
+                "198.51.100.1",
+                "--iot-profile",
+                "ambient-v1",
+            ]
+        )
+        self.assertEqual("run", args.command)
+        self.assertEqual("1,2,3", args.seeds)
+        self.assertEqual("baseline,load50=0.5", args.conditions)
+        self.assertEqual(123, args.campaign_seed)
+
+    def test_capacity_calibration_is_top_level(self) -> None:
+        args = _parser().parse_args(
+            [
+                "calibrate",
+                "--inventory",
+                "hosts.ini",
+                "--network-run-id",
+                "virtual-001",
+                "--target",
+                "198.51.100.1",
+                "--out",
+                "capacity.json",
+            ]
+        )
+        self.assertEqual("calibrate", args.command)
+        self.assertEqual("virtual-001", args.network_run_id)
+        self.assertEqual(Path("capacity.json"), args.out)
+
+    def test_analysis_is_top_level(self) -> None:
+        args = _parser().parse_args(
+            [
+                "analyze",
+                "--campaign",
+                "campaign.json",
+                "--out",
+                "analysis.json",
+            ]
+        )
+        self.assertEqual("analyze", args.command)
+        self.assertEqual(Path("campaign.json"), args.campaign)
+
+    def test_release_replaces_stop(self) -> None:
+        args = _parser().parse_args(["release", "--run-id", "physical-001"])
+        self.assertEqual("release", args.command)
+        self.assertEqual("physical-001", args.run_id)
+
+    def test_cooja_lifecycle_does_not_replace_experiment_runtime(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -114,7 +221,7 @@ class CliTests(unittest.TestCase):
             self.assertIs(original, command_runtime._experiment_run)
         self.assertIs(original, command_runtime._experiment_run)
 
-    def test_amber_rfsim_runtime_is_restored_after_scope(self) -> None:
+    def test_amber_rfsim_lifecycle_runtime_is_restored_after_scope(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -128,6 +235,10 @@ class CliTests(unittest.TestCase):
                 "amber-001",
                 "--iot-source",
                 "amber",
+                "--iot-profile",
+                "ambient-v1",
+                "--energy-power-scale",
+                "0.42",
             ]
         )
         from synthran import command_runtime
@@ -136,6 +247,28 @@ class CliTests(unittest.TestCase):
         with _selected_iot_runtime(args):
             self.assertIsNot(original, command_runtime._experiment_run)
         self.assertIs(original, command_runtime._experiment_run)
+
+    def test_controlled_run_does_not_patch_lifecycle_runtime(self) -> None:
+        args = _parser().parse_args(
+            [
+                "run",
+                "--campaign-id",
+                "campaign-001",
+                "--network-run-id",
+                "virtual-001",
+                "--run-id",
+                "measurement-001",
+                "--condition",
+                "baseline",
+                "--iot-profile",
+                "ambient-v1",
+            ]
+        )
+        from synthran import command_runtime
+
+        original = command_runtime._experiment_run
+        with _selected_iot_runtime(args):
+            self.assertIs(original, command_runtime._experiment_run)
 
     def test_amber_physical_runtime_passes_source_settings_and_restores_scope(self) -> None:
         args = _parser().parse_args(
@@ -179,133 +312,7 @@ class CliTests(unittest.TestCase):
             sensor_period_seconds=12,
         )
 
-    def test_run_selects_physical_backend(self) -> None:
-        args = _parser().parse_args(
-            [
-                "run",
-                "--radio",
-                "r2lab",
-                "--device",
-                "n300",
-                "--ue",
-                "qfit07",
-                "--core-node",
-                "sopnode-f2",
-                "--ran-node",
-                "sopnode-f3",
-                "--run-id",
-                "physical-001",
-            ]
-        )
-        self.assertEqual("r2lab", args.radio)
-        self.assertEqual("n300", args.device)
-        self.assertEqual("qfit07", args.ue)
-
-    def test_research_is_top_level(self) -> None:
-        args = _parser().parse_args(
-            [
-                "research",
-                "campaign-plan",
-                "--campaign-id",
-                "campaign-001",
-                "--network-run-id",
-                "virtual-001",
-                "--seeds",
-                "1,2,3",
-                "--conditions",
-                "baseline,load50=0.5",
-                "--campaign-seed",
-                "123",
-                "--out",
-                "campaign.json",
-            ]
-        )
-        self.assertEqual("research", args.command)
-        self.assertEqual("campaign-plan", args.research_command)
-
-    def test_legacy_research_run_omits_iot_profile(self) -> None:
-        args = _parser().parse_args(
-            [
-                "research",
-                "run",
-                "--campaign-id",
-                "campaign-001",
-                "--network-run-id",
-                "virtual-001",
-                "--run-id",
-                "research-001",
-                "--condition",
-                "baseline",
-                "--probe-target",
-                "198.51.100.1",
-                "--inventory",
-                "hosts.ini",
-            ]
-        )
-        self.assertIsNone(args.iot_profile)
-        self.assertEqual(424242, args.seed)
-        self.assertEqual(10, args.sensor_period)
-
-    def test_amber_research_keeps_seed_flag_for_iot_seed_compatibility(self) -> None:
-        args = _parser().parse_args(
-            [
-                "research",
-                "run",
-                "--campaign-id",
-                "campaign-001",
-                "--network-run-id",
-                "virtual-001",
-                "--run-id",
-                "research-001",
-                "--condition",
-                "baseline",
-                "--probe-target",
-                "198.51.100.1",
-                "--inventory",
-                "hosts.ini",
-                "--iot-profile",
-                "ambient-v1",
-                "--seed",
-                "77",
-                "--sensor-period",
-                "20",
-            ]
-        )
-        self.assertEqual("ambient-v1", args.iot_profile)
-        self.assertEqual(77, args.seed)
-        self.assertEqual(20, args.sensor_period)
-
-    def test_amber_campaign_and_analysis_accept_profile_selection(self) -> None:
-        campaign = _parser().parse_args(
-            [
-                "research",
-                "campaign-run",
-                "--campaign",
-                "campaign.json",
-                "--inventory",
-                "hosts.ini",
-                "--target",
-                "198.51.100.1",
-                "--iot-profile",
-                "transport-v1",
-            ]
-        )
-        analyze = _parser().parse_args(
-            [
-                "research",
-                "analyze",
-                "--campaign",
-                "campaign.json",
-                "--out",
-                "analysis.json",
-                "--iot-profile",
-                "transport-v1",
-            ]
-        )
-        self.assertEqual("transport-v1", campaign.iot_profile)
-        self.assertEqual("transport-v1", analyze.iot_profile)
-
-    def test_repository_maintenance_is_namespaced(self) -> None:
+    def test_repository_maintenance_remains_namespaced(self) -> None:
         args = _parser().parse_args(["dev", "privacy", "scan", "--worktree"])
         self.assertEqual("dev", args.command)
         self.assertEqual("privacy", args.dev_command)
