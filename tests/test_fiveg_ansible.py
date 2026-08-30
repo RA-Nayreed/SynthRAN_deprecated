@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from synthran.dependencies import load_lock
-from synthran.cli import _parser
+from synthran.cli import _parser, main as cli_main
 from synthran.fiveg_ansible import (
     FiveGAnsibleError,
     PLAN_SCHEMA,
@@ -165,24 +165,18 @@ class DeploymentPlanTests(unittest.TestCase):
         self.assertIn("fiveg-ansible", failed)
         self.assertNotIn(directory, report.render())
 
-    def test_unified_run_parser_requires_lifecycle_identity(self) -> None:
+    def test_unified_run_validates_lifecycle_identity_after_mode_selection(self) -> None:
         stderr = StringIO()
         clean_env = {
             key: value
             for key, value in os.environ.items()
             if not key.startswith("SYNTHRAN_")
         }
-        with (
-            patch.dict(os.environ, clean_env, clear=True),
-            redirect_stderr(stderr),
-            self.assertRaises(SystemExit) as raised,
-        ):
-            _parser().parse_args(["run", "--radio", "rfsim"])
-        self.assertEqual(2, raised.exception.code)
+        with patch.dict(os.environ, clean_env, clear=True), redirect_stderr(stderr):
+            result = cli_main(["run", "--radio", "rfsim"])
+        self.assertEqual(2, result)
         message = stderr.getvalue()
-        self.assertIn("--run-id", message)
-        self.assertIn("--core-node", message)
-        self.assertIn("--ran-node", message)
+        self.assertIn("full lifecycle run requires --run-id", message)
 
         with patch.dict(os.environ, clean_env, clear=True):
             args = _parser().parse_args(
