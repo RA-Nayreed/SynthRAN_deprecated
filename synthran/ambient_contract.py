@@ -30,8 +30,9 @@ ENERGY_TRACE_TIME_COLUMN = "Time"
 ENERGY_TRACE_RESISTANCE_OHM = 5000.0
 ENERGY_TRACE_SIMULATION_ROW_PERIOD_MS = 1
 ENERGY_TRACE_LOOPS = True
-# Observed from the pinned workbook.  AMBER ignores the Time column and advances
-# one V_IM row per env.timeout(1); we validate the stored axis independently.
+ENERGY_TRACE_SHA256 = "0647749f8a290f96e8b450bf61fe7a893139e16ca57a2d8fa327f6cddbd4fc73"
+# Observed from this exact pinned workbook. AMBER ignores the Time column and
+# advances one V_IM row per env.timeout(1); the stored axis has no declared unit.
 ENERGY_TRACE_EXPECTED_ROWS = 2999
 ENERGY_TRACE_TIME_FIRST = 0.0
 ENERGY_TRACE_TIME_LAST = 2.998
@@ -71,8 +72,8 @@ BANDWIDTH_HZ = 100e6
 def ambient_model_descriptor(energy_trace_sha256: str) -> dict[str, Any]:
     """Return every result-affecting fixed assumption in ``ambient-v1``."""
 
-    if len(energy_trace_sha256) != 64:
-        raise ValueError("ambient energy trace digest must be sha256 hex")
+    if energy_trace_sha256 != ENERGY_TRACE_SHA256:
+        raise ValueError("ambient energy trace does not match the pinned scientific contract")
     return {
         "radio": {
             "frequency_hz": FREQUENCY_HZ,
