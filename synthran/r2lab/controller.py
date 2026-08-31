@@ -11,13 +11,6 @@ from typing import Sequence
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.provider import R2LabQfitStateError, qfit_node_number
 from synthran.utils.ssh import strict_ssh_command
-from synthran.workspace.model import WorkspaceError
-from synthran.workspace.store import (
-    DEFAULT_PROFILE_NAME,
-    load_profile,
-    resolve_identity_reference,
-    verify_profile_identity,
-)
 
 
 R2LAB_GATEWAY = "faraday.inria.fr"
@@ -38,29 +31,16 @@ def _validate_slice(value: str) -> str:
     return value
 
 
-def _configured_identity(slice_name: str) -> Path | None:
-    """Resolve the live R2Lab SSH identity without persisting its path in evidence."""
+def _configured_identity() -> Path | None:
+    """Resolve an explicitly configured R2Lab SSH identity, if one is needed."""
 
-    slice_name = _validate_slice(slice_name)
     override = os.environ.get("SYNTHRAN_R2LAB_IDENTITY")
-    if override:
-        return Path(override).expanduser().resolve()
-
-    try:
-        profile = load_profile(DEFAULT_PROFILE_NAME)
-    except WorkspaceError:
+    if not override:
         return None
-    if profile.r2lab_identity is None:
-        return None
-    if profile.r2lab_slice is not None and profile.r2lab_slice != slice_name:
-        raise R2LabResourceError(
-            "configured R2Lab SSH identity belongs to a different profile slice"
-        )
-    try:
-        verify_profile_identity(profile)
-    except WorkspaceError as exc:
-        raise R2LabResourceError("configured R2Lab SSH identity could not be verified") from exc
-    return resolve_identity_reference(profile.r2lab_identity)
+    identity = Path(override).expanduser().resolve()
+    if not identity.is_file():
+        raise R2LabResourceError("SYNTHRAN_R2LAB_IDENTITY does not name a file")
+    return identity
 
 
 def subprocess_runner(command: Sequence[str], timeout_seconds: int) -> CommandResult:
@@ -90,7 +70,7 @@ def gateway_command(slice_name: str, *remote: str) -> tuple[str, ...]:
         return strict_ssh_command(
             f"{slice_name}@{R2LAB_GATEWAY}",
             *remote,
-            identity=_configured_identity(slice_name),
+            identity=_configured_identity(),
             isolated_config=True,
         )
     except ValueError as exc:
