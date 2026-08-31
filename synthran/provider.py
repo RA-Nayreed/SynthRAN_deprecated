@@ -13,8 +13,6 @@ from synthran.slices_controller import (
     subprocess_runner as slices_runner,
     verify_slices_controller,
 )
-from synthran.workspace.model import WorkspaceError
-from synthran.workspace.store import find_workspace_root, load_workspace
 
 
 _SLICES_DURATION_RE = re.compile(r"^[1-9][0-9]*(?:m|h)$")
@@ -25,12 +23,9 @@ def ensure_slices_provider_context(args: argparse.Namespace) -> tuple[str, str, 
 
     project = getattr(args, "slices_project", None)
     if not project:
-        try:
-            project = load_workspace(find_workspace_root()).project
-        except WorkspaceError as exc:
-            raise BackendError(
-                "run requires a persisted workspace project, --slices-project, or SYNTHRAN_SLICES_PROJECT"
-            ) from exc
+        raise BackendError(
+            "run requires --slices-project or SYNTHRAN_SLICES_PROJECT"
+        )
 
     experiment = getattr(args, "slices_experiment", None) or str(args.run_id)
     duration = str(getattr(args, "slices_duration", "4h"))
