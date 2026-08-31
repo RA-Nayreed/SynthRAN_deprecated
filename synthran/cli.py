@@ -33,6 +33,7 @@ from synthran.research.amber_campaign import (
 )
 from synthran.research.amber_runtime import execute_amber_research_experiment
 from synthran.research.v2 import AmberResearchSpec
+from synthran.run_events import RunEventStream
 
 
 PUBLIC_COMMANDS = (
@@ -40,7 +41,6 @@ PUBLIC_COMMANDS = (
     "doctor",
     "calibrate",
     "inspect",
-    "logs",
     "analyze",
     "release",
     "deps",
@@ -453,38 +453,48 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
             print(f"\nCampaign schedule: {campaign_path}")
             print("Execution action: none")
             return 0
-        manifest, evidence = command_runtime._network_paths(
-            args.network_run_root,
-            campaign.network_run_id,
+        stream = RunEventStream(
+            run_id=campaign.campaign_id,
+            radio="rfsim",
+            terminal=sys.stdout,
         )
-        result_path = execute_amber_campaign(
-            campaign=campaign,
-            iot_profile=args.iot_profile,
-            energy_power_scale=args.energy_power_scale,
-            energy_node_variation=args.energy_node_variation,
-            inventory=command_runtime.load_inventory(args.inventory),
-            lock=command_runtime.load_lock(args.lock),
-            dependency_root=args.deps_root,
-            network_manifest=manifest,
-            network_evidence=evidence,
-            repository_root=command_runtime.repository_root(),
-            run_root=args.experiment_root,
-            target=args.probe_target,
-            reference_capacity_bps=args.reference_capacity_bps,
-            sensor_period_seconds=args.sensor_period,
-            measurement=MeasurementSpec(
-                warmup_seconds=args.warmup_seconds,
-                duration_seconds=args.duration_seconds,
-                sample_interval_seconds=args.sample_interval,
-                probe_interval_seconds=args.probe_interval,
-            ),
-            parallel_flows=args.parallel_flows,
-            load_port=args.load_port,
-            progress=sys.stdout,
-        )
-        print(f"Campaign schedule: {campaign_path}")
-        print(f"Amber campaign result: {result_path}")
-        return 0
+        stream.emit("→ workload: controlled AMBER campaign", stage="workload", event="started")
+        try:
+            manifest, evidence = command_runtime._network_paths(
+                args.network_run_root,
+                campaign.network_run_id,
+            )
+            result_path = execute_amber_campaign(
+                campaign=campaign,
+                iot_profile=args.iot_profile,
+                energy_power_scale=args.energy_power_scale,
+                energy_node_variation=args.energy_node_variation,
+                inventory=command_runtime.load_inventory(args.inventory),
+                lock=command_runtime.load_lock(args.lock),
+                dependency_root=args.deps_root,
+                network_manifest=manifest,
+                network_evidence=evidence,
+                repository_root=command_runtime.repository_root(),
+                run_root=args.experiment_root,
+                target=args.probe_target,
+                reference_capacity_bps=args.reference_capacity_bps,
+                sensor_period_seconds=args.sensor_period,
+                measurement=MeasurementSpec(
+                    warmup_seconds=args.warmup_seconds,
+                    duration_seconds=args.duration_seconds,
+                    sample_interval_seconds=args.sample_interval,
+                    probe_interval_seconds=args.probe_interval,
+                ),
+                parallel_flows=args.parallel_flows,
+                load_port=args.load_port,
+                progress=stream,
+            )
+            stream.emit("✓ workload: campaign accepted", stage="workload", event="completed")
+            stream.emit(f"  campaign: {campaign_path}", stage="acceptance")
+            stream.emit(f"  result: {result_path}", stage="acceptance")
+            return 0
+        finally:
+            stream.flush()
 
     spec = _amber_research_spec(args)
     if args.plan:
@@ -495,23 +505,35 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
         print(json.dumps(value, indent=2, sort_keys=True))
         print("\nExecution action: none")
         return 0
-    manifest, evidence = command_runtime._network_paths(
-        args.network_run_root,
-        spec.network_run_id,
+
+    stream = RunEventStream(run_id=spec.run_id, radio="rfsim", terminal=sys.stdout)
+    stream.emit(
+        f"→ workload: controlled AMBER {spec.condition}",
+        stage="workload",
+        event="started",
     )
-    summary_path = execute_amber_research_experiment(
-        spec=spec,
-        inventory=command_runtime.load_inventory(args.inventory),
-        lock=command_runtime.load_lock(args.lock),
-        dependency_root=args.deps_root,
-        network_manifest=manifest,
-        network_evidence=evidence,
-        repository_root=command_runtime.repository_root(),
-        run_root=args.experiment_root,
-        progress=sys.stdout,
-    )
-    print(f"Amber research summary: {summary_path}")
-    return 0
+    try:
+        manifest, evidence = command_runtime._network_paths(
+            args.network_run_root,
+            spec.network_run_id,
+        )
+        summary_path = execute_amber_research_experiment(
+            spec=spec,
+            inventory=command_runtime.load_inventory(args.inventory),
+            lock=command_runtime.load_lock(args.lock),
+            dependency_root=args.deps_root,
+            network_manifest=manifest,
+            network_evidence=evidence,
+            repository_root=command_runtime.repository_root(),
+            run_root=args.experiment_root,
+            progress=stream,
+        )
+        stream.emit("✓ workload: accepted", stage="workload", event="completed")
+        stream.emit("✓ experiment accepted", stage="acceptance", event="completed")
+        stream.emit(f"  evidence: {summary_path}", stage="acceptance")
+        return 0
+    finally:
+        stream.flush()
 
 
 def _dispatch_capacity_calibration(args: argparse.Namespace) -> int:
@@ -649,5 +671,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         with _selected_iot_runtime(args):
             return dispatch(args)
     except (BackendError, ResearchError, R2LabTopologyResourceError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        prefix = "[synthran] ✗ run: " if args.command == "run" else "error: "
+        print(f"{prefix}{exc}", file=sys.stderr)
         return 2
