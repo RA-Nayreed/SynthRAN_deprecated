@@ -30,8 +30,8 @@ class ModuleLayoutTests(unittest.TestCase):
             "backends/unified_run.py",
             "run_events.py",
             "experiment/__init__.py",
+            "experiment/live.py",
             "experiment/resources.py",
-            "experiment/runtime.py",
             "network/__init__.py",
             "network/runtime.py",
             "network/resources.py",
@@ -77,6 +77,7 @@ class ModuleLayoutTests(unittest.TestCase):
         }
         present = {path.name for path in SOURCE.iterdir() if path.is_file()}
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
+        self.assertFalse((SOURCE / "experiment" / "runtime.py").exists())
 
     def test_superseded_r2lab_stack_does_not_return(self) -> None:
         r2lab = SOURCE / "r2lab"
