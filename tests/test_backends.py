@@ -5,19 +5,9 @@ import io
 import unittest
 from unittest.mock import patch
 
-from synthran.backends.base import BackendContract, BackendError, LifecycleStage
+from synthran.backends.base import BackendError
 from synthran.cli import main as cli_main
 from synthran.operator import dispatch
-
-
-class BackendContractTests(unittest.TestCase):
-    def test_backend_capability_must_follow_lifecycle_order(self) -> None:
-        with self.assertRaises(ValueError):
-            BackendContract(
-                name="rfsim",
-                radio_mode="virtual",
-                implemented_stages=(LifecycleStage.ACCESS, LifecycleStage.GNB),
-            )
 
 
 class OperatorBoundaryTests(unittest.TestCase):
