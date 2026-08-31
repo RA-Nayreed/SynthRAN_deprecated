@@ -13,15 +13,15 @@ SynthRAN is an experiment-control and evidence layer around external provider, r
           |                                   |
  SLICES compute resources              active R2Lab lease
  Open5GS + srsRAN/RFSIM                 exact N3xx + UE claim
- srsUE packet endpoint                  Open5GS + N3xx gNB
+ srsUE PDU endpoint                     Open5GS + N3xx gNB
           |                              physical UE/PDU
           +-----------------+-----------------+
                             |
-                 deterministic IoT workload
+                 selected IoT workload
                             |
                     accepted evidence
                             |
-                 JSONL + Parquet + logs
+                   JSONL + Parquet
 ```
 
 There is one installed executable and one lifecycle command: `synthran run`. RFSIM and R2Lab are implementations selected by `--radio`; they are not independent applications.
@@ -32,51 +32,53 @@ The supported top-level commands are:
 
 ```text
 run
- doctor
+doctor
+calibrate
 inspect
-logs
-stop
-research
+analyze
+release
 deps
 dev
 ```
 
-Only `run` performs the complete experiment lifecycle. `doctor` is read-only, `inspect` reads capabilities/evidence, `logs` reads the persisted event stream, and `stop` releases exact resources owned by a run. Research and repository-maintenance commands are separate because they operate on accepted evidence or source state rather than constructing another network lifecycle.
+Only `run` performs an experiment lifecycle. `doctor` is read-only, `inspect` reads capabilities/evidence, `calibrate` measures accepted RAN/UE-path capacity, `analyze` consumes persisted research evidence, and `release` performs exact persistent-resource cleanup where supported.
 
-Backend-specific resource preparation, Open5GS reconciliation, gNB staging, UE activation, PDU proof, and cleanup functions are Python implementation boundaries. They are deliberately not separate public command groups.
+There is no second public live-log command. Runtime progress belongs to `run`.
 
-## Run orchestration
+Backend-specific resource preparation, Open5GS reconciliation, gNB staging, UE activation, PDU verification, and cleanup functions are Python implementation boundaries. They are deliberately not separate public command groups.
 
-A run executes the following logical sequence:
+## Public run lifecycle
+
+A run is rendered through the same logical lifecycle on both backends:
 
 ```text
-provider context
--> resource authority
--> 5G foundation
--> radio/gNB path
--> UE/PDU/user-plane proof
--> deterministic workload
+provider
+-> infrastructure
+-> network
+-> workload
 -> acceptance
--> exact cleanup
+-> cleanup (when applicable)
 ```
 
-The concrete work differs by backend.
+Backend-specific sub-boundaries remain visible only when they provide useful operator state.
 
 ### RFSIM
 
-The virtual implementation composes the established SLICES path:
+The virtual implementation composes:
 
 ```text
 provider experiment
 -> reservation/allocation
--> live preflight
+-> node/Kubernetes/tool preparation
 -> Open5GS + srsRAN/RFSIM deployment
--> srsUE/PDU path proof
--> deterministic IoT workload
+-> live 5G session readiness
+   (gNB + srsUE + PDU + UPF route)
+-> selected IoT workload
+-> workload transport proof through the live PDU endpoint
 -> experiment evidence
 ```
 
-The existing deployment and experiment functions remain reusable internal services. Their historical CLI wrappers were removed when `synthran run` became the sole lifecycle entry.
+Network/session readiness is intentionally distinct from end-to-end workload transport. The readiness gate proves the live components and routing state. The workload transport gate uses a connection or traffic source explicitly bound to the live UE PDU address.
 
 ### R2Lab
 
@@ -86,14 +88,13 @@ The physical implementation composes:
 provider experiment
 -> active R2Lab lease
 -> exact N3xx + UE claim
--> selected compute-node authority
--> Kubernetes/Open5GS foundation
+-> selected compute-node/Open5GS foundation
 -> stopped pinned N3xx gNB render
 -> singleton gNB + stable N2
 -> selected UE activation
--> registration + PDU
--> route-bound user-plane proof
--> deterministic IoT workload
+-> registration + PDU state
+-> route-bound user-plane verification
+-> selected IoT workload
 -> exact physical cleanup
 ```
 
@@ -115,27 +116,48 @@ All long Ansible execution uses:
 synthran.ansible_streaming.run_streaming_ansible_command
 ```
 
-The shared streamer:
+The shared adapter:
 
-- captures stdout/stderr without a shell;
-- emits only reviewed, operator-useful task names;
-- keeps failures visible even when routine task chatter is suppressed;
-- emits heartbeats for long tasks;
-- returns complete command output for sanitized run logs and evidence.
+- captures complete subprocess output for forensic evidence;
+- treats PLAY/TASK headers as implementation metadata, not execution proof;
+- suppresses a task if Ansible subsequently reports it skipped;
+- promotes only reviewed operator-useful work;
+- emits heartbeats for long meaningful tasks;
+- keeps failures visible with bounded sanitized task/host/state/reason context.
 
-It is used by virtual deployment, physical Open5GS reconciliation, and physical UE role execution. New Ansible-driven paths must use the same implementation rather than adding another subprocess wrapper.
+It is used by virtual deployment, physical Open5GS work, and physical UE role execution. New Ansible-driven paths must use the same implementation rather than adding another progress parser.
 
-## Unified progress and logs
+## Unified runtime events
 
-`synthran run` writes a single sanitized event stream:
+Lifecycle state and child-runtime progress converge on one canonical event pipeline:
+
+```text
+                    RunEventStream
+                          ^
+          +---------------+---------------+
+          |               |               |
+      lifecycle        Ansible          AMBER /
+       stages           adapter          research
+```
+
+The terminal renderer emits:
+
+```text
+[synthran] → network
+[synthran]   … Open5GS locked images · 2m
+[synthran]   ✓ PDU session · 12.1.0.x
+[synthran] ✓ network: READY
+```
+
+The same semantic events are persisted as structured JSONL:
 
 ```text
 .synthran/events/<run-id>.jsonl
 ```
 
-The same messages are mirrored to the terminal unless `--quiet` is used. `synthran logs` reads this event stream, so live output and later diagnostics share one contract.
+The event file is evidence, not another public operator workflow. Detailed preparation/deployment/component logs remain forensic artifacts.
 
-The event stream contains high-level run transitions and sanitized child-operation output. Raw provider output is not a second public log API.
+Internal static/live readiness validators may still guard execution boundaries. During `run`, their full PASS tables are collapsed into lifecycle prerequisite state. The standalone `doctor` command exists for direct readiness diagnosis.
 
 ## Evidence model
 
@@ -153,7 +175,7 @@ provider/resource manifests
 network evidence
 physical-run.json
 experiment-evidence.json
-research-summary.json
+research-summary-v2.json
 telemetry.jsonl / telemetry.parquet
 probe.jsonl / probe.parquet
 network-samples.jsonl / network-samples.parquet
@@ -161,56 +183,62 @@ load.jsonl / load.parquet
 .synthran/events/<run-id>.jsonl
 ```
 
-## Deterministic IoT path
+## Ambient-IoT data path
 
-The scientific workload is backend-independent at the experiment level:
+For the current `ambient-v1` scientific profile:
 
 ```text
-10 deterministic Contiki-NG/Cooja sensors
--> RPL/6LoWPAN border router
--> counted ingress
--> UE-side MQTT handoff
--> 5G user plane
+AMBER Ambient-IoT source model
+-> energy/controller/access/backscatter simulation
+-> decoded Ambient-IoT events
+-> counted MQTT ingress
+-> UE-side edge transport
+-> live 5G user plane
 -> Open5GS UPF
--> run-owned central MQTT collector
--> canonical JSONL
--> deterministic Parquet
+-> central collector
+-> canonical JSONL / deterministic Parquet
 ```
 
-RFSIM uses srsUE and a virtual radio. R2Lab uses the selected physical Quectel UE and N3xx radio. Interface names, modem commands, radio addresses, and provider identifiers are implementation details and must not change scientific telemetry semantics.
+AMBER models the Ambient-IoT source/backscatter side. Decoded events are transported through the 5G test path. AMBER tags are not represented as 5G NR UEs, and SynthRAN does not claim that AMBER injects an Ambient-IoT RF waveform into srsRAN.
+
+RFSIM uses srsUE and a virtual radio. R2Lab substitutes the selected physical Quectel UE and N3xx radio where the selected profile is supported. Interface names, modem commands, radio addresses, and provider identifiers are implementation details and must not change scientific telemetry semantics.
 
 ## Research boundary
 
-Controlled measurement tools operate on an accepted base path. The current controlled-load campaign implementation is validated on the virtual network-evidence representation. Physical runs already execute the deterministic workload through the physical user plane, but controlled-load campaign parity is not claimed until physical measurement and load control have accepted evidence.
+Controlled measurement tools operate on an accepted base network. The current controlled-load campaign implementation is validated on the virtual network-evidence representation. Physical runs already execute deterministic workloads through the physical user plane, but controlled-load campaign parity is not claimed until physical measurement and load control have accepted evidence.
 
-This distinction is intentional: a common public lifecycle does not justify claiming common scientific capability before it is measured.
+A common public lifecycle does not justify claiming common scientific capability before it is measured.
 
 ## Source layout
 
 The principal runtime boundaries are:
 
 ```text
-synthran/cli.py                 public parser entry
-synthran/operator.py            public command definitions and dispatch
-synthran/provider.py            shared SLICES provider context
-synthran/backends/run.py        backend-selecting run orchestration
-synthran/ansible_streaming.py   shared Ansible progress
-synthran/network/               virtual compute/network implementation
-synthran/r2lab/                 physical authority/radio/UE implementation
-synthran/experiment/            deterministic workload runtime
-synthran/research/              controlled measurements and analysis
-synthran/privacy.py             repository/privacy controls
+synthran/cli.py                     public parser entry
+synthran/operator.py                public command definitions and dispatch
+synthran/provider.py                shared SLICES provider context
+synthran/backends/run.py            backend execution implementation
+synthran/backends/unified_run.py    canonical run adapter
+synthran/run_events.py              lifecycle + child event renderer/evidence
+synthran/ansible_streaming.py       Ansible event adapter
+synthran/network/                   virtual compute/network implementation
+synthran/r2lab/                     physical authority/radio/UE implementation
+synthran/experiment/                workload runtime
+synthran/research/                  controlled measurements and analysis
+synthran/privacy.py                 repository/privacy controls
 ```
 
-`command_runtime.py` is internal support for existing virtual-path and research functions. It does not define a public parser or command dispatch tree.
+`command_runtime.py` is internal support for established virtual-path and research functions. It does not define a public parser or command dispatch tree.
 
 ## Design rules
 
 - one installed executable;
 - one public lifecycle command;
 - backend selection through `--radio`;
-- shared progress/log semantics;
+- one canonical live runtime event stream;
+- Ansible is an event producer, not a second logger;
 - exact ownership-bound mutation and cleanup;
 - provider/direct observation outranks historical evidence for live authority;
+- network readiness is not overstated as end-to-end transport proof;
 - backend-specific mechanics do not leak into the scientific data contract;
 - unsupported capability is reported as unsupported rather than inferred from a neighboring successful boundary.
