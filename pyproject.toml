@@ -15,7 +15,7 @@ authors = [
 dependencies = []
 
 [project.scripts]
-synthran = "synthran.launcher:main"
+synthran = "synthran.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["synthran*"]
