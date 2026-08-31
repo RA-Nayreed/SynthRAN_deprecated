@@ -6,8 +6,8 @@ import argparse
 import re
 from pathlib import Path
 
-from synthran.backends.base import BackendError
 from synthran.dependencies import load_lock
+from synthran.errors import SynthRANError
 from synthran.slices_controller import (
     SlicesControllerError,
     subprocess_runner as slices_runner,
@@ -23,14 +23,14 @@ def ensure_slices_provider_context(args: argparse.Namespace) -> tuple[str, str, 
 
     project = getattr(args, "slices_project", None)
     if not project:
-        raise BackendError(
+        raise SynthRANError(
             "run requires --slices-project or SYNTHRAN_SLICES_PROJECT"
         )
 
     experiment = getattr(args, "slices_experiment", None) or str(args.run_id)
     duration = str(getattr(args, "slices_duration", "4h"))
     if _SLICES_DURATION_RE.fullmatch(duration) is None:
-        raise BackendError("SLICES experiment duration must look like 30m or 4h")
+        raise SynthRANError("SLICES experiment duration must look like 30m or 4h")
 
     timeout = min(max(int(args.timeout), 60), 300)
     selected = slices_runner(("slices", "project", "use", str(project)), timeout)
