@@ -6,7 +6,7 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-from synthran.cli import PUBLIC_COMMANDS, _parser, _selected_amber_runtime
+from synthran.cli import PUBLIC_COMMANDS, _parser, main as cli_main
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -209,87 +209,93 @@ class CliTests(unittest.TestCase):
         self.assertEqual("release", args.command)
         self.assertEqual("physical-001", args.run_id)
 
-    def test_rfsim_amber_settings_are_bound_and_runtime_restored(self) -> None:
-        args = _parser().parse_args(
-            [
-                "run",
-                "--radio",
-                "rfsim",
-                "--core-node",
-                "sopnode-f2",
-                "--ran-node",
-                "sopnode-f3",
-                "--run-id",
-                "amber-001",
-                "--energy-power-scale",
-                "0.42",
-            ]
+    @patch("synthran.cli.execute_run", return_value={"accepted": True})
+    def test_rfsim_amber_settings_pass_directly_to_lifecycle(self, execute) -> None:
+        self.assertEqual(
+            0,
+            cli_main(
+                [
+                    "run",
+                    "--radio",
+                    "rfsim",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
+                    "--run-id",
+                    "amber-001",
+                    "--iot-profile",
+                    "ambient-v1",
+                    "--iot-seed",
+                    "17",
+                    "--sensor-period",
+                    "12",
+                    "--energy-power-scale",
+                    "0.42",
+                ]
+            ),
         )
-        from synthran import command_runtime
+        args = execute.call_args.args[0]
+        self.assertEqual("ambient-v1", args.iot_profile)
+        self.assertEqual(17, args.iot_seed)
+        self.assertEqual(12, args.sensor_period)
+        self.assertEqual(0.42, args.energy_power_scale)
 
-        original = command_runtime._experiment_run
-        with _selected_amber_runtime(args):
-            self.assertIsNot(original, command_runtime._experiment_run)
-        self.assertIs(original, command_runtime._experiment_run)
-
-    def test_controlled_run_does_not_patch_lifecycle_runtime(self) -> None:
-        args = _parser().parse_args(
-            [
-                "run",
-                "--campaign-id",
-                "campaign-001",
-                "--network-run-id",
-                "virtual-001",
-                "--run-id",
-                "measurement-001",
-                "--condition",
-                "baseline",
-            ]
+    @patch("synthran.cli.execute_run", return_value={"accepted": True})
+    def test_physical_amber_settings_pass_directly_to_lifecycle(self, execute) -> None:
+        self.assertEqual(
+            0,
+            cli_main(
+                [
+                    "run",
+                    "--radio",
+                    "r2lab",
+                    "--device",
+                    "n300",
+                    "--ue",
+                    "qfit07",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
+                    "--run-id",
+                    "physical-001",
+                    "--iot-profile",
+                    "ambient-v1",
+                    "--iot-seed",
+                    "17",
+                    "--sensor-period",
+                    "12",
+                ]
+            ),
         )
-        from synthran import command_runtime
+        args = execute.call_args.args[0]
+        self.assertEqual("ambient-v1", args.iot_profile)
+        self.assertEqual(17, args.iot_seed)
+        self.assertEqual(12, args.sensor_period)
 
-        original = command_runtime._experiment_run
-        with _selected_amber_runtime(args):
-            self.assertIs(original, command_runtime._experiment_run)
-
-    def test_physical_runtime_passes_amber_settings_and_restores_scope(self) -> None:
-        args = _parser().parse_args(
-            [
-                "run",
-                "--radio",
-                "r2lab",
-                "--device",
-                "n300",
-                "--ue",
-                "qfit07",
-                "--core-node",
-                "sopnode-f2",
-                "--ran-node",
-                "sopnode-f3",
-                "--run-id",
-                "physical-001",
-                "--iot-profile",
-                "ambient-v1",
-                "--iot-seed",
-                "17",
-                "--sensor-period",
-                "12",
-            ]
-        )
-        from synthran.backends import run as run_backend
-
-        original = run_backend.run_physical_workload
-        with patch("synthran.cli.run_physical_iot_workload", return_value="ok") as execute:
-            with _selected_amber_runtime(args):
-                self.assertIsNot(original, run_backend.run_physical_workload)
-                result = run_backend.run_physical_workload(run_id="physical-001")
-            self.assertIs(original, run_backend.run_physical_workload)
-        self.assertEqual("ok", result)
-        execute.assert_called_once_with(
-            run_id="physical-001",
-            iot_profile="ambient-v1",
-            iot_seed=17,
-            sensor_period_seconds=12,
+    def test_physical_energy_treatment_remains_fail_closed(self) -> None:
+        self.assertEqual(
+            2,
+            cli_main(
+                [
+                    "run",
+                    "--radio",
+                    "r2lab",
+                    "--device",
+                    "n300",
+                    "--ue",
+                    "qfit07",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
+                    "--run-id",
+                    "physical-energy-001",
+                    "--energy-power-scale",
+                    "0.42",
+                ]
+            ),
         )
 
     def test_repository_maintenance_remains_namespaced(self) -> None:

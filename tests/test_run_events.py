@@ -6,11 +6,16 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from synthran.run_events import RunEventStream, RunProgress, normalize_child_message
+from synthran.run_events import (
+    PUBLIC_STAGES,
+    RunEventStream,
+    RunProgress,
+    normalize_child_message,
+)
 
 
 class ChildNormalizationTests(unittest.TestCase):
-    def test_internal_doctor_and_path_proof_output_is_hidden(self) -> None:
+    def test_internal_doctor_and_old_path_proof_output_is_hidden(self) -> None:
         for line in (
             "SynthRAN doctor (offline)",
             "[PASS] inventory: open5gs + srsRAN + rfsim",
@@ -93,47 +98,46 @@ class RunEventStreamTests(unittest.TestCase):
 
 
 class RunLifecycleRenderingTests(unittest.TestCase):
-    def test_rfsim_path_is_nested_under_network_not_a_public_stage(self) -> None:
+    def test_public_lifecycle_has_no_path_stage(self) -> None:
+        self.assertEqual(
+            {
+                "provider",
+                "infrastructure",
+                "network",
+                "workload",
+                "acceptance",
+                "cleanup",
+            },
+            set(PUBLIC_STAGES),
+        )
         terminal = io.StringIO()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            network_root = root / "runs"
-            evidence_dir = network_root / "run-001"
-            evidence_dir.mkdir(parents=True)
-            (evidence_dir / "network-evidence.json").write_text(
-                json.dumps(
-                    {
-                        "path": {
-                            "pdu_address": "12.1.0.13",
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
             progress = RunProgress(
                 run_id="run-001",
                 radio="rfsim",
                 terminal=terminal,
-                network_root=network_root,
-                experiment_root=root / "experiments",
             )
-            # Keep test events out of the repository's default .synthran/events.
             progress.stream.path = root / "events.jsonl"
-            progress.start("network", "deploy")
-            progress.done("network", "deployed")
-            progress.start("path", "prove")
-            progress.done("path", "accepted")
+            with self.assertRaisesRegex(ValueError, "unsupported public lifecycle stage"):
+                progress.start("path", "legacy stage")
+            progress.start("network", "verify current session readiness")
+            progress.stream.emit(
+                "  ✓ PDU session · 12.1.0.13",
+                stage="network",
+                event="detail",
+            )
+            progress.done("network", "READY")
             progress.close()
 
         output = terminal.getvalue()
-        self.assertIn("[synthran] → network", output)
-        self.assertIn("[synthran]   → verify live 5G session readiness", output)
+        self.assertIn("[synthran] → network: verify current session readiness", output)
         self.assertIn("[synthran]   ✓ PDU session · 12.1.0.13", output)
         self.assertIn("[synthran] ✓ network: READY", output)
         self.assertNotIn("→ path", output)
         self.assertNotIn("PATH PROVEN", output)
 
-    def test_infrastructure_collapses_preflight_validator_chatter(self) -> None:
+    def test_renderer_does_not_read_backend_evidence_to_infer_truth(self) -> None:
         terminal = io.StringIO()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -141,26 +145,18 @@ class RunLifecycleRenderingTests(unittest.TestCase):
                 run_id="run-001",
                 radio="rfsim",
                 terminal=terminal,
-                network_root=root / "runs",
-                experiment_root=root / "experiments",
             )
             progress.stream.path = root / "events.jsonl"
-            progress.start("resources", "prepare")
-            progress.done("resources", "prepared")
-            progress.start("preflight", "doctor")
+            progress.start("infrastructure", "prepare")
             progress.child_stream.write("SynthRAN doctor (offline)\n")
             progress.child_stream.write("[PASS] inventory: ready\n")
             progress.child_stream.write("Result: READY\n")
-            progress.done("preflight", "verified")
+            progress.done("infrastructure", "READY")
             progress.close()
 
         output = terminal.getvalue()
-        self.assertIn("[synthran] → infrastructure", output)
-        self.assertIn(
-            "[synthran]   ✓ authority and deployment prerequisites verified",
-            output,
-        )
-        self.assertIn("[synthran] ✓ infrastructure", output)
+        self.assertIn("[synthran] → infrastructure: prepare", output)
+        self.assertIn("[synthran] ✓ infrastructure: READY", output)
         self.assertNotIn("doctor", output)
         self.assertNotIn("[PASS]", output)
 

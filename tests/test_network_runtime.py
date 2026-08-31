@@ -12,7 +12,7 @@ from unittest.mock import patch
 from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import build_network_plan, load_inventory
 from synthran.live_preflight import CommandResult
-from synthran.network_runtime import (
+from synthran.network.runtime import (
     DEPLOYMENT_SCHEMA,
     NETWORK_EVIDENCE_SCHEMA,
     NetworkRuntimeError,
@@ -350,20 +350,20 @@ class DeploymentBoundaryTests(unittest.TestCase):
                     {"SYNTHRAN_KNOWN_HOSTS": str(FIXTURE.resolve())},
                 ),
                 patch(
-                    "synthran.network_runtime.load_fresh_live_evidence",
+                    "synthran.network.runtime.load_fresh_live_evidence",
                     return_value=preflight,
                 ),
                 patch(
-                    "synthran.network_runtime.validate_fiveg_checkout",
+                    "synthran.network.runtime.validate_fiveg_checkout",
                     return_value=checkout,
                 ),
                 patch(
-                    "synthran.network_runtime.verify_slices_controller",
+                    "synthran.network.runtime.verify_slices_controller",
                     return_value=SimpleNamespace(
                         to_dict=lambda: preflight["slices_controller"]
                     ),
                 ),
-                patch("synthran.network_runtime.apply_network_overlay") as overlay,
+                patch("synthran.network.runtime.apply_network_overlay") as overlay,
             ):
                 result = execute_network_deployment(
                     plan=self.plan,
@@ -454,20 +454,20 @@ class DeploymentBoundaryTests(unittest.TestCase):
                     {"SYNTHRAN_KNOWN_HOSTS": str(FIXTURE.resolve())},
                 ),
                 patch(
-                    "synthran.network_runtime.load_fresh_live_evidence",
+                    "synthran.network.runtime.load_fresh_live_evidence",
                     return_value=preflight,
                 ),
                 patch(
-                    "synthran.network_runtime.validate_fiveg_checkout",
+                    "synthran.network.runtime.validate_fiveg_checkout",
                     return_value=checkout,
                 ),
                 patch(
-                    "synthran.network_runtime.verify_slices_controller",
+                    "synthran.network.runtime.verify_slices_controller",
                     return_value=SimpleNamespace(
                         to_dict=lambda: preflight["slices_controller"]
                     ),
                 ),
-                patch("synthran.network_runtime.apply_network_overlay"),
+                patch("synthran.network.runtime.apply_network_overlay"),
                 self.assertRaisesRegex(
                     NetworkRuntimeError, "ansible-deployment"
                 ),
@@ -525,20 +525,20 @@ class DeploymentBoundaryTests(unittest.TestCase):
                     {"SYNTHRAN_KNOWN_HOSTS": str(FIXTURE.resolve())},
                 ),
                 patch(
-                    "synthran.network_runtime.load_fresh_live_evidence",
+                    "synthran.network.runtime.load_fresh_live_evidence",
                     return_value=preflight,
                 ),
                 patch(
-                    "synthran.network_runtime.validate_fiveg_checkout",
+                    "synthran.network.runtime.validate_fiveg_checkout",
                     return_value=checkout,
                 ),
                 patch(
-                    "synthran.network_runtime.verify_slices_controller",
+                    "synthran.network.runtime.verify_slices_controller",
                     return_value=SimpleNamespace(
                         to_dict=lambda: preflight["slices_controller"]
                     ),
                 ),
-                patch("synthran.network_runtime.apply_network_overlay"),
+                patch("synthran.network.runtime.apply_network_overlay"),
             ):
                 execute_network_deployment(
                     plan=self.plan,
@@ -577,7 +577,7 @@ class ManifestAndEvidenceTests(unittest.TestCase):
         self.inventory = load_inventory(FIXTURE)
         self.project = "project-test"
         self.experiment = "experiment-test"
-        from synthran.network_runtime import (
+        from synthran.network.runtime import (
             context_fingerprint,
             dependency_lock_sha256,
         )

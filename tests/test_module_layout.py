@@ -22,11 +22,12 @@ def _tracked(path: str) -> bool:
 
 
 class ModuleLayoutTests(unittest.TestCase):
-    def test_active_runtime_code_is_grouped_in_packages(self) -> None:
+    def test_active_runtime_code_is_grouped_by_domain(self) -> None:
         required = (
-            "backends/__init__.py",
-            "backends/base.py",
-            "backends/run.py",
+            "cli.py",
+            "errors.py",
+            "lifecycle.py",
+            "provider.py",
             "run_events.py",
             "experiment/__init__.py",
             "experiment/live.py",
@@ -52,11 +53,19 @@ class ModuleLayoutTests(unittest.TestCase):
             self.assertTrue((SOURCE / relative).is_file(), relative)
 
     def test_retired_architecture_packages_do_not_return(self) -> None:
-        for relative in ("app", "control", "operations", "resources", "workspace"):
+        for relative in (
+            "app",
+            "backends",
+            "control",
+            "operations",
+            "resources",
+            "workspace",
+        ):
             self.assertFalse((SOURCE / relative).exists(), relative)
 
     def test_flat_duplicate_modules_do_not_return(self) -> None:
         removed = {
+            "command_runtime.py",
             "entrypoint.py",
             "experiment.py",
             "experiment_cli.py",
@@ -64,6 +73,7 @@ class ModuleLayoutTests(unittest.TestCase):
             "experiment_runtime.py",
             "launcher.py",
             "network_runtime.py",
+            "operator.py",
             "resource_runtime.py",
             "rfsim_runtime.py",
             "research.py",
@@ -77,7 +87,6 @@ class ModuleLayoutTests(unittest.TestCase):
         present = {path.name for path in SOURCE.iterdir() if path.is_file()}
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
         self.assertFalse((SOURCE / "experiment" / "runtime.py").exists())
-        self.assertFalse((SOURCE / "backends" / "unified_run.py").exists())
 
     def test_superseded_r2lab_stack_does_not_return(self) -> None:
         r2lab = SOURCE / "r2lab"
@@ -102,13 +111,15 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_synthran_is_the_only_operator_entrypoint(self) -> None:
         self.assertTrue((SOURCE / "cli.py").is_file())
-        self.assertTrue((SOURCE / "command_runtime.py").is_file())
         for forbidden in (
             "synthran/commands",
             "synthran/__main__.py",
             "cli",
             "synthran/entrypoint.py",
             "synthran/launcher.py",
+            "synthran/operator.py",
+            "synthran/command_runtime.py",
+            "synthran/backends",
             "synthran/experiment/commands.py",
             "synthran/network/r2lab.py",
             "synthran/r2lab/_deployment_impl.py",

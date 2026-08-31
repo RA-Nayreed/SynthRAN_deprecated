@@ -3,29 +3,62 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import stat
+import subprocess
 import sys
-from typing import Iterator, Mapping, Sequence
+import tempfile
+from typing import Mapping, Sequence
 
-from synthran import command_runtime
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
 )
-from synthran.backends import run as run_backend
-from synthran.backends.base import BackendError
+from synthran.dependencies import DependencyError, load_lock, sync_dependencies
+from synthran.errors import SynthRANError
+from synthran.fiveg_ansible import FiveGAnsibleError, load_inventory, run_offline_doctor
 from synthran.iot_source import AMBIENT_PROFILE, DEFAULT_IOT_SEED, TRANSPORT_PROFILE
-from synthran.operator import configure_operator_parser, dispatch, release_command
-from synthran.r2lab.iot_lifecycle import run_physical_iot_workload
-from synthran.r2lab.resources import R2LabTopologyResourceError
-from synthran.research import LoadSpec, MeasurementSpec, ResearchError
+from synthran.lifecycle import configure_run_parser, execute_run
+from synthran.network.resources import SUPPORTED_NODES, build_preparation_inventory
+from synthran.privacy import (
+    PrivacyError,
+    outgoing_commits,
+    redact_file,
+    report_findings,
+    repository_root,
+    scan_commits,
+    scan_history,
+    scan_worktree,
+)
+from synthran.r2lab.acceptance import PhysicalRunEvidence
+from synthran.r2lab.controller import gateway_command, subprocess_runner as r2lab_runner
+from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology, capabilities
+from synthran.r2lab.n3xx import stop_n3xx_gnb
+from synthran.r2lab.resources import (
+    R2LabTopologyResourceError,
+    load_topology,
+    release_physical_resources,
+)
+from synthran.r2lab.stale_claim import retire_if_lease_absent
+from synthran.research import (
+    CampaignCondition,
+    LoadSpec,
+    MeasurementSpec,
+    ResearchCampaign,
+    ResearchError,
+    analyze_campaign,
+    build_campaign,
+    load_run_summary,
+    save_campaign,
+)
 from synthran.research.amber_campaign import analyze_amber_campaign, execute_amber_campaign
 from synthran.research.amber_runtime import execute_amber_research_experiment
+from synthran.research.runtime import calibrate_capacity
 from synthran.research.v2 import AmberResearchSpec
 from synthran.run_events import RunEventStream
+from synthran.slices_controller import SlicesControllerError, verify_slices_controller
 
 
 PUBLIC_COMMANDS = (
@@ -39,12 +72,15 @@ PUBLIC_COMMANDS = (
     "dev",
 )
 
+_EXECUTABLE_DEVICES = tuple(sorted(name for name, profile in RADIOS.items() if profile.executable))
+_EXECUTABLE_UES = tuple(sorted(name for name, profile in UES.items() if profile.executable))
+
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             return action
-    raise BackendError("SynthRAN parser does not expose command choices")
+    raise SynthRANError("SynthRAN parser does not expose command choices")
 
 
 def _make_optional(parser: argparse.ArgumentParser, *destinations: str) -> None:
@@ -52,6 +88,72 @@ def _make_optional(parser: argparse.ArgumentParser, *destinations: str) -> None:
     for action in parser._actions:
         if getattr(action, "dest", None) in wanted:
             action.required = False
+
+
+def _add_provider_context(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--slices-project",
+        default=os.environ.get("SYNTHRAN_SLICES_PROJECT"),
+        help="SLICES project (or SYNTHRAN_SLICES_PROJECT)",
+    )
+    parser.add_argument(
+        "--slices-experiment",
+        default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"),
+        help="existing provider experiment to verify",
+    )
+
+
+def _add_operator_commands(root: argparse._SubParsersAction) -> None:
+    doctor = root.add_parser("doctor", help="run read-only readiness checks")
+    doctor.add_argument("--radio", required=True, choices=("rfsim", "r2lab"))
+    doctor.add_argument("--core-node", default="sopnode-f2", choices=tuple(sorted(SUPPORTED_NODES)))
+    doctor.add_argument("--ran-node", default="sopnode-f3", choices=tuple(sorted(SUPPORTED_NODES)))
+    doctor.add_argument("--device", choices=_EXECUTABLE_DEVICES)
+    doctor.add_argument("--ue", choices=_EXECUTABLE_UES)
+    doctor.add_argument(
+        "--slice",
+        dest="r2lab_slice",
+        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
+    )
+    _add_provider_context(doctor)
+    doctor.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
+    doctor.add_argument("--deps-root", type=Path, default=Path(".deps"))
+    doctor.add_argument("--timeout", type=int, default=60)
+    doctor.add_argument("--json", action="store_true")
+
+    inspect = root.add_parser("inspect", help="show capabilities or persisted run evidence")
+    inspect.add_argument("--radio", choices=("rfsim", "r2lab"))
+    inspect.add_argument("--run-id")
+    inspect.add_argument("--json", action="store_true")
+
+    deps = root.add_parser("deps", help="manage immutable external dependencies")
+    deps_commands = deps.add_subparsers(dest="deps_command", required=True)
+    sync = deps_commands.add_parser("sync", help="synchronize pinned checkouts")
+    sync.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
+    sync.add_argument("--root", type=Path, default=Path(".deps"))
+    selection = sync.add_mutually_exclusive_group()
+    selection.add_argument("--all", action="store_true")
+    selection.add_argument("--name", action="append", dest="dependency_names")
+    sync.add_argument("--dry-run", action="store_true")
+
+    dev = root.add_parser("dev", help="repository maintenance commands")
+    dev_commands = dev.add_subparsers(dest="dev_command", required=True)
+    privacy = dev_commands.add_parser("privacy", help="scan or redact repository text")
+    privacy_commands = privacy.add_subparsers(dest="privacy_command", required=True)
+    scan = privacy_commands.add_parser("scan", help="scan for sensitive context")
+    scan_mode = scan.add_mutually_exclusive_group()
+    scan_mode.add_argument("--worktree", action="store_true")
+    scan_mode.add_argument("--history", action="store_true")
+    scan_mode.add_argument("--outgoing", action="store_true")
+    scan.add_argument("--remote", default="origin")
+    redact = privacy_commands.add_parser("redact", help="write a sanitized derivative")
+    redact.add_argument("source", type=Path)
+    redact.add_argument("destination", type=Path)
+    redact.add_argument("--dry-run", action="store_true")
+    hooks = dev_commands.add_parser("hooks", help="configure repository hooks")
+    hooks_commands = hooks.add_subparsers(dest="hooks_command", required=True)
+    install = hooks_commands.add_parser("install", help="activate tracked hooks")
+    install.add_argument("--dry-run", action="store_true")
 
 
 def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
@@ -194,12 +296,13 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_subparsers(dest="command", required=True)
-    configure_operator_parser(parser)
+    configure_run_parser(parser)
     root = _subparsers(parser)
+    _add_operator_commands(root)
     _add_top_level_experiment_commands(root)
     run = root.choices.get("run")
     if run is None:
-        raise BackendError("SynthRAN parser does not expose the run command")
+        raise SynthRANError("SynthRAN parser does not expose the run command")
     _add_run_experiment_options(run)
     return parser
 
@@ -208,10 +311,99 @@ def _read_json_object(path: Path, *, label: str) -> Mapping[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BackendError(f"{label} is unreadable") from exc
+        raise SynthRANError(f"{label} is unreadable") from exc
     if not isinstance(value, dict):
-        raise BackendError(f"{label} is malformed")
+        raise SynthRANError(f"{label} is malformed")
     return value
+
+
+def _network_paths(root: Path, run_id: str) -> tuple[Path, Path]:
+    directory = root.resolve() / run_id
+    return directory / "manifest.json", directory / "network-evidence.json"
+
+
+def _parse_seeds(value: str) -> tuple[int, ...]:
+    try:
+        seeds = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise ResearchError("campaign seeds must be comma-separated integers") from exc
+    if not seeds:
+        raise ResearchError("campaign seeds must not be empty")
+    return seeds
+
+
+def _parse_conditions(value: str) -> tuple[CampaignCondition, ...]:
+    result: list[CampaignCondition] = []
+    for item in value.split(","):
+        text = item.strip()
+        if not text:
+            continue
+        if text == "baseline":
+            result.append(CampaignCondition("baseline"))
+            continue
+        if "=" not in text:
+            raise ResearchError(
+                "loaded conditions must use name=fraction or name=bps:<integer>"
+            )
+        name, raw = (part.strip() for part in text.split("=", 1))
+        try:
+            result.append(
+                CampaignCondition(name, target_bps=int(raw[4:]))
+                if raw.startswith("bps:")
+                else CampaignCondition(name, load_fraction=float(raw))
+            )
+        except ValueError as exc:
+            raise ResearchError("campaign load target is malformed") from exc
+    if not result:
+        raise ResearchError("campaign conditions must not be empty")
+    return tuple(result)
+
+
+def _load_campaign(path: Path) -> ResearchCampaign:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ResearchError("campaign specification must be readable JSON") from exc
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema") != "synthran/research-campaign/v1alpha1"
+    ):
+        raise ResearchError("campaign specification schema is unsupported")
+    raw_conditions = value.get("conditions")
+    raw_runs = value.get("runs")
+    if not isinstance(raw_conditions, list) or not isinstance(raw_runs, list):
+        raise ResearchError("campaign conditions and runs must be arrays")
+    conditions: list[CampaignCondition] = []
+    for item in raw_conditions:
+        if not isinstance(item, Mapping) or not isinstance(item.get("name"), str):
+            raise ResearchError("campaign contains a malformed condition")
+        conditions.append(
+            CampaignCondition(
+                str(item["name"]),
+                load_fraction=(
+                    float(item["load_fraction"])
+                    if item.get("load_fraction") is not None
+                    else None
+                ),
+                target_bps=(
+                    int(item["target_bps"])
+                    if item.get("target_bps") is not None
+                    else None
+                ),
+            )
+        )
+    campaign = build_campaign(
+        campaign_id=str(value.get("campaign_id")),
+        network_run_id=str(value.get("network_run_id")),
+        seeds=tuple(int(seed) for seed in value.get("seeds", [])),
+        conditions=tuple(conditions),
+        campaign_seed=int(value.get("campaign_seed")),
+    )
+    if raw_runs != [run.to_dict() for run in campaign.runs]:
+        raise ResearchError(
+            "persisted campaign run schedule does not match its deterministic contract"
+        )
+    return campaign
 
 
 def _is_campaign_run(args: argparse.Namespace) -> bool:
@@ -258,21 +450,21 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
             result = _read_json_object(result_path, label="persisted physical workload result")
             workload_id = result.get("workload_id")
             if not isinstance(workload_id, str) or not workload_id:
-                raise BackendError("persisted physical workload result has no workload ID")
+                raise SynthRANError("persisted physical workload result has no workload ID")
             candidate = (
                 Path(args.r2lab_experiment_root).expanduser().resolve()
                 / workload_id
                 / "manifest.json"
             )
             if not candidate.is_file():
-                raise BackendError("persisted physical workload manifest is unavailable")
+                raise SynthRANError("persisted physical workload manifest is unavailable")
             manifest_path = candidate
 
     if manifest_path is None:
         return
     manifest = _read_json_object(manifest_path, label="persisted AMBER workload manifest")
     if manifest.get("iot_source") != "amber":
-        raise BackendError("persisted workload is not an AMBER workload")
+        raise SynthRANError("persisted workload is not an AMBER workload")
     expected = {
         "iot_profile": args.iot_profile,
         "iot_seed": args.iot_seed,
@@ -280,7 +472,7 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
     }
     for key, requested in expected.items():
         if manifest.get(key) != requested:
-            raise BackendError(f"persisted AMBER workload {key} does not match the requested value")
+            raise SynthRANError(f"persisted AMBER workload {key} does not match the requested value")
 
 
 def _require_controlled_common(args: argparse.Namespace) -> None:
@@ -344,7 +536,7 @@ def _campaign_path(args: argparse.Namespace) -> Path:
 def _load_or_create_campaign(args: argparse.Namespace):
     path = _campaign_path(args)
     if args.campaign is not None:
-        return command_runtime._load_campaign(path), path
+        return _load_campaign(path), path
     required = {
         "--campaign-id": args.campaign_id,
         "--network-run-id": args.network_run_id,
@@ -355,20 +547,20 @@ def _load_or_create_campaign(args: argparse.Namespace):
     missing = [name for name, value in required.items() if value is None]
     if missing:
         raise ResearchError("new campaign requires " + ", ".join(missing))
-    campaign = command_runtime.build_campaign(
+    campaign = build_campaign(
         campaign_id=args.campaign_id,
         network_run_id=args.network_run_id,
-        seeds=command_runtime._parse_seeds(args.seeds),
-        conditions=command_runtime._parse_conditions(args.conditions),
+        seeds=_parse_seeds(args.seeds),
+        conditions=_parse_conditions(args.conditions),
         campaign_seed=args.campaign_seed,
     )
     if path.is_file():
-        persisted = command_runtime._load_campaign(path)
+        persisted = _load_campaign(path)
         if persisted.to_dict() != campaign.to_dict():
             raise ResearchError("persisted campaign differs from the requested immutable schedule")
         return persisted, path
     path.parent.mkdir(parents=True, exist_ok=True)
-    command_runtime.save_campaign(campaign, path)
+    save_campaign(campaign, path)
     return campaign, path
 
 
@@ -384,7 +576,7 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
         stream = RunEventStream(run_id=campaign.campaign_id, radio="rfsim", terminal=sys.stdout)
         stream.emit("→ workload: controlled AMBER campaign", stage="workload", event="started")
         try:
-            manifest, evidence = command_runtime._network_paths(
+            manifest, evidence = _network_paths(
                 args.network_run_root, campaign.network_run_id
             )
             result_path = execute_amber_campaign(
@@ -392,12 +584,12 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
                 iot_profile=args.iot_profile,
                 energy_power_scale=args.energy_power_scale,
                 energy_node_variation=args.energy_node_variation,
-                inventory=command_runtime.load_inventory(args.inventory),
-                lock=command_runtime.load_lock(args.lock),
+                inventory=load_inventory(args.inventory),
+                lock=load_lock(args.lock),
                 dependency_root=args.deps_root,
                 network_manifest=manifest,
                 network_evidence=evidence,
-                repository_root=command_runtime.repository_root(),
+                repository_root=repository_root(),
                 run_root=args.experiment_root,
                 target=args.probe_target,
                 reference_capacity_bps=args.reference_capacity_bps,
@@ -438,17 +630,17 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
         event="started",
     )
     try:
-        manifest, evidence = command_runtime._network_paths(
+        manifest, evidence = _network_paths(
             args.network_run_root, spec.network_run_id
         )
         summary_path = execute_amber_research_experiment(
             spec=spec,
-            inventory=command_runtime.load_inventory(args.inventory),
-            lock=command_runtime.load_lock(args.lock),
+            inventory=load_inventory(args.inventory),
+            lock=load_lock(args.lock),
             dependency_root=args.deps_root,
             network_manifest=manifest,
             network_evidence=evidence,
-            repository_root=command_runtime.repository_root(),
+            repository_root=repository_root(),
             run_root=args.experiment_root,
             progress=stream,
         )
@@ -461,12 +653,12 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
 
 
 def _dispatch_capacity_calibration(args: argparse.Namespace) -> int:
-    payload = command_runtime.calibrate_capacity(
-        inventory=command_runtime.load_inventory(args.inventory),
-        lock=command_runtime.load_lock(args.lock),
+    payload = calibrate_capacity(
+        inventory=load_inventory(args.inventory),
+        lock=load_lock(args.lock),
         network_run_id=args.network_run_id,
         target=args.target,
-        repository_root=command_runtime.repository_root(),
+        repository_root=repository_root(),
         output_path=args.out,
         duration_seconds=args.duration_seconds,
         server_port=args.server_port,
@@ -477,7 +669,7 @@ def _dispatch_capacity_calibration(args: argparse.Namespace) -> int:
 
 
 def _dispatch_analysis(args: argparse.Namespace) -> int:
-    campaign = command_runtime._load_campaign(args.campaign)
+    campaign = _load_campaign(args.campaign)
     run_root = args.run_root.expanduser().resolve()
     first_v2 = run_root / campaign.runs[0].run_id / "research-summary-v2.json"
     if first_v2.is_file():
@@ -490,11 +682,11 @@ def _dispatch_analysis(args: argparse.Namespace) -> int:
         print(f"Campaign analysis: {args.out}")
         return 0
     summaries = [
-        command_runtime.load_run_summary(path)
+        load_run_summary(path)
         for scheduled in campaign.runs
         if (path := run_root / scheduled.run_id / "research-summary.json").is_file()
     ]
-    analysis = command_runtime.analyze_campaign(campaign, summaries)
+    analysis = analyze_campaign(campaign, summaries)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(
         json.dumps(analysis, indent=2, sort_keys=True) + "\n",
@@ -505,9 +697,286 @@ def _dispatch_analysis(args: argparse.Namespace) -> int:
     return 0 if analysis["usable_runs"] == analysis["expected_runs"] else 2
 
 
+def _doctor_r2lab(args: argparse.Namespace) -> int:
+    if args.device is None or args.ue is None:
+        raise SynthRANError("doctor --radio r2lab requires --device and --ue")
+    if not args.r2lab_slice:
+        raise SynthRANError("doctor --radio r2lab requires --slice or SYNTHRAN_R2LAB_SLICE")
+    topology = PhysicalTopology(
+        core_node=args.core_node,
+        ran_node=args.ran_node,
+        radio=args.device,
+        ue=args.ue,
+    ).validate()
+    gateway = r2lab_runner(gateway_command(args.r2lab_slice, "true"), args.timeout)
+    lease = None
+    if gateway.returncode == 0:
+        lease = r2lab_runner(
+            gateway_command(args.r2lab_slice, "rhubarbe", "leases", "--check"),
+            args.timeout,
+        )
+    checks = [
+        {"name": "selection", "passed": True, "detail": topology.to_dict()},
+        {
+            "name": "gateway",
+            "passed": gateway.returncode == 0,
+            "detail": "strict public-key SSH to Faraday",
+        },
+        {
+            "name": "lease",
+            "passed": lease is not None and lease.returncode == 0,
+            "detail": "active R2Lab lease",
+        },
+    ]
+    ready = all(check["passed"] is True for check in checks)
+    payload = {"schema": "synthran/doctor/v1", "radio": "r2lab", "ready": ready, "checks": checks}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("SynthRAN doctor (r2lab)")
+        for check in checks:
+            print(f"[{'PASS' if check['passed'] else 'FAIL'}] {check['name']}: {check['detail']}")
+        print(f"Result: {'READY' if ready else 'NOT READY'}")
+    return 0 if ready else 2
+
+
+def _doctor_rfsim(args: argparse.Namespace) -> int:
+    if args.core_node == args.ran_node:
+        raise SynthRANError("core and RAN nodes must differ")
+    with tempfile.TemporaryDirectory(prefix="synthran-doctor-") as directory:
+        inventory = Path(directory) / "hosts.ini"
+        text, _ = build_preparation_inventory(
+            core_node=args.core_node,
+            ran_node=args.ran_node,
+            source=inventory,
+        )
+        inventory.write_text(text, encoding="utf-8", newline="\n")
+        report = run_offline_doctor(
+            inventory_path=inventory,
+            lock_path=args.lock,
+            dependency_root=args.deps_root,
+        )
+    checks = [
+        {"name": check.name, "passed": check.passed, "detail": check.detail}
+        for check in report.checks
+    ]
+    if args.slices_experiment:
+        if not args.slices_project:
+            raise SynthRANError("provider verification requires --slices-project or SYNTHRAN_SLICES_PROJECT")
+        provider = verify_slices_controller(
+            lock=load_lock(args.lock),
+            project=args.slices_project,
+            experiment=args.slices_experiment,
+            timeout_seconds=args.timeout,
+        )
+        checks.append(
+            {
+                "name": "provider",
+                "passed": provider.ready,
+                "detail": f"{args.slices_project}/{args.slices_experiment}",
+            }
+        )
+    ready = bool(checks) and all(check["passed"] is True for check in checks)
+    payload = {"schema": "synthran/doctor/v1", "radio": "rfsim", "ready": ready, "checks": checks}
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("SynthRAN doctor (rfsim)")
+        for check in checks:
+            print(f"[{'PASS' if check['passed'] else 'FAIL'}] {check['name']}: {check['detail']}")
+        print(f"Result: {'READY' if ready else 'NOT READY'}")
+    return 0 if ready else 2
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    return _doctor_r2lab(args) if args.radio == "r2lab" else _doctor_rfsim(args)
+
+
+def _candidate_evidence(run_id: str) -> tuple[Path, ...]:
+    return (
+        Path(".synthran/r2lab") / run_id / "physical-run.json",
+        Path(".synthran/experiments-r2lab") / run_id / "experiment-evidence.json",
+        Path(".synthran/experiments") / run_id / "experiment-evidence.json",
+        Path(".synthran/runs") / run_id / "network-evidence.json",
+        Path(".synthran/preparations") / run_id / "manifest.json",
+    )
+
+
+def _inspect(args: argparse.Namespace) -> int:
+    if args.run_id is None:
+        if args.radio != "r2lab":
+            raise SynthRANError("inspect without --run-id currently supports --radio r2lab capabilities")
+        payload = capabilities()
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    found: list[dict[str, object]] = []
+    for path in _candidate_evidence(args.run_id):
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SynthRANError(f"persisted run evidence is unreadable: {path}") from exc
+        found.append({"path": str(path), "payload": payload})
+    if not found:
+        raise SynthRANError(f"no persisted evidence found for run {args.run_id}")
+    if args.json:
+        print(json.dumps({"run_id": args.run_id, "evidence": found}, indent=2, sort_keys=True))
+    else:
+        print(f"SynthRAN run {args.run_id}")
+        for item in found:
+            payload = item["payload"]
+            schema = payload.get("schema") if isinstance(payload, dict) else None
+            state = None
+            if isinstance(payload, dict):
+                state = payload.get("status", payload.get("ready", payload.get("accepted")))
+            print(f"- {item['path']} :: {schema or 'unknown'} :: {state}")
+    return 0
+
+
+def _release(args: argparse.Namespace) -> int:
+    run_root = Path(".synthran/r2lab")
+    run_directory = run_root / args.run_id
+    if not run_directory.exists():
+        payload = {
+            "schema": "synthran/release/v1",
+            "run_id": args.run_id,
+            "released": False,
+            "detail": "no active physical claim found; virtual workloads clean up within their run",
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload["detail"])
+        return 0
+    if not args.r2lab_slice:
+        raise SynthRANError(
+            "physical release requires --slice or SYNTHRAN_R2LAB_SLICE"
+        )
+
+    topology = load_topology(run_root=run_root, run_id=args.run_id).validate()
+    retirement = retire_if_lease_absent(
+        run_root=run_root,
+        run_id=args.run_id,
+        slice_name=args.r2lab_slice,
+        topology=topology,
+        runner=r2lab_runner,
+        timeout_seconds=min(args.timeout, 300),
+    )
+    if retirement is not None:
+        result = {
+            "schema": "synthran/release/v1",
+            "run_id": args.run_id,
+            "radio": topology.radio,
+            "ue": topology.ue,
+            "released": False,
+            "retired": True,
+            "hardware_mutated": False,
+            "detail": (
+                "current R2Lab lease is not held; retired the stale local claim "
+                "without touching provider hardware"
+            ),
+            "retirement": retirement.to_dict(),
+        }
+        print(
+            json.dumps(result, indent=2, sort_keys=True)
+            if args.json
+            else result["detail"]
+        )
+        return 0
+
+    if not args.owner or args.known_hosts is None:
+        raise SynthRANError(
+            "physical release with a current lease requires --owner/SYNTHRAN_OWNER "
+            "and --known-hosts/SYNTHRAN_SLICES_KNOWN_HOSTS"
+        )
+    known_hosts = Path(args.known_hosts).expanduser().resolve()
+    if not known_hosts.is_file():
+        raise SynthRANError("strict SLICES known-hosts file is missing")
+    evidence_path = run_directory / "physical-run.json"
+    stop = None
+    if evidence_path.is_file():
+        evidence = PhysicalRunEvidence.read_json(evidence_path)
+        if evidence.gnb_start is not None:
+            stop = lambda: stop_n3xx_gnb(
+                run_id=args.run_id,
+                slice_name=args.r2lab_slice,
+                owner=args.owner,
+                allocation_id=args.allocation_id,
+                known_hosts=known_hosts,
+                run_root=run_root,
+                timeout_seconds=max(args.timeout, 30),
+            )
+    payload = release_physical_resources(
+        run_id=args.run_id,
+        slice_name=args.r2lab_slice,
+        run_root=run_root,
+        timeout_seconds=min(args.timeout, 300),
+        stop_gnb=stop,
+    )
+    result = {
+        "schema": "synthran/release/v1",
+        "run_id": args.run_id,
+        "radio": topology.radio,
+        "ue": topology.ue,
+        "released": True,
+        "retired": False,
+        "release": payload,
+    }
+    print(json.dumps(result, indent=2, sort_keys=True) if args.json else "Selected run resources released.")
+    return 0
+
+
+def _deps_sync(args: argparse.Namespace) -> int:
+    lock = load_lock(args.lock)
+    sync_dependencies(
+        lock,
+        args.root,
+        include_transitive=args.all,
+        names=args.dependency_names,
+        dry_run=args.dry_run,
+        output=sys.stdout,
+    )
+    return 0
+
+
+def _privacy_scan(args: argparse.Namespace) -> int:
+    repo = repository_root()
+    if args.outgoing:
+        commits = outgoing_commits(repo, args.remote, sys.stdin)
+        findings = scan_commits(repo, commits)
+    elif args.history:
+        findings = scan_history(repo)
+    else:
+        findings = scan_worktree(repo)
+    return report_findings(findings, sys.stdout)
+
+
+def _hooks_install(args: argparse.Namespace) -> int:
+    repo = repository_root()
+    hook = repo / ".githooks" / "pre-push"
+    if not hook.is_file():
+        raise PrivacyError("tracked pre-push hook is missing")
+    if args.dry_run:
+        print("[dry-run] make .githooks/pre-push executable when required")
+        print("[dry-run] git config core.hooksPath .githooks")
+        return 0
+    if os.name != "nt":
+        hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    try:
+        subprocess.run(
+            ["git", "config", "core.hooksPath", ".githooks"],
+            cwd=repo,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise PrivacyError("unable to configure repository hooks") from exc
+    print("repository hooks activated")
+    return 0
+
+
 def _validate_lifecycle_run(args: argparse.Namespace) -> None:
     if args.plan:
-        raise BackendError(
+        raise SynthRANError(
             "run --plan is for controlled runs/campaigns; full lifecycle runs execute directly"
         )
     required = {
@@ -518,59 +987,42 @@ def _validate_lifecycle_run(args: argparse.Namespace) -> None:
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
-        raise BackendError("full lifecycle run requires " + ", ".join(missing))
+        raise SynthRANError("full lifecycle run requires " + ", ".join(missing))
+    if args.radio == "r2lab" and (
+        args.energy_power_scale != DEFAULT_ENERGY_POWER_SCALE
+        or args.energy_node_variation != DEFAULT_ENERGY_NODE_VARIATION
+    ):
+        raise SynthRANError("Ambient energy treatment is currently supported on RFSIM only")
 
 
-@contextmanager
-def _selected_amber_runtime(args: argparse.Namespace) -> Iterator[None]:
-    """Bind the parsed AMBER source settings to the backend workload call."""
-
-    if args.command != "run" or _is_controlled_run(args):
-        yield
-        return
-
-    if args.radio == "rfsim":
-        original = command_runtime._experiment_run
-
-        def configured(experiment_args: argparse.Namespace) -> int:
-            experiment_args.iot_profile = args.iot_profile
-            experiment_args.iot_seed = args.iot_seed
-            experiment_args.sensor_period = args.sensor_period
-            experiment_args.energy_power_scale = args.energy_power_scale
-            experiment_args.energy_node_variation = args.energy_node_variation
-            return original(experiment_args)
-
-        command_runtime._experiment_run = configured
-        try:
-            yield
-        finally:
-            command_runtime._experiment_run = original
-        return
-
-    if args.radio == "r2lab":
-        if (
-            args.energy_power_scale != DEFAULT_ENERGY_POWER_SCALE
-            or args.energy_node_variation != DEFAULT_ENERGY_NODE_VARIATION
-        ):
-            raise BackendError("Ambient energy treatment is currently supported on RFSIM only")
-        original = run_backend.run_physical_workload
-
-        def configured_physical(**kwargs):
-            return run_physical_iot_workload(
-                **kwargs,
-                iot_profile=args.iot_profile,
-                iot_seed=args.iot_seed,
-                sensor_period_seconds=args.sensor_period,
+def _dispatch(args: argparse.Namespace) -> int:
+    if args.command == "run":
+        payload = execute_run(args)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    if args.command == "doctor":
+        return _doctor(args)
+    if args.command == "inspect":
+        return _inspect(args)
+    if args.command == "release":
+        return _release(args)
+    if args.command == "deps":
+        return _deps_sync(args)
+    if args.command == "dev" and args.dev_command == "privacy":
+        if args.privacy_command == "scan":
+            return _privacy_scan(args)
+        if args.privacy_command == "redact":
+            redact_file(
+                args.source,
+                args.destination,
+                dry_run=args.dry_run,
+                output=sys.stdout,
             )
-
-        run_backend.run_physical_workload = configured_physical
-        try:
-            yield
-        finally:
-            run_backend.run_physical_workload = original
-        return
-
-    raise BackendError(f"unsupported radio backend: {args.radio}")
+            return 0
+    if args.command == "dev" and args.dev_command == "hooks" and args.hooks_command == "install":
+        return _hooks_install(args)
+    raise SynthRANError("unsupported SynthRAN command")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -582,14 +1034,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _dispatch_capacity_calibration(args)
         if args.command == "analyze":
             return _dispatch_analysis(args)
-        if args.command == "release":
-            return release_command(args)
         if args.command == "run":
             _validate_lifecycle_run(args)
             _validate_persisted_iot_identity(args)
-        with _selected_amber_runtime(args):
-            return dispatch(args)
-    except (BackendError, ResearchError, R2LabTopologyResourceError) as exc:
+        return _dispatch(args)
+    except (
+        SynthRANError,
+        ResearchError,
+        R2LabTopologyResourceError,
+        DependencyError,
+        FiveGAnsibleError,
+        PrivacyError,
+        SlicesControllerError,
+        OSError,
+        ValueError,
+    ) as exc:
         prefix = "[synthran] ✗ run: " if args.command == "run" else "error: "
         print(f"{prefix}{exc}", file=sys.stderr)
         return 2
