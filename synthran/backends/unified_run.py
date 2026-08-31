@@ -7,7 +7,7 @@ import json
 
 from synthran.backends import run as backend_run
 from synthran.backends.base import BackendError
-from synthran.events import RunProgress
+from synthran.run_events import RunProgress
 
 
 def configure_run_parser(parser: argparse.ArgumentParser) -> None:
