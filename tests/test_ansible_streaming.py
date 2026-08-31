@@ -75,9 +75,10 @@ class AnsibleStreamingParserTests(unittest.TestCase):
         self.assertIsNotNone(rendered)
         assert rendered is not None
         self.assertIn("✗ Open5GS: Wait for Open5GS Core NFs pods Ready", rendered)
-        self.assertIn("host: sopnode-f2", rendered)
-        self.assertIn("state: FATAL", rendered)
-        self.assertIn("reason: AMF pod did not become Ready", rendered)
+        self.assertIn("host=sopnode-f2", rendered)
+        self.assertIn("state=FATAL", rendered)
+        self.assertIn("reason=AMF pod did not become Ready", rendered)
+        self.assertNotIn("\n", rendered)
 
     def test_failure_reason_is_bounded_and_redacted(self) -> None:
         rendered = parse_ansible_line(
@@ -157,7 +158,9 @@ class AnsibleStreamingRunnerTests(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertEqual(1, len(reported))
         self.assertIn("✗ Wait for AMF pod to become Ready", reported[0])
-        self.assertIn("reason: readiness timeout", reported[0])
+        self.assertIn("host=sopnode-f2", reported[0])
+        self.assertIn("reason=readiness timeout", reported[0])
+        self.assertNotIn("\n", reported[0])
 
     def test_hidden_task_failure_is_still_reported(self) -> None:
         script = (
@@ -170,7 +173,7 @@ class AnsibleStreamingRunnerTests(unittest.TestCase):
         self.assertEqual(2, result.returncode)
         self.assertEqual(1, len(reported))
         self.assertIn("✗ command", reported[0])
-        self.assertIn("reason: interface not found", reported[0])
+        self.assertIn("reason=interface not found", reported[0])
 
     def test_heartbeat_proves_long_running_visible_task(self) -> None:
         script = (
