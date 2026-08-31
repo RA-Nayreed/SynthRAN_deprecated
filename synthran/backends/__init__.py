@@ -1,24 +1,7 @@
-"""Backend-neutral run contract exports."""
+"""Backend-neutral run exports."""
 
-from synthran.backends.base import (
-    Backend,
-    BackendContract,
-    BackendError,
-    BackendName,
-    LIFECYCLE_STAGES,
-    LifecycleStage,
-    RadioMode,
-)
-from synthran.backends.run import RunCommandAdapter
+from synthran.backends.base import BackendError
+from synthran.backends.unified_run import RunCommandAdapter
 
 
-__all__ = [
-    "Backend",
-    "BackendContract",
-    "BackendError",
-    "BackendName",
-    "LIFECYCLE_STAGES",
-    "LifecycleStage",
-    "RadioMode",
-    "RunCommandAdapter",
-]
+__all__ = ["BackendError", "RunCommandAdapter"]
