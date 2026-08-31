@@ -1,21 +1,58 @@
-"""Sanitized AMF-side N2 acceptance evidence for physical R2Lab runs.
+"""Sanitized N2 evidence classification for physical R2Lab runs.
 
-The gNB runtime can be healthy while its own log omits an affirmative NGAP/N2
-message. Open5GS AMF logs provide an independent observation. This module only
-parses already-observed AMF text; it performs no Kubernetes or network mutation
-and never persists the raw private gNB address.
+SynthRAN accepts N2 from either an affirmative gNB-side NGAP/SCTP log or an
+exact-peer Open5GS AMF acceptance record. This module owns both classifiers so
+N2 evidence has one home and no generic ``runtime`` module is needed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 import hashlib
 import ipaddress
 import re
 
 
 class R2LabN2EvidenceError(RuntimeError):
-    """Raised when AMF-side N2 evidence cannot be safely interpreted."""
+    """Raised when N2 evidence cannot be safely interpreted."""
+
+
+class N2State(str, Enum):
+    ESTABLISHED = "established"
+    NOT_OBSERVED = "not-observed"
+    UNKNOWN = "unknown"
+
+
+def parse_n2_log_state(text: str) -> N2State:
+    """Accept only affirmative, non-error gNB N2/NGAP connection evidence."""
+
+    if not text.strip():
+        return N2State.NOT_OBSERVED
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        lowered = line.lower()
+        if any(
+            word in lowered
+            for word in ("failed", "failure", "error", "timeout", "disconnected")
+        ):
+            continue
+        if re.search(
+            r"\bamf\b.*\b(?:connection|association)\b.*\b(?:established|connected|successful)\b",
+            lowered,
+        ):
+            return N2State.ESTABLISHED
+        if re.search(
+            r"\b(?:ngap|ng[- ]?setup|n2)\b.*\b(?:established|connected|successful|success|response)\b",
+            lowered,
+        ):
+            return N2State.ESTABLISHED
+    all_text = "\n".join(lines).lower()
+    if ("amf" in all_text or "ngap" in all_text) and re.search(
+        r"\bsctp\b.*\b(?:established|connected)\b", all_text
+    ):
+        return N2State.ESTABLISHED
+    return N2State.NOT_OBSERVED
 
 
 @dataclass(frozen=True)
