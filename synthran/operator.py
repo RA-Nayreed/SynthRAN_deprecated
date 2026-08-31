@@ -8,12 +8,10 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-import time
-from typing import Iterable
 
 from synthran import command_runtime
 from synthran.backends.base import BackendError
-from synthran.backends.run import RunCommandAdapter, configure_run_parser
+from synthran.backends.unified_run import RunCommandAdapter, configure_run_parser
 from synthran.dependencies import DependencyError, load_lock
 from synthran.fiveg_ansible import FiveGAnsibleError, run_offline_doctor
 from synthran.network.resources import SUPPORTED_NODES, build_preparation_inventory
@@ -76,11 +74,6 @@ def configure_operator_parser(parser: argparse.ArgumentParser) -> None:
     inspect.add_argument("--radio", choices=("rfsim", "r2lab"))
     inspect.add_argument("--run-id")
     inspect.add_argument("--json", action="store_true")
-
-    logs = commands.add_parser("logs", help="show the unified run event stream")
-    logs.add_argument("--run-id", required=True)
-    logs.add_argument("--follow", action="store_true")
-    logs.add_argument("--tail", type=int, default=200)
 
     deps = commands.add_parser("deps", help="manage immutable external dependencies")
     deps_commands = deps.add_subparsers(dest="deps_command", required=True)
@@ -250,49 +243,6 @@ def inspect_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _event_path(run_id: str) -> Path:
-    return Path(".synthran/events") / f"{run_id}.jsonl"
-
-
-def _render_events(lines: Iterable[str]) -> None:
-    for line in lines:
-        line = line.rstrip("\n")
-        if not line:
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            print(line)
-            continue
-        if isinstance(payload, dict) and isinstance(payload.get("message"), str):
-            stamp = payload.get("time", "")
-            print(f"{stamp}  {payload['message']}".rstrip())
-        else:
-            print(line)
-
-
-def logs_command(args: argparse.Namespace) -> int:
-    path = _event_path(args.run_id)
-    if not path.is_file():
-        raise BackendError(f"no unified event stream found for run {args.run_id}")
-    tail = max(1, args.tail)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    _render_events(lines[-tail:])
-    if not args.follow:
-        return 0
-    with path.open("r", encoding="utf-8") as stream:
-        stream.seek(0, 2)
-        try:
-            while True:
-                line = stream.readline()
-                if line:
-                    _render_events((line,))
-                else:
-                    time.sleep(0.5)
-        except KeyboardInterrupt:
-            return 0
-
-
 def release_command(args: argparse.Namespace) -> int:
     run_root = Path(".synthran/r2lab")
     run_directory = run_root / args.run_id
@@ -391,8 +341,6 @@ def dispatch(args: argparse.Namespace) -> int:
             return doctor(args)
         if args.command == "inspect":
             return inspect_command(args)
-        if args.command == "logs":
-            return logs_command(args)
         if args.command == "release":
             return release_command(args)
         if args.command == "deps":
