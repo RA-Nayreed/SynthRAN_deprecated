@@ -41,28 +41,20 @@ class ModuleLayoutTests(unittest.TestCase):
             "research/amber_runtime.py",
             "research/v2.py",
             "r2lab/__init__.py",
+            "r2lab/n2.py",
             "r2lab/resources.py",
             "r2lab/ue_ansible.py",
             "r2lab/upstream_roles.py",
             "utils/__init__.py",
             "utils/environment.py",
             "utils/ssh.py",
-            "workspace/__init__.py",
-            "workspace/model.py",
-            "workspace/store.py",
         )
         for relative in required:
             self.assertTrue((SOURCE / relative).is_file(), relative)
 
     def test_retired_architecture_packages_do_not_return(self) -> None:
-        for relative in ("app", "control", "operations", "resources"):
+        for relative in ("app", "control", "operations", "resources", "workspace"):
             self.assertFalse((SOURCE / relative).exists(), relative)
-
-        workspace = SOURCE / "workspace"
-        self.assertEqual(
-            {"__init__.py", "model.py", "store.py"},
-            {path.name for path in workspace.iterdir() if path.is_file()},
-        )
 
     def test_flat_duplicate_modules_do_not_return(self) -> None:
         removed = {
@@ -95,11 +87,13 @@ class ModuleLayoutTests(unittest.TestCase):
             "guards.py",
             "handoff.py",
             "readiness.py",
+            "runtime.py",
             "ue_overlay.py",
         }
         present = {path.name for path in r2lab.iterdir() if path.is_file()}
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
         self.assertTrue((r2lab / "foundation_topology.py").is_file())
+        self.assertTrue((r2lab / "n2.py").is_file())
         self.assertTrue((r2lab / "n3xx.py").is_file())
         self.assertTrue((r2lab / "resources.py").is_file())
         self.assertTrue((r2lab / "ue_ansible.py").is_file())
