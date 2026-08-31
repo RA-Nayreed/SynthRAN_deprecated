@@ -98,13 +98,16 @@ The command owns the complete sequence:
 
 ```text
 provider context
--> SLICES reservation/allocation
--> live authority preflight
+-> infrastructure allocation/bootstrap
+-> authority and deployment-prerequisite verification
 -> Open5GS + srsRAN/RFSIM deployment
--> srsUE/PDU path proof
+-> live 5G session readiness (gNB, PDU, UPF route)
 -> selected IoT workload
+-> workload transport proof through the live UE PDU path
 -> acceptance evidence
 ```
+
+The network-readiness check establishes that the expected gNB, srsUE, PDU session, and UPF route are live. It is not itself an end-to-end transport test. Workload setup separately proves transport with a connection explicitly sourced from the UE PDU address.
 
 There is no supported need to call resource preparation, network deployment, network verification, or workload execution as separate CLI commands.
 
@@ -138,8 +141,8 @@ provider context
 -> pinned N3xx gNB staging
 -> singleton gNB + stable N2
 -> selected UE setup/connect through pinned 5g_ansible roles
--> registration + PDU proof
--> route-bound user-plane proof
+-> registration + PDU state
+-> route-bound user-plane verification
 -> selected IoT workload
 -> acceptance evidence
 -> exact physical cleanup
@@ -149,29 +152,37 @@ By default accepted physical resources are released at the end. `--keep-resource
 
 If a previous run owns the current Open5GS namespace and automatic ownership handoff cannot be resolved safely, use `--previous-run-id` with the exact prior run ID. Never guess it.
 
-## 6. Watch progress
+## 6. Live progress
 
-Every lifecycle run records a sanitized JSONL event stream:
+`synthran run` is the single live progress surface. Lifecycle state, meaningful Ansible events, workload progress, failures, and acceptance all use the same renderer:
+
+```text
+[synthran] → infrastructure
+[synthran]   … node bootstrap · 2m
+[synthran] ✓ infrastructure
+[synthran] → network
+[synthran]   ✓ gNB cell active
+[synthran]   ✓ PDU session · 12.1.0.x
+[synthran] ✓ network: READY
+[synthran] → workload
+[synthran]   ✓ PDU-bound TCP transport gate passed
+[synthran] ✓ workload: accepted
+[synthran] ✓ experiment accepted
+```
+
+Internal offline/live readiness validators still protect execution boundaries, but their full PASS tables are not printed during `run`. Run lifecycle output reports the resulting prerequisite state instead. Use the standalone `synthran doctor` command when those checks need to be diagnosed directly.
+
+All long Ansible work uses the same sparse streaming adapter across virtual deployment, physical Open5GS work, and physical UE setup/connect/cleanup. A task header is not considered evidence that the task ran: tasks that Ansible subsequently marks skipped are omitted. Routine package/configuration chatter is suppressed; long meaningful tasks emit heartbeats; failures retain the task, host, state, and a bounded sanitized reason.
+
+Every run persists the canonical structured event evidence to:
 
 ```text
 .synthran/events/<run-id>.jsonl
 ```
 
-Live output and persisted logs use the same messages. Follow a run from another shell with:
+There is no separate public log/follow command. Detailed preparation/deployment/component logs are forensic artifacts for failure diagnosis rather than a second operator progress system.
 
-```zsh
-synthran logs --run-id "$RUN_ID" --follow
-```
-
-or inspect the latest persisted messages later:
-
-```zsh
-synthran logs --run-id "$RUN_ID" --tail 200
-```
-
-Long Ansible work uses one shared formatter across virtual deployment, physical Open5GS work, and physical UE setup/connect/cleanup. Routine Ansible chatter is suppressed; meaningful tasks, failures, and heartbeats remain visible.
-
-`--quiet` suppresses terminal progress but does not disable event persistence.
+`--quiet` suppresses terminal progress but does not disable run evidence persistence.
 
 ## 7. Inspect evidence
 
@@ -199,7 +210,7 @@ Release is run-scoped. It may stop the run-owned gNB and release only the radio/
 
 Never substitute wildcard Kubernetes deletion, global radio power-off, guessed allocation IDs, `pkill`, or `killall` for exact cleanup.
 
-For RFSIM, transient experiment cleanup is normally part of `run` and there is no persistent physical claim to release.
+For RFSIM, transient workload resources are cleaned inside `run`; an accepted network epoch may remain available for controlled measurements.
 
 ## 9. Controlled measurements
 
@@ -253,6 +264,8 @@ synthran run \
 ```
 
 For `ambient-v1`, `--energy-power-scale` and `--energy-node-variation` are explicit source-model treatments. Add `--plan` to render the immutable request without executing it.
+
+Controlled AMBER runs use the same `[synthran]` runtime event stream as full lifecycle runs.
 
 ### Build and execute a campaign
 
@@ -309,7 +322,8 @@ Keep complete raw run or campaign bundles outside normal Git history. Preserve:
 - validity summaries;
 - dependency identities;
 - artifact hashes;
-- unified run event logs.
+- canonical structured run events;
+- forensic component logs when relevant.
 
 JSONL is the audit source. Parquet is a deterministic analysis derivative. Checksum manifests must exclude the checksum file itself.
 
