@@ -63,6 +63,7 @@ class ModuleLayoutTests(unittest.TestCase):
             "experiment_cli.py",
             "experiment_resources.py",
             "experiment_runtime.py",
+            "launcher.py",
             "network_runtime.py",
             "resource_runtime.py",
             "rfsim_runtime.py",
@@ -99,7 +100,6 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue((r2lab / "ue_ansible.py").is_file())
 
     def test_synthran_is_the_only_operator_entrypoint(self) -> None:
-        self.assertTrue((SOURCE / "launcher.py").is_file())
         self.assertTrue((SOURCE / "cli.py").is_file())
         self.assertTrue((SOURCE / "command_runtime.py").is_file())
         for forbidden in (
@@ -107,6 +107,7 @@ class ModuleLayoutTests(unittest.TestCase):
             "synthran/__main__.py",
             "cli",
             "synthran/entrypoint.py",
+            "synthran/launcher.py",
             "synthran/experiment/commands.py",
             "synthran/network/r2lab.py",
             "synthran/r2lab/_deployment_impl.py",
