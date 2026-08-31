@@ -6,12 +6,11 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![5G](https://img.shields.io/badge/5G-srsRAN%20%2B%20Open5GS-6C63FF)](docs/architecture.md)
-[![IoT](https://img.shields.io/badge/IoT-Contiki--NG%20%2B%20Cooja-00A86B)](docs/experiment.md)
 [![License](https://img.shields.io/github/license/RA-Nayreed/SynthRAN)](LICENSE)
 
 </div>
 
-SynthRAN turns a collection of provider, radio, 5G, IoT, and measurement tools into one evidence-producing experiment. It owns orchestration, exact resource authority, validation, deterministic workload execution, sanitized progress, cleanup, and reproducibility records. It does not reimplement Open5GS, srsRAN, Contiki-NG, Cooja, Mosquitto, iperf3, SLICES, or R2Lab.
+SynthRAN turns provider, radio, 5G, IoT, and measurement tools into one evidence-producing experiment. It owns orchestration, exact resource authority, validation, deterministic workload execution, sanitized progress, cleanup, and reproducibility records. It does not reimplement Open5GS, srsRAN, AMBER, Mosquitto, iperf3, SLICES, or R2Lab.
 
 ## One command surface
 
@@ -28,7 +27,6 @@ run        execute one experiment or an immutable campaign
 doctor     perform read-only readiness checks
 calibrate  measure reference RAN/UE-path capacity
 inspect    show capabilities or persisted run evidence
-logs       read or follow the unified run event stream
 analyze    analyze a completed persisted campaign
 release    release persistent resources owned by one physical run
 deps       synchronize pinned external dependencies
@@ -77,9 +75,9 @@ synthran run \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-The run prepares compute resources, verifies authority, deploys Open5GS and srsRAN/RFSIM, proves the user path, executes the selected IoT workload, and persists acceptance evidence.
+The run prepares compute infrastructure, verifies provider/resource authority, deploys Open5GS and srsRAN/RFSIM, verifies the live 5G session state, executes the selected IoT workload, proves the workload transport through the live UE PDU path, and persists acceptance evidence.
 
-## Controlled run on an accepted RFSIM path
+## Controlled run on an accepted RFSIM network
 
 A controlled measurement is still a `run`; it reuses a previously accepted network rather than creating another command hierarchy.
 
@@ -176,26 +174,35 @@ synthran run \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-The physical path reuses the active R2Lab lease, claims only the selected radio and UE, reconciles the selected SLICES/Open5GS foundation, stages and starts the pinned N3xx gNB, proves N2, activates the selected UE through pinned `5g_ansible` roles, proves the PDU/user plane, runs the selected IoT workload, then releases exact run-owned physical resources unless `--keep-resources` was requested.
+The physical backend reuses the active R2Lab lease, claims only the selected radio and UE, reconciles the selected SLICES/Open5GS foundation, stages and starts the pinned N3xx gNB, proves N2, activates the selected UE through pinned `5g_ansible` roles, verifies registration/PDU/user-plane state, runs the selected IoT workload, then releases exact run-owned physical resources unless `--keep-resources` was requested.
 
-## Live progress and logs
+## Canonical live progress
 
-All long Ansible work uses the same sanitized streaming implementation. RFSIM deployment, physical Open5GS work, and R2Lab UE setup/connect/stop therefore expose the same task filtering, failures, and heartbeats.
+`synthran run` is the only live operator stream. Lifecycle state, meaningful Ansible progress, AMBER/research progress, failures, and acceptance all use the same prefix and renderer:
 
-Every lifecycle run also writes the same messages to:
+```text
+[synthran] → infrastructure
+[synthran]   … node bootstrap · 2m
+[synthran] ✓ infrastructure
+[synthran] → network
+[synthran]   ✓ gNB cell active
+[synthran]   ✓ PDU session · 12.1.0.x
+[synthran] ✓ network: READY
+[synthran] → workload
+[synthran]   ✓ PDU-bound TCP transport gate passed
+[synthran]   ✓ transport · published=... · received=... · loss=0 · duplicates=0
+[synthran] ✓ experiment accepted
+```
+
+Raw Ansible PLAY/TASK chatter, skipped tasks, routine package/configuration details, and internal offline/live validator reports are not promoted to the operator stream. Long meaningful tasks produce heartbeats, and failures retain a concise sanitized reason. Detailed component logs remain available as forensic artifacts when a stage fails.
+
+Every run also persists the canonical structured event evidence to:
 
 ```text
 .synthran/events/<run-id>.jsonl
 ```
 
-Read or follow them with:
-
-```zsh
-synthran logs --run-id "$RUN_ID"
-synthran logs --run-id "$RUN_ID" --follow
-```
-
-`--quiet` suppresses terminal progress but still records the event stream.
+There is no separate public live-log command. `--quiet` suppresses terminal rendering while preserving run evidence.
 
 ## Inspect and release
 
@@ -205,29 +212,15 @@ synthran inspect --radio r2lab
 synthran release --run-id "$RUN_ID"
 ```
 
-Normal RFSIM runs clean up their transient experiment resources inside the run itself, so `release` is primarily for persistent physical/provider ownership after an interrupted or intentionally retained R2Lab run. Physical release is authority-bound and exact. SynthRAN does not use broad radio power-off, wildcard deletion, or guessed ownership.
+Normal RFSIM workloads clean up their transient experiment resources inside the run while the accepted network epoch may remain available for controlled measurements. `release` is primarily for persistent physical/provider ownership after an interrupted or intentionally retained R2Lab run. Physical release is authority-bound and exact. SynthRAN does not use broad radio power-off, wildcard deletion, or guessed ownership.
 
-The controlled-load implementation is currently validated against the accepted RFSIM network-evidence path. Physical deterministic workload execution is implemented, but physical controlled-load campaign parity is not claimed until it has its own accepted evidence.
+The controlled-load implementation is currently validated against the accepted RFSIM network-evidence state. Physical deterministic workload execution is implemented, but physical controlled-load campaign parity is not claimed until it has its own accepted evidence.
 
 Current accepted measurements and interpretation limits are in [`docs/results.md`](docs/results.md).
 
-## Deterministic workload
+## Ambient-IoT workload boundary
 
-The historical reference workload is:
-
-```text
-10 deterministic Contiki-NG/Cooja sensors
--> RPL/6LoWPAN border router
--> counted ingress
--> UE-side MQTT handoff
--> 5G user plane
--> Open5GS UPF
--> run-owned central MQTT collector
--> canonical JSONL
--> deterministic Parquet
-```
-
-AMBER profiles use the same experiment-level evidence boundary without claiming Contiki, RPL, or 6LoWPAN semantics. The virtual backend carries the selected workload through srsUE/RFSIM. The physical backend substitutes the selected physical UE and N3xx radio where that profile is supported.
+For `ambient-v1`, AMBER models the Ambient-IoT source side, including energy state, framed access, backscatter/link behavior, collisions, and capture/SIC. Decoded AMBER events are then transported through SynthRAN's 5G user plane to the central collector. AMBER tags are not represented as 5G NR UEs and SynthRAN does not claim that AMBER injects an Ambient-IoT waveform into srsRAN.
 
 ## Documentation
 
@@ -248,4 +241,4 @@ AMBER profiles use the same experiment-level evidence boundary without claiming 
 
 Accepted virtual evidence includes Open5GS, srsRAN, RFSIM, deterministic telemetry, external-peer capacity calibration, controlled UDP load, fixed-window measurement, blocked campaigns, and offline paired analysis.
 
-R2Lab implements the corresponding physical lifecycle through exact hardware authority, N3xx gNB/N2, selected Quectel UE activation, PDU/user-plane proof, deterministic workload execution, and exact cleanup. A physical capability is considered established only when current accepted evidence proves it; historical observations are not upgraded into current authority or scientific results.
+R2Lab implements the corresponding physical lifecycle through exact hardware authority, N3xx gNB/N2, selected Quectel UE activation, PDU/user-plane verification, deterministic workload execution, and exact cleanup. A physical capability is considered established only when current accepted evidence proves it; historical observations are not upgraded into current authority or scientific results.
