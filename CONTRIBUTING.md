@@ -14,16 +14,16 @@ The supported top-level commands are intentionally small:
 
 ```text
 run
- doctor
+doctor
+calibrate
 inspect
-logs
-stop
-research
+analyze
+release
 deps
 dev
 ```
 
-Do not add a second executable or backend-specific command family. Backend choice belongs behind `--radio rfsim|r2lab`. Internal Python functions may remain narrow and backend-specific when the hardware mechanics genuinely differ.
+Do not add a second executable, a backend-specific command family, or a second live-log command. Backend choice belongs behind `--radio rfsim|r2lab`. Internal Python functions may remain narrow and backend-specific when the hardware mechanics genuinely differ.
 
 ## Backend contract
 
@@ -49,19 +49,25 @@ A SLICES project must already exist and be accessible to the operator. A unified
 
 ## Ansible boundary
 
-SynthRAN wraps pinned upstream Ansible content rather than reimplementing its mechanics. All long Ansible operations must use `synthran.ansible_streaming.run_streaming_ansible_command` so RFSIM and R2Lab produce the same sanitized task output, failures, and heartbeats.
+SynthRAN wraps pinned upstream Ansible content rather than reimplementing its mechanics. All long Ansible operations must use `synthran.ansible_streaming.run_streaming_ansible_command` so RFSIM and R2Lab produce the same sanitized execution events and heartbeat behavior.
 
-Do not introduce a second Ansible subprocess wrapper for a new live path.
+An Ansible TASK header is not execution evidence. A task that is subsequently skipped must not appear in the normal operator stream as executed work. Routine package/configuration chatter remains forensic-log material. Long meaningful tasks may emit heartbeats. Failures must retain a bounded sanitized task, host, state, and reason.
 
-## Run output
+Do not introduce a second Ansible subprocess/progress contract for a new live path.
 
-Every run writes a sanitized JSONL event stream under:
+## Run event contract
+
+`synthran run` is the only live operator progress surface. Lifecycle events, Ansible-derived progress, AMBER/research events, and acceptance use the same `[synthran]` renderer.
+
+Every run also persists the canonical structured event evidence under:
 
 ```text
 .synthran/events/<run-id>.jsonl
 ```
 
-The same messages are used for live progress and `synthran logs`. Backend-specific raw output must not become a second operator log contract.
+The JSONL event record is evidence, not a second public logging workflow. Detailed preparation/deployment/component logs are forensic artifacts and must not become another operator progress API.
+
+Network readiness and workload transport proof are distinct claims. A healthy gNB, live UE PDU session, and UPF route establish network/session readiness. End-to-end transport claims require a traffic or connection proof through the live UE PDU path.
 
 ## Research data
 
