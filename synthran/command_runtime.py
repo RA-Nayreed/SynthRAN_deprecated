@@ -12,7 +12,6 @@ import sys
 from typing import Mapping
 
 from synthran.dependencies import load_lock, sync_dependencies
-from synthran.experiment.runtime import execute_experiment
 from synthran.fiveg_ansible import build_network_plan, load_inventory, run_offline_doctor
 from synthran.live_preflight import run_live_preflight, save_live_evidence
 from synthran.network.resources import (
@@ -222,7 +221,7 @@ def _network_deploy(args: argparse.Namespace) -> int:
         timeout_seconds=args.timeout,
         progress=sys.stdout,
     )
-    print(f"Deployment completed for run {result.run_id}; path proof is still required.")
+    print(f"Deployment completed for run {result.run_id}; network verification is still required.")
     print(f"Sanitized manifest: {result.manifest_path}")
     print(f"Sanitized log: {result.log_path}")
     return 0
@@ -271,27 +270,6 @@ def _network_verify(args: argparse.Namespace) -> int:
     print(verification.render())
     print(f"Sanitized evidence: {evidence_path}")
     return 0 if verification.ready else 2
-
-
-def _experiment_run(args: argparse.Namespace) -> int:
-    manifest, evidence = _network_paths(args.network_run_root, args.network_run_id)
-    result = execute_experiment(
-        inventory=load_inventory(args.inventory),
-        lock=load_lock(args.lock),
-        dependency_root=args.deps_root,
-        network_manifest=manifest,
-        network_evidence=evidence,
-        run_id=args.run_id,
-        repository_root=repository_root(),
-        run_root=args.run_root,
-        collection_seconds=args.collection_seconds,
-        minimum_per_sensor=args.minimum_per_sensor,
-        progress=sys.stdout,
-    )
-    print(f"Run directory: {result.run_directory}")
-    if result.evidence_path.is_file():
-        print(f"Sanitized evidence: {result.evidence_path}")
-    return 0 if result.ready else 2
 
 
 def _parse_seeds(value: str) -> tuple[int, ...]:
