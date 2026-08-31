@@ -11,7 +11,7 @@ synthran run --radio rfsim ...
 synthran run --radio r2lab ...
 ```
 
-Backend-specific lifecycle command groups are not part of the product interface. Readiness, inspection, logs, and cleanup are likewise backend-neutral top-level commands.
+Backend-specific lifecycle command groups are not part of the product interface. Readiness, inspection, analysis, and cleanup remain backend-neutral top-level commands. Live progress belongs to `synthran run`; there is no second live-log command.
 
 ## Common run semantics
 
@@ -20,13 +20,16 @@ Every accepted run must have:
 - one immutable run ID;
 - verified provider context;
 - exact resource authority;
-- a proven 5G data path;
-- the deterministic ten-sensor workload;
+- verified live 5G session state;
+- workload-specific transport evidence when transport is claimed;
+- the selected deterministic IoT workload;
 - persisted acceptance evidence;
-- a sanitized run event stream;
+- a sanitized structured run event stream;
 - bounded, exact cleanup semantics.
 
-A backend may not declare acceptance merely because deployment returned zero. Acceptance is evidence-based and must prove the required path.
+A backend may not declare acceptance merely because deployment returned zero. Acceptance is evidence-based.
+
+Network/session readiness and end-to-end transport proof are distinct claims. A healthy gNB, a live UE PDU session, and a valid UPF route establish network readiness. A transport claim requires traffic or a connection explicitly sourced through the live UE PDU path.
 
 ## Allowed backend differences
 
@@ -40,7 +43,7 @@ The following are implementation details and may differ:
 | Registration observation | srsUE/Kubernetes state | modem/runtime state |
 | PDU interface | `tun_srsue1` | selected physical data interface, normally `wwan0` |
 | gNB deployment | virtual srsRAN path | pinned N3xx Helm values and singleton hardware radio |
-| Cleanup | run-owned virtual/network resources | run-owned gNB + exact radio/UE resources |
+| Cleanup | transient workload cleanup; accepted network epoch may be reused | run-owned gNB + exact radio/UE resources |
 
 These differences must stay below the experiment data contract.
 
@@ -49,7 +52,7 @@ These differences must stay below the experiment data contract.
 The following meanings are backend-independent:
 
 - run identity;
-- deterministic Cooja seed and sensor configuration;
+- selected IoT source/profile/seed and source parameters;
 - telemetry schema and sequence semantics;
 - collection-window definition;
 - minimum evidence gates;
@@ -110,9 +113,9 @@ All long Ansible work must use the shared sanitized streaming implementation. Th
 - R2Lab Open5GS Ansible;
 - R2Lab UE setup/connect/stop roles.
 
-The shared stream suppresses routine noise, retains meaningful tasks and failures, and emits heartbeats. Adding a backend-specific Ansible output parser would violate the contract.
+A PLAY/TASK header is not evidence that work executed. The adapter must suppress tasks that are subsequently skipped. Routine implementation chatter remains in forensic logs; long meaningful operations may produce heartbeats; failures preserve bounded sanitized context. Adding a backend-specific Ansible output parser would violate the contract.
 
-## Progress and logs
+## Run event contract
 
 Every run writes:
 
@@ -120,24 +123,24 @@ Every run writes:
 .synthran/events/<run-id>.jsonl
 ```
 
-This is the public run-log contract. Terminal output and `synthran logs` are two views of the same sanitized messages. `--quiet` affects only terminal rendering, not persistence.
+The event stream is structured evidence produced by the same renderer used for live `[synthran]` progress. It is not a separate operator logging workflow. `--quiet` affects terminal rendering, not persistence.
 
 Backend-specific raw logs may be retained internally when required for diagnosis, but they do not replace or redefine the common event stream.
 
 ## Acceptance boundaries
 
-The logical acceptance order is:
+The public lifecycle is:
 
 ```text
 provider
--> resources
--> 5G foundation
--> radio/gNB path
--> UE/PDU/user plane
+-> infrastructure
+-> network
 -> workload
--> final acceptance
--> cleanup
+-> acceptance
+-> cleanup (when applicable)
 ```
+
+`network` remains open until the backend-specific gNB/UE/PDU/routing readiness gates pass. Workload setup then proves any stronger transport property required by the experiment.
 
 For R2Lab the evidence record is more granular because hardware safety requires explicit N2, management, acquisition, registration, PDU, and user-plane boundaries. That extra granularity is an implementation safety requirement; it does not create a different public lifecycle.
 
@@ -157,7 +160,7 @@ Run IDs are never recycled for a different topology or experimental intent.
 
 The deterministic workload is implemented on both backends. Controlled-load research campaigns are a separate scientific capability. The current campaign runtime is accepted on RFSIM; R2Lab campaign parity is not claimed until physical load generation, measurement peer selection, timing validity, and cleanup have current accepted evidence.
 
-This is not a weakness in the public interface. It is the required distinction between architectural parity and scientifically demonstrated parity.
+This is the required distinction between architectural parity and scientifically demonstrated parity.
 
 ## Adding a backend or hardware profile
 
@@ -165,7 +168,7 @@ A new backend or physical profile should not add a new command family. It must i
 
 - extend the backend selection/capability model;
 - implement the required run boundaries;
-- use the common event stream;
+- use the common run-event stream;
 - use shared Ansible streaming where Ansible is involved;
 - produce experiment evidence compatible with the common semantics;
 - document unsupported scientific capability explicitly;
