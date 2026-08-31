@@ -16,6 +16,11 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
     backend_run.configure_run_parser(parser)
 
 
+def _mark_reported(exc: BackendError) -> BackendError:
+    setattr(exc, "synthran_reported", True)
+    return exc
+
+
 class RunCommandAdapter:
     """Execute a backend run through the canonical SynthRAN event stream."""
 
@@ -63,9 +68,11 @@ class RunCommandAdapter:
             return 0
         except BackendError as exc:
             progress.fail(str(exc))
-            raise
+            raise _mark_reported(exc)
         except Exception as exc:
             progress.fail(str(exc))
-            raise BackendError(str(exc)) from exc
+            wrapped = BackendError(str(exc))
+            _mark_reported(wrapped)
+            raise wrapped from exc
         finally:
             progress.close()
