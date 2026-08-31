@@ -116,25 +116,25 @@ class FoundationTests(unittest.TestCase):
         for heading in (
             "One command surface",
             "Virtual run",
-            "Controlled run on an accepted RFSIM path",
+            "Controlled run on an accepted RFSIM network",
             "Campaigns",
             "Capacity calibration",
             "Analyze",
             "Physical R2Lab run",
-            "Live progress and logs",
+            "Canonical live progress",
             "Documentation",
             "Capability boundary",
         ):
             self.assertIn(heading, readme)
 
         virtual = readme.split("## Virtual run", 1)[1].split(
-            "## Controlled run on an accepted RFSIM path", 1
+            "## Controlled run on an accepted RFSIM network", 1
         )[0]
         self.assertIn("synthran run", virtual)
         self.assertIn("--radio rfsim", virtual)
 
         physical = readme.split("## Physical R2Lab run", 1)[1].split(
-            "## Live progress and logs", 1
+            "## Canonical live progress", 1
         )[0]
         self.assertIn("synthran run", physical)
         self.assertIn("--radio r2lab", physical)

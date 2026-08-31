@@ -11,7 +11,7 @@ from synthran.research import CampaignCondition, ResearchError, build_campaign
 from synthran.research.amber_campaign import execute_amber_campaign
 from synthran.research.campaign_runtime import CampaignRuntimeSession, StableRuntime
 from synthran.research.v2 import RESEARCH_SUMMARY_SCHEMA_V2
-from synthran.rfsim_runtime import RfsimRuntimeState
+from synthran.network.rfsim import RfsimRuntimeState
 
 
 class _RuntimeContext:

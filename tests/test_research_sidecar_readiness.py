@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
-from synthran.research.instrumentation import (
-    _restart_edge_sidecar_and_wait,
-    _runtime_overrides,
-)
+from synthran.research.instrumentation import _restart_edge_sidecar_and_wait
 
 
 def _pod_status(
@@ -72,34 +68,6 @@ class SidecarReadinessBarrierTests(unittest.TestCase):
 
         restart.assert_called_once_with(inventory, "ue-pod")
         self.assertEqual(remote_json.call_count, 4)
-
-    def test_runtime_override_wraps_and_restores_sidecar_restart(self) -> None:
-        spec = SimpleNamespace(sensor_period_seconds=5, cooja_seed=424242)
-        collector = MagicMock()
-        inventory = object()
-        original_restart = __import__(
-            "synthran.experiment.runtime",
-            fromlist=["_restart_edge_sidecar"],
-        )._restart_edge_sidecar
-
-        with patch(
-            "synthran.research.instrumentation._restart_edge_sidecar_and_wait"
-        ) as barrier:
-            with _runtime_overrides(spec=spec, collector=collector):
-                from synthran.experiment import runtime as base_runtime
-
-                self.assertIsNot(base_runtime._restart_edge_sidecar, original_restart)
-                base_runtime._restart_edge_sidecar(inventory, "ue-pod")
-                barrier.assert_called_once_with(
-                    inventory,
-                    "ue-pod",
-                    restart=original_restart,
-                )
-
-            from synthran.experiment import runtime as base_runtime
-
-            self.assertIs(base_runtime._restart_edge_sidecar, original_restart)
-
 
 if __name__ == "__main__":
     unittest.main()

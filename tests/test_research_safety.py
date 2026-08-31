@@ -6,11 +6,11 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from synthran.command_runtime import _load_campaign
+from synthran.cli import _load_campaign
 from synthran.experiment import ExperimentError
 from synthran.fiveg_ansible import InventoryHost, NetworkInventory
 from synthran.research import CampaignCondition, ResearchError, build_campaign, save_campaign
-from synthran.research_iperf import (
+from synthran.research.iperf import (
     OwnedIperfServer,
     prove_measurement_peer,
     start_owned_iperf_server,
@@ -35,22 +35,22 @@ class OwnedIperfLifecycleTests(unittest.TestCase):
         managed.process.poll.return_value = None
         locked_binary = "/tmp/synthran-tools/iperf-3.21/bin/iperf3"
         with (
-            patch("synthran.research_iperf._reap") as reap,
-            patch("synthran.research_iperf.base_runtime._remote"),
+            patch("synthran.research.iperf._reap") as reap,
+            patch("synthran.research.iperf.base_runtime._remote"),
             patch(
-                "synthran.research_iperf.prepare_locked_iperf_server",
+                "synthran.research.iperf.prepare_locked_iperf_server",
                 return_value=locked_binary,
             ) as prepare,
             patch(
-                "synthran.research_iperf.base_runtime._start_process",
+                "synthran.research.iperf.base_runtime._start_process",
                 return_value=managed,
             ) as start,
             patch(
-                "synthran.research_iperf.base_runtime._remote_path_exists",
+                "synthran.research.iperf.base_runtime._remote_path_exists",
                 return_value=True,
             ),
             patch(
-                "synthran.research_iperf.ssh_command",
+                "synthran.research.iperf.ssh_command",
                 return_value=("ssh", "iperf3"),
             ) as ssh,
         ):
@@ -98,7 +98,7 @@ class OwnedIperfLifecycleTests(unittest.TestCase):
     def test_explicit_peer_target_must_belong_to_selected_server(self) -> None:
         inventory = self._inventory()
         with patch(
-            "synthran.research_iperf.base_runtime._remote",
+            "synthran.research.iperf.base_runtime._remote",
             return_value=(
                 "2: ens15f0np0    inet 172.28.2.95/26 metric 1024 "
                 "brd 172.28.2.127 scope global dynamic ens15f0np0\n"
@@ -129,8 +129,8 @@ class OwnedIperfLifecycleTests(unittest.TestCase):
             process=process,
         )
         with (
-            patch("synthran.research_iperf._reap") as reap,
-            patch("synthran.research_iperf.base_runtime._remote") as remote,
+            patch("synthran.research.iperf._reap") as reap,
+            patch("synthran.research.iperf.base_runtime._remote") as remote,
         ):
             stop_owned_iperf_server(inventory, server)
         process.stop.assert_called_once_with()

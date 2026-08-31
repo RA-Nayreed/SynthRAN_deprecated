@@ -63,7 +63,7 @@ class ExperimentContractTests(unittest.TestCase):
             manifest, evidence = self._network_evidence(
                 Path(temporary), status="deployed-unverified"
             )
-            with self.assertRaisesRegex(ExperimentError, "status=path-proven"):
+            with self.assertRaisesRegex(ExperimentError, "accepted network manifest"):
                 load_path_proven_network(manifest, evidence)
 
     def test_build_scenario_uses_accepted_pdu(self) -> None:

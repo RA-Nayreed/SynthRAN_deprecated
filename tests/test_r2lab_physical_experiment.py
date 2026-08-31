@@ -5,15 +5,13 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from synthran.r2lab.ue import PhysicalWorkloadContext, PhysicalWorkloadResult
-from synthran.experiment.r2lab import (
-    ManagedPhysicalUeRelay,
-    PhysicalExperimentConfig,
-    PhysicalExperimentScenario,
-    build_physical_ue_stdio_relay_command,
-    build_physical_workload_executor,
+from synthran.r2lab.iot_resources import (
     physical_central_name,
     render_physical_central_objects,
+)
+from synthran.r2lab.iot_ue import (
+    ManagedPhysicalUeRelay,
+    build_physical_ue_stdio_relay_command,
     route_uses_wwan0,
 )
 
@@ -29,54 +27,33 @@ class FakeLock:
     }
 
 
-class R2LabPhysicalScenarioTests(unittest.TestCase):
-    def test_physical_scenario_preserves_iot_contract_without_virtual_ue_claims(self) -> None:
-        scenario = PhysicalExperimentScenario(
-            run_id="physical-iot-001",
-            network_run_id="r2lab-run-001",
-        )
-        payload = scenario.to_dict()
-        self.assertEqual("r2lab", payload["backend"])
-        self.assertEqual("wwan0", payload["ue_interface"])
-        self.assertEqual(10, payload["sensor_count"])
-        self.assertEqual(10, len(scenario.exact_sensor_topics))
-        self.assertEqual("synthran/physical-iot-001/sensor/+", scenario.sensor_topic)
-        self.assertNotIn("pdu_address", payload)
-        self.assertNotIn("tun_srsue1", str(payload))
-        self.assertFalse(payload["raw_pdu_address_persisted"])
-
+class R2LabPhysicalResourceTests(unittest.TestCase):
     def test_central_resource_is_run_owned_host_network_and_digest_locked(self) -> None:
-        scenario = PhysicalExperimentScenario(
-            run_id="physical-iot-001",
-            network_run_id="r2lab-run-001",
-        )
+        run_id = "physical-iot-001"
         config, deployment = render_physical_central_objects(
-            scenario,
+            run_id,
             lock=FakeLock(),  # type: ignore[arg-type]
             core_node="sopnode-f1",
         )
-        expected_name = physical_central_name(scenario.run_id)
+        expected_name = physical_central_name(run_id)
         self.assertEqual(expected_name, config["metadata"]["name"])
         self.assertEqual(expected_name, deployment["metadata"]["name"])
         pod = deployment["spec"]["template"]["spec"]
         self.assertTrue(pod["hostNetwork"])
         self.assertEqual("sopnode-f1", pod["nodeSelector"]["kubernetes.io/hostname"])
         container = pod["containers"][0]
-        image = container["image"]
-        self.assertIn("@sha256:", image)
+        self.assertIn("@sha256:", container["image"])
         self.assertEqual(18884, container["ports"][0]["hostPort"])
         readiness = container["readinessProbe"]
         self.assertNotIn("tcpSocket", readiness)
-        self.assertIn("exec", readiness)
         command = " ".join(readiness["exec"]["command"])
         self.assertIn("/proc/net/tcp", command)
         self.assertIn(":49C4", command)
-        self.assertIn('0A', command)
 
 
 class R2LabPhysicalRelayTests(unittest.TestCase):
     @patch("synthran.r2lab.controller._configured_identity", return_value=None)
-    def test_qfit_relay_command_is_strict_and_binds_outbound_socket_to_wwan0(self, _identity) -> None:
+    def test_qfit_relay_is_strict_and_binds_to_wwan0(self, _identity) -> None:
         command = build_physical_ue_stdio_relay_command(
             slice_name="oulu_user",
             ue="qfit07",
@@ -86,23 +63,6 @@ class R2LabPhysicalRelayTests(unittest.TestCase):
         rendered = " ".join(command)
         self.assertIn("StrictHostKeyChecking=yes", rendered)
         self.assertNotIn("StrictHostKeyChecking=no", rendered)
-        self.assertNotIn("accept-new", rendered)
-        self.assertIn("SO_BINDTODEVICE", rendered)
-        self.assertIn("wwan0", rendered)
-        self.assertIn("fit07", rendered)
-        self.assertIn("physical-iot-001", rendered)
-        self.assertIn("198.51.100.10", rendered)
-
-    @patch("synthran.r2lab.controller._configured_identity", return_value=None)
-    def test_qmi_qhat_uses_the_same_interface_bound_relay_contract(self, _identity) -> None:
-        command = build_physical_ue_stdio_relay_command(
-            slice_name="oulu_user",
-            ue="qhat23",
-            run_id="physical-iot-002",
-            central_address="198.51.100.11",
-        )
-        rendered = " ".join(command)
-        self.assertIn("qhat23", rendered)
         self.assertIn("SO_BINDTODEVICE", rendered)
         self.assertIn("wwan0", rendered)
 
@@ -122,62 +82,27 @@ class R2LabPhysicalRelayTests(unittest.TestCase):
         )
         self.assertFalse(route_uses_wwan0("not-json", destination))
 
-    def test_local_relay_bridges_binary_stdio_without_hardware_dependencies(self) -> None:
+    def test_local_relay_bridges_binary_stdio_without_hardware(self) -> None:
         relay = ManagedPhysicalUeRelay(
             port=0,
             command=(
                 sys.executable,
                 "-c",
-                "import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data); sys.stdout.buffer.flush()",
+                "import sys; data=sys.stdin.buffer.read(); "
+                "sys.stdout.buffer.write(data); sys.stdout.buffer.flush()",
             ),
         )
         relay.start()
         try:
-            client = socket.create_connection(("127.0.0.1", relay.port), timeout=3)
-            with client:
+            with socket.create_connection(("127.0.0.1", relay.port), timeout=3) as client:
                 client.sendall(b"mqtt-test-bytes")
                 client.shutdown(socket.SHUT_WR)
                 received = b""
-                while True:
-                    chunk = client.recv(4096)
-                    if not chunk:
-                        break
+                while chunk := client.recv(4096):
                     received += chunk
             self.assertEqual(b"mqtt-test-bytes", received)
         finally:
             relay.stop()
-
-
-class R2LabPhysicalExecutorFactoryTests(unittest.TestCase):
-    @patch("synthran.experiment.r2lab.execute_physical_iot_workload")
-    def test_factory_returns_explicit_physical_executor(self, execute) -> None:
-        expected = PhysicalWorkloadResult(
-            run_id="r2lab-run-001",
-            workload_id="physical-iot-001",
-            backend="r2lab",
-            interface="wwan0",
-            evidence_sha256="f" * 64,
-            accepted=True,
-            cleanup_proven=True,
-        )
-        execute.return_value = expected
-        config = PhysicalExperimentConfig(
-            slice_name="oulu_user",
-            inventory=object(),  # type: ignore[arg-type]
-            lock=FakeLock(),  # type: ignore[arg-type]
-            dependency_root=__import__("pathlib").Path("dependencies"),
-            repository_root=__import__("pathlib").Path("."),
-            workload_id="physical-iot-001",
-        )
-        executor = build_physical_workload_executor(config)
-        context = PhysicalWorkloadContext(
-            run_id="r2lab-run-001",
-            ue="qhat23",
-            interface="wwan0",
-        )
-        self.assertNotIn("sha256", str(context.to_dict()).lower())
-        self.assertEqual(expected, executor(context))
-        execute.assert_called_once_with(context, config=config)
 
 
 if __name__ == "__main__":

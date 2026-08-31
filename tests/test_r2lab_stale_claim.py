@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from synthran.live_preflight import CommandResult
-from synthran.operator import release_command
+from synthran.cli import _release
 from synthran.r2lab.hardware import PhysicalTopology
 from synthran.r2lab.resources import R2LabTopologyResourceError
 from synthran.r2lab.stale_claim import retire_if_lease_absent
@@ -216,12 +216,12 @@ class R2LabStaleClaimTests(unittest.TestCase):
             os.chdir(root)
             try:
                 with (
-                    patch("synthran.operator.load_topology", return_value=topology()),
-                    patch("synthran.operator.r2lab_runner", runner),
-                    patch("synthran.operator.release_physical_resources") as release,
+                    patch("synthran.cli.load_topology", return_value=topology()),
+                    patch("synthran.cli.r2lab_runner", runner),
+                    patch("synthran.cli.release_physical_resources") as release,
                     redirect_stdout(output),
                 ):
-                    self.assertEqual(0, release_command(args))
+                    self.assertEqual(0, _release(args))
                 release.assert_not_called()
             finally:
                 os.chdir(previous)

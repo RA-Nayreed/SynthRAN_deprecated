@@ -6,8 +6,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from synthran.backends.base import BackendError
 from synthran.cli import _validate_persisted_iot_identity
+from synthran.errors import SynthRANError
 
 
 def _write(path: Path, value: dict[str, object]) -> None:
@@ -16,14 +16,14 @@ def _write(path: Path, value: dict[str, object]) -> None:
 
 
 class IoTResumeIdentityTests(unittest.TestCase):
-    def test_rfsim_rejects_different_source(self) -> None:
+    def test_rfsim_rejects_non_amber_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _write(
                 root / "runs" / "run-001" / "manifest.json",
                 {
                     "run_id": "run-001",
-                    "iot_source": "amber",
+                    "iot_source": "cooja",
                     "iot_profile": "transport-v1",
                     "iot_seed": 424242,
                     "sensor_period_seconds": 10,
@@ -34,9 +34,11 @@ class IoTResumeIdentityTests(unittest.TestCase):
                 radio="rfsim",
                 run_id="run-001",
                 experiment_root=root / "runs",
-                iot_source="cooja",
+                iot_profile="transport-v1",
+                iot_seed=424242,
+                sensor_period=10,
             )
-            with self.assertRaisesRegex(BackendError, "persisted workload uses IoT source"):
+            with self.assertRaisesRegex(SynthRANError, "not an AMBER workload"):
                 _validate_persisted_iot_identity(args)
 
     def test_rfsim_requires_exact_amber_identity(self) -> None:
@@ -64,10 +66,10 @@ class IoTResumeIdentityTests(unittest.TestCase):
             )
             _validate_persisted_iot_identity(args)
             args.iot_seed = 18
-            with self.assertRaisesRegex(BackendError, "iot_seed"):
+            with self.assertRaisesRegex(SynthRANError, "iot_seed"):
                 _validate_persisted_iot_identity(args)
 
-    def test_physical_legacy_manifest_is_treated_as_cooja(self) -> None:
+    def test_physical_legacy_manifest_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             _write(
@@ -88,14 +90,11 @@ class IoTResumeIdentityTests(unittest.TestCase):
                 run_id="run-001",
                 r2lab_run_root=root / "physical",
                 r2lab_experiment_root=root / "experiments",
-                iot_source="cooja",
+                iot_profile="transport-v1",
+                iot_seed=424242,
+                sensor_period=10,
             )
-            _validate_persisted_iot_identity(args)
-            args.iot_source = "amber"
-            args.iot_profile = "transport-v1"
-            args.iot_seed = 424242
-            args.sensor_period = 10
-            with self.assertRaisesRegex(BackendError, "persisted workload uses IoT source"):
+            with self.assertRaisesRegex(SynthRANError, "not an AMBER workload"):
                 _validate_persisted_iot_identity(args)
 
     def test_physical_amber_manifest_requires_exact_profile(self) -> None:
@@ -128,7 +127,7 @@ class IoTResumeIdentityTests(unittest.TestCase):
                 iot_seed=77,
                 sensor_period=20,
             )
-            with self.assertRaisesRegex(BackendError, "iot_profile"):
+            with self.assertRaisesRegex(SynthRANError, "iot_profile"):
                 _validate_persisted_iot_identity(args)
 
 

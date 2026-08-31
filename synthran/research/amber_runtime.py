@@ -39,6 +39,7 @@ from synthran.research.instrumentation import (
     _parse_probe_log,
     _prove_target_reachability,
     _prove_target_route,
+    _require_network_ready,
     _remove_target_route,
     _start_load_client,
     _start_probe,
@@ -50,7 +51,6 @@ from synthran.research.iperf import (
     stop_owned_iperf_server,
 )
 from synthran.research.iperf_window import parse_measurement_load_log
-from synthran.research.runtime import _require_network_ready
 from synthran.research.sampling import ResearchNetworkSampler
 from synthran.research.v2 import (
     AmberResearchSpec,

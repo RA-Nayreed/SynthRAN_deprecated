@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import ipaddress
@@ -12,17 +11,18 @@ from pathlib import Path
 import re
 import shlex
 import time
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Mapping
 
-from synthran.experiment import build_scenario as build_base_scenario
-from synthran.experiment import runtime as base_runtime
+from synthran.dependencies import DependencyLock
+from synthran.experiment import live as base_runtime
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.live_preflight import ssh_command
+from synthran.network.rfsim import _discover_pod
+from synthran.network.runtime import verify_network_path
 from synthran.research import (
     LOAD_RESULT_SCHEMA,
     PROBE_SCHEMA,
     ResearchError,
-    ResearchExperimentSpec,
     append_jsonl,
 )
 from synthran.research.iperf_toolchain import (
@@ -95,6 +95,50 @@ while True:
     if next_at <= after:
         next_at = started + (int((after - started) // interval) + 1) * interval
 '''
+
+
+def _require_network_ready(
+    *,
+    inventory: NetworkInventory,
+    lock: DependencyLock,
+    network_run_id: str,
+    ue_pod: str,
+    pdu_address: str,
+) -> Any:
+    """Re-prove the accepted network without allowing UE/PDU identity drift."""
+
+    report = verify_network_path(
+        inventory=inventory,
+        lock=lock,
+        run_id=network_run_id,
+        timeout_seconds=120,
+    )
+    if not report.ready:
+        failing = [
+            f"{check.name}: {check.detail}"
+            for check in report.checks
+            if not check.passed
+        ]
+        detail = "; ".join(failing) if failing else "network verification failed"
+        raise ResearchError(
+            "controlled measurement requires a currently path-proven network: "
+            + detail
+        )
+    current_ue = _discover_pod(
+        inventory,
+        component="ue",
+        network_run_id=network_run_id,
+    )
+    if current_ue != ue_pod:
+        raise ResearchError(
+            "controlled measurement UE pod changed after runtime handoff"
+        )
+    current_pdu = getattr(report, "pdu_address", None)
+    if not isinstance(current_pdu, str) or current_pdu != pdu_address:
+        raise ResearchError(
+            "controlled measurement UE PDU changed after runtime handoff"
+        )
+    return report
 
 _LOAD_CONNECTION_SCRIPT = r'''
 import socket, sys
@@ -583,34 +627,3 @@ def _base_cleanup_reproved(run_directory: Path) -> bool:
         isinstance(check, Mapping) and check.get("name") == "cleanup-base-network" and check.get("passed") is True
         for check in checks
     )
-
-
-@contextmanager
-def _runtime_overrides(
-    *,
-    spec: ResearchExperimentSpec,
-    collector: Callable[..., Any],
-) -> Iterator[None]:
-    original_builder = base_runtime.build_scenario
-    original_collector = base_runtime.collect_mqtt
-    original_restart = base_runtime._restart_edge_sidecar
-
-    def research_builder(**kwargs: Any) -> Any:
-        return build_base_scenario(
-            **kwargs,
-            sensor_period_seconds=spec.sensor_period_seconds,
-            cooja_seed=spec.cooja_seed,
-        )
-
-    def research_restart(inventory: NetworkInventory, pod: str) -> None:
-        _restart_edge_sidecar_and_wait(inventory, pod, restart=original_restart)
-
-    base_runtime.build_scenario = research_builder
-    base_runtime.collect_mqtt = collector
-    base_runtime._restart_edge_sidecar = research_restart
-    try:
-        yield
-    finally:
-        base_runtime.build_scenario = original_builder
-        base_runtime.collect_mqtt = original_collector
-        base_runtime._restart_edge_sidecar = original_restart

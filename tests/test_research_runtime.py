@@ -9,13 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from synthran.live_preflight import CommandResult
-from synthran.research import (
-    LoadSpec,
-    MeasurementSpec,
-    ResearchError,
-    ResearchExperimentSpec,
-    load_jsonl,
-)
+from synthran.research import ResearchError, load_jsonl
 from synthran.research.instrumentation import (
     _base_cleanup_reproved,
     _extract_iperf_bps,
@@ -24,7 +18,6 @@ from synthran.research.instrumentation import (
     _parse_probe_log,
     _prove_target_route,
     _remove_target_route,
-    _runtime_overrides,
 )
 from synthran.research.runtime import calibrate_capacity
 
@@ -140,31 +133,6 @@ class ProbeParsingTests(unittest.TestCase):
 
 
 class RuntimeSafetyTests(unittest.TestCase):
-    def _spec(self) -> ResearchExperimentSpec:
-        return ResearchExperimentSpec(
-            campaign_id="campaign-c01",
-            run_id="campaign-c01-b01-baseline",
-            network_run_id="network-accepted",
-            condition="baseline",
-            cooja_seed=17,
-            sensor_period_seconds=5,
-            measurement=MeasurementSpec(duration_seconds=60),
-            load=LoadSpec(enabled=False),
-            probe_target="192.0.2.1",
-        )
-
-    def test_runtime_overrides_restore_accepted_experiment_module_globals(self) -> None:
-        from synthran.experiment import runtime as base_runtime
-
-        original_builder = base_runtime.build_scenario
-        original_collector = base_runtime.collect_mqtt
-        replacement = object()
-        with _runtime_overrides(spec=self._spec(), collector=replacement):
-            self.assertIs(base_runtime.collect_mqtt, replacement)
-            self.assertIsNot(base_runtime.build_scenario, original_builder)
-        self.assertIs(base_runtime.build_scenario, original_builder)
-        self.assertIs(base_runtime.collect_mqtt, original_collector)
-
     def test_route_proof_rejects_non_ue_path(self) -> None:
         inventory = object()
         with (

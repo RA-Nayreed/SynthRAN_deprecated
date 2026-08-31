@@ -4,7 +4,7 @@ import json
 import unittest
 
 from synthran.r2lab.deployment import R2LabGnbLifecycleError, parse_gnb_pods_json
-from synthran.r2lab.runtime import N2State, parse_n2_log_state
+from synthran.r2lab.n2 import N2State, parse_n2_log_state
 
 
 class GnbPodObservationTests(unittest.TestCase):

@@ -7,7 +7,7 @@ import unittest
 
 from synthran.dependencies import load_lock
 from synthran.fiveg_ansible import load_inventory
-from synthran.network_runtime import (
+from synthran.network.runtime import (
     DEPLOYMENT_SCHEMA,
     NetworkRuntimeError,
     load_deployment_manifest,

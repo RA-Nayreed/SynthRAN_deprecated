@@ -119,13 +119,13 @@ class PhysicalPathCompositionTests(unittest.TestCase):
 
 
 class PhysicalWorkloadCompositionTests(unittest.TestCase):
-    @patch("synthran.r2lab.lifecycle.execute_physical_workload_handoff")
-    @patch("synthran.r2lab.lifecycle.build_physical_workload_executor")
-    @patch("synthran.r2lab.lifecycle.repository_root", return_value=Path("."))
-    @patch("synthran.r2lab.lifecycle.load_lock", return_value=object())
-    @patch("synthran.r2lab.lifecycle.load_physical_inventory", return_value=object())
-    @patch("synthran.r2lab.lifecycle.load_topology")
-    @patch("synthran.r2lab.lifecycle.PhysicalRunEvidence.read_json")
+    @patch("synthran.r2lab.iot_lifecycle.execute_physical_workload_handoff")
+    @patch("synthran.r2lab.iot_lifecycle.build_physical_iot_executor")
+    @patch("synthran.r2lab.iot_lifecycle.repository_root", return_value=Path("."))
+    @patch("synthran.r2lab.iot_lifecycle.load_lock", return_value=object())
+    @patch("synthran.r2lab.iot_lifecycle.load_physical_inventory", return_value=object())
+    @patch("synthran.r2lab.iot_lifecycle.load_topology")
+    @patch("synthran.r2lab.iot_lifecycle.PhysicalRunEvidence.read_json")
     def test_workload_reuses_physical_executor_and_common_result_semantics(
         self,
         read_evidence,

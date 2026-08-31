@@ -9,22 +9,12 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, Mapping, TextIO, cast
+from typing import Any, Mapping, TextIO
 
 from synthran.dependencies import DependencyLock
 from synthran.experiment import ExperimentError, sha256_file, validate_run_id, write_parquet
-from synthran.experiment.r2lab import (
-    LOCAL_UE_RELAY_PORT,
-    _central_rollout,
-    _prove_ue_route,
-    _ue_counter,
-    _ue_relay_process_count,
-    _validate_ue,
-    physical_central_name,
-    render_physical_central_objects,
-)
 from synthran.experiment.resources import CENTRAL_PORT
-from synthran.experiment.runtime import (
+from synthran.experiment.live import (
     LOCAL_CENTRAL_FORWARD_PORT,
     _core_address,
     _delete_experiment_objects,
@@ -55,6 +45,18 @@ from synthran.r2lab.iot_transport import (
     R2LAB_AMBER_INGRESS_PORT,
     R2LabIoTTransportAdapter,
     R2LabIoTTransportSession,
+)
+from synthran.r2lab.iot_resources import (
+    _central_rollout,
+    physical_central_name,
+    render_physical_central_objects,
+)
+from synthran.r2lab.iot_ue import (
+    LOCAL_UE_RELAY_PORT,
+    _prove_ue_route,
+    _ue_counter,
+    _ue_relay_process_count,
+    _validate_ue,
 )
 from synthran.r2lab.resources import load_topology
 from synthran.r2lab.ue import (
@@ -112,11 +114,6 @@ class PhysicalIoTConfig:
         if self.iot_seed < 0:
             raise R2LabIoTWorkloadError("IoT seed must be non-negative")
         return self
-
-
-@dataclass(frozen=True)
-class _CentralIdentity:
-    run_id: str
 
 
 def _utc_now() -> str:
@@ -326,11 +323,10 @@ def execute_physical_iot_workload(
             ),
         )
 
-        central_identity = _CentralIdentity(source_spec.run_id)
         central_deployment = physical_central_name(source_spec.run_id)
         for index, obj in enumerate(
             render_physical_central_objects(
-                cast(Any, central_identity),
+                source_spec.run_id,
                 lock=config.lock,
                 core_node=config.inventory.core_node.name,
             ),

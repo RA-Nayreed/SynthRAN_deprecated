@@ -89,7 +89,7 @@ class LiveResumeEvidenceTests(unittest.TestCase):
 
     def test_resume_converges_ephemeral_layers_before_historical_shortcuts(self) -> None:
         source = Path("synthran/r2lab/reconciliation.py").read_text(encoding="utf-8")
-        run_source = Path("synthran/backends/run.py").read_text(encoding="utf-8")
+        lifecycle_source = Path("synthran/lifecycle.py").read_text(encoding="utf-8")
 
         self.assertIn("converge_kubernetes_foundation(", source)
         self.assertIn("converge_physical_gnb(", source)
@@ -97,8 +97,10 @@ class LiveResumeEvidenceTests(unittest.TestCase):
         self.assertIn("_observe_ready_nodes(", source)
         self.assertNotIn("_replay_gnb", source)
         self.assertNotIn("physical-render.yaml", source)
-        live = run_source.index("reconcile_live_resume(")
-        workload = run_source.index("run deterministic ten-sensor experiment and collect data")
+        live = lifecycle_source.index("reconcile_live_resume(")
+        workload = lifecycle_source.index(
+            'progress.start("workload", "deterministic AMBER source and PDU-bound transport")'
+        )
         self.assertLess(live, workload)
 
     def test_physical_gnb_uses_upstream_srsran_config_and_deploy_role(self) -> None:

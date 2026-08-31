@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from io import StringIO
 import inspect
 import json
 from pathlib import Path
@@ -13,29 +12,17 @@ from unittest.mock import MagicMock, patch
 
 from synthran.experiment import ExperimentScenario
 from synthran.live_preflight import CommandResult
-from synthran.research import (
-    LoadSpec,
-    MeasurementSpec,
-    PROBE_SCHEMA,
-    ResearchError,
-    ResearchExperimentSpec,
-    load_jsonl,
-    probe_metrics,
-)
+from synthran.research import PROBE_SCHEMA, ResearchError, load_jsonl, probe_metrics
 from synthran.research.collector import collect_mqtt_window
 from synthran.research.instrumentation import (
     _IPERF_CONNECT_TIMEOUT_MS,
     _parse_probe_log,
     _prove_target_reachability,
+    _require_network_ready,
     _start_load_client,
     _wait_load_client_connected,
 )
 from synthran.research.iperf import _listener_ready
-from synthran.research.runtime import (
-    _ResearchProgressStream,
-    _finalize_validity,
-    _require_network_ready,
-)
 from synthran.research.sampling import _future_deadline
 
 
@@ -251,11 +238,11 @@ class ResearchPathTests(unittest.TestCase):
         ready = SimpleNamespace(ready=True, pdu_address="12.1.0.2", checks=())
         with (
             patch(
-                "synthran.research.runtime.verify_network_path",
+                "synthran.research.instrumentation.verify_network_path",
                 return_value=ready,
             ),
             patch(
-                "synthran.research.runtime.base_runtime._discover_ue_pod",
+                "synthran.research.instrumentation._discover_pod",
                 return_value="ue-pod",
             ),
         ):
@@ -272,11 +259,11 @@ class ResearchPathTests(unittest.TestCase):
         ready = SimpleNamespace(ready=True, pdu_address="12.1.0.3", checks=())
         with (
             patch(
-                "synthran.research.runtime.verify_network_path",
+                "synthran.research.instrumentation.verify_network_path",
                 return_value=ready,
             ),
             patch(
-                "synthran.research.runtime.base_runtime._discover_ue_pod",
+                "synthran.research.instrumentation._discover_pod",
                 return_value="ue-pod",
             ),
             self.assertRaisesRegex(ResearchError, "PDU changed"),
@@ -289,90 +276,10 @@ class ResearchPathTests(unittest.TestCase):
                 pdu_address="12.1.0.2",
             )
 
-    def test_loaded_zero_delivery_can_be_valid_when_independent_checks_pass(self) -> None:
-        spec = ResearchExperimentSpec(
-            campaign_id="campaign-c01",
-            run_id="campaign-c01-b01-load",
-            network_run_id="network-accepted",
-            condition="load",
-            measurement=MeasurementSpec(duration_seconds=30),
-            load=LoadSpec(enabled=True, target_bps=1_000_000),
-            probe_target="192.0.2.1",
-        )
-        summary = {
-            "telemetry": {"received_events": 0},
-            "validity": {
-                "telemetry_present": False,
-                "probe_present": True,
-                "network_samples_present": True,
-                "transport_path_sampled": True,
-                "load_target_achieved": True,
-            },
-        }
-        validity, path_ready = _finalize_validity(
-            summary=summary,
-            spec=spec,
-            telemetry_artifact_present=True,
-            window_present=True,
-            pre_network_ready=True,
-            pre_target_ready=True,
-            post_network_ready=True,
-            instrumentation_clean=True,
-            cleanup_reproved=True,
-        )
-        self.assertTrue(path_ready)
-        self.assertTrue(all(validity.values()))
-
-    def test_baseline_zero_delivery_remains_invalid(self) -> None:
-        spec = ResearchExperimentSpec(
-            campaign_id="campaign-c01",
-            run_id="campaign-c01-b01-baseline",
-            network_run_id="network-accepted",
-            condition="baseline",
-            measurement=MeasurementSpec(duration_seconds=30),
-            probe_target="192.0.2.1",
-        )
-        summary = {
-            "telemetry": {"received_events": 0},
-            "validity": {
-                "telemetry_present": False,
-                "probe_present": True,
-                "network_samples_present": True,
-                "transport_path_sampled": True,
-                "load_target_achieved": True,
-            },
-        }
-        validity, _ = _finalize_validity(
-            summary=summary,
-            spec=spec,
-            telemetry_artifact_present=True,
-            window_present=True,
-            pre_network_ready=True,
-            pre_target_ready=True,
-            post_network_ready=True,
-            instrumentation_clean=True,
-            cleanup_reproved=True,
-        )
-        self.assertFalse(validity["baseline_delivery_observed"])
-
-
 class SchedulingAndOutputTests(unittest.TestCase):
     def test_missed_sampling_deadlines_advance_without_catch_up(self) -> None:
         self.assertEqual(_future_deadline(2.0, 1.0, 4.2), 5.0)
         self.assertEqual(_future_deadline(5.0, 1.0, 4.2), 5.0)
-
-    def test_research_output_replaces_ambiguous_base_result_lines(self) -> None:
-        sink = StringIO()
-        stream = _ResearchProgressStream(sink)
-        stream.write("[synthran] collector: OK (0 events from 10 sensors)\n")
-        stream.write("[synthran] network prerequisite: OK\n")
-        stream.write("[synthran] experiment path NOT PROVEN\n")
-        stream.flush()
-        self.assertEqual(
-            sink.getvalue(),
-            "[synthran] network prerequisite: OK\n",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

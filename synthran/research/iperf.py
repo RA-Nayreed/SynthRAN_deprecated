@@ -8,7 +8,7 @@ import re
 import time
 
 from synthran.experiment import ExperimentError, validate_run_id
-import synthran.experiment_runtime as base_runtime
+from synthran.experiment import live as base_runtime
 from synthran.fiveg_ansible import InventoryHost, NetworkInventory
 from synthran.live_preflight import ssh_command
 from synthran.research.iperf_toolchain import (

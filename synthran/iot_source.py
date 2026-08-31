@@ -1,9 +1,8 @@
 """Portable IoT source contracts and offline Amber plan preparation.
 
-This module deliberately places the portable boundary above source-specific radio
-mechanisms. Cooja remains the accepted live path until the Amber transport is
-proven; new v2 artifacts never claim RPL, 6LoWPAN, SLIP, a PDU address, or a UE
-interface as properties of the IoT source.
+This module places the portable boundary above source-specific radio mechanisms.
+Amber plans describe source events only; transport and radio identity remain owned
+by the live RFSIM or physical R2Lab runtime.
 """
 
 from __future__ import annotations

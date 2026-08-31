@@ -42,6 +42,10 @@ class ModuleLayoutTests(unittest.TestCase):
             "research/v2.py",
             "r2lab/__init__.py",
             "r2lab/n2.py",
+            "r2lab/iot_resources.py",
+            "r2lab/iot_transport.py",
+            "r2lab/iot_ue.py",
+            "r2lab/iot_workload.py",
             "r2lab/resources.py",
             "r2lab/ue_ansible.py",
             "r2lab/upstream_roles.py",
@@ -87,6 +91,7 @@ class ModuleLayoutTests(unittest.TestCase):
         present = {path.name for path in SOURCE.iterdir() if path.is_file()}
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
         self.assertFalse((SOURCE / "experiment" / "runtime.py").exists())
+        self.assertFalse((SOURCE / "experiment" / "r2lab.py").exists())
 
     def test_superseded_r2lab_stack_does_not_return(self) -> None:
         r2lab = SOURCE / "r2lab"
@@ -126,6 +131,24 @@ class ModuleLayoutTests(unittest.TestCase):
             "synthran/r2lab/qfit_activation_provider.py",
         ):
             self.assertFalse(_tracked(forbidden), forbidden)
+
+    def test_active_modules_do_not_import_retired_boundaries(self) -> None:
+        retired = (
+            "synthran.command_runtime",
+            "synthran.experiment.runtime",
+            "synthran.experiment.r2lab",
+            "synthran.experiment_runtime",
+            "synthran.mqtt_collector",
+            "synthran.network_runtime",
+            "synthran.operator",
+            "synthran.r2lab.runtime",
+            "synthran.research_iperf",
+            "synthran.rfsim_runtime",
+        )
+        for path in SOURCE.rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            for module in retired:
+                self.assertNotIn(module, source, f"{path.relative_to(SOURCE)}: {module}")
 
 
 if __name__ == "__main__":

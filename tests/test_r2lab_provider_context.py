@@ -5,10 +5,9 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
-from synthran.backends.base import BackendError
+from synthran.errors import SynthRANError
 from synthran.provider import ensure_slices_provider_context
 from synthran.slices_controller import ControllerCommandResult
-from synthran.workspace.model import WorkspaceError
 
 
 class ProviderContextTests(unittest.TestCase):
@@ -82,35 +81,15 @@ class ProviderContextTests(unittest.TestCase):
         )
         self.assertIn(("post5g", "experiment", "prefix", "provider-existing"), calls)
 
-    @patch("synthran.provider.verify_slices_controller")
-    @patch("synthran.provider.load_lock")
-    @patch("synthran.provider.load_workspace")
-    @patch("synthran.provider.find_workspace_root")
     @patch("synthran.provider.slices_runner")
-    def test_project_defaults_from_workspace(
-        self, runner, find_root, load_workspace, load_lock, verify
-    ) -> None:
-        runner.return_value = ControllerCommandResult(0, "ok")
-        find_root.return_value = Path("/repo")
-        load_workspace.return_value = Mock(project="post5g-beta")
-        load_lock.return_value = Mock()
-        verify.return_value = Mock(ready=True, post5g_network=Mock())
-
-        project, _, _, _ = ensure_slices_provider_context(self.args(slices_project=None))
-        self.assertEqual("post5g-beta", project)
-        load_workspace.assert_called_once_with(Path("/repo"))
-
-    @patch("synthran.provider.find_workspace_root")
-    @patch("synthran.provider.slices_runner")
-    def test_missing_project_fails_before_provider_mutation(self, runner, find_root) -> None:
-        find_root.side_effect = WorkspaceError("no workspace")
-        with self.assertRaisesRegex(BackendError, "workspace project"):
+    def test_missing_project_fails_before_provider_mutation(self, runner) -> None:
+        with self.assertRaisesRegex(SynthRANError, "requires --slices-project"):
             ensure_slices_provider_context(self.args(slices_project=None))
         runner.assert_not_called()
 
     @patch("synthran.provider.slices_runner")
     def test_invalid_duration_fails_before_provider_mutation(self, runner) -> None:
-        with self.assertRaisesRegex(BackendError, "duration"):
+        with self.assertRaisesRegex(SynthRANError, "duration"):
             ensure_slices_provider_context(self.args(slices_duration="four hours"))
         runner.assert_not_called()
 

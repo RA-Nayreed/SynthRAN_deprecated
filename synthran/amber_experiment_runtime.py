@@ -25,14 +25,14 @@ from synthran.experiment import (
     validate_run_id,
     write_parquet,
 )
-from synthran.experiment_resources import (
+from synthran.experiment.resources import (
     CENTRAL_PORT,
     EDGE_CONTAINER,
     names,
     render_edge_patch,
     render_experiment_objects,
 )
-from synthran.experiment.runtime import (
+from synthran.experiment.live import (
     DEFAULT_COLLECTION_SECONDS,
     DEFAULT_MINIMUM_PER_SENSOR,
     LOCAL_CENTRAL_FORWARD_PORT,
@@ -76,9 +76,9 @@ from synthran.iot_source import (
     PreparedIoTPlan,
     reconcile_source_and_transport,
 )
-from synthran.network_runtime import verify_network_path
+from synthran.network.runtime import verify_network_path
 from synthran.pdu_transport_probe import wait_pdu_bound_tcp_connected
-from synthran.rfsim_runtime import reconcile_rfsim_runtime
+from synthran.network.rfsim import reconcile_rfsim_runtime
 
 
 AMBER_EXPERIMENT_SCHEMA = "synthran/experiment-run/v2alpha1"

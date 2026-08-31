@@ -9,16 +9,7 @@ import time
 from typing import Any, Mapping
 
 from synthran.experiment import ExperimentError, validate_run_id
-from synthran.experiment.r2lab import (
-    LOCAL_UE_RELAY_PORT,
-    ManagedPhysicalUeRelay,
-    _prove_ue_route,
-    _ue_relay_process_count,
-    _validate_ue,
-    build_physical_ue_stdio_relay_command,
-)
-from synthran.experiment.runtime import (
-    REMOTE_EDGE_FORWARD_PORT,
+from synthran.experiment.live import (
     _core_address,
     _remote,
     _remote_path_exists,
@@ -38,10 +29,19 @@ from synthran.iot_edge_transport import (
 )
 from synthran.iot_source import MQTTEndpoint
 from synthran.live_preflight import LivePreflightError, ssh_command
+from synthran.r2lab.iot_ue import (
+    LOCAL_UE_RELAY_PORT,
+    ManagedPhysicalUeRelay,
+    _prove_ue_route,
+    _ue_relay_process_count,
+    _validate_ue,
+    build_physical_ue_stdio_relay_command,
+)
 
 
 R2LAB_AMBER_INGRESS_PORT = 18886
 R2LAB_AMBER_LOCAL_PORT = 18886
+R2LAB_EDGE_FORWARD_PORT = 18883
 
 
 class R2LabIoTTransportError(ExperimentError):
@@ -156,7 +156,7 @@ class R2LabIoTTransportSession:
                 _local_port_is_closed(self._endpoint.port)
                 and _local_port_is_closed(self.relay_port)
                 and _remote_port_is_closed(self.inventory, self.remote_ingress_port)
-                and _remote_port_is_closed(self.inventory, REMOTE_EDGE_FORWARD_PORT)
+                and _remote_port_is_closed(self.inventory, R2LAB_EDGE_FORWARD_PORT)
             ):
                 break
             time.sleep(0.25)
@@ -167,7 +167,7 @@ class R2LabIoTTransportSession:
             self._cleanup_errors.append("local physical UE relay still listens")
         if not _remote_port_is_closed(self.inventory, self.remote_ingress_port):
             self._cleanup_errors.append("remote counted ingress still listens")
-        if not _remote_port_is_closed(self.inventory, REMOTE_EDGE_FORWARD_PORT):
+        if not _remote_port_is_closed(self.inventory, R2LAB_EDGE_FORWARD_PORT):
             self._cleanup_errors.append("remote physical UE forward still listens")
 
         try:
@@ -247,7 +247,7 @@ class R2LabIoTTransportAdapter:
             raise R2LabIoTTransportError("local physical UE relay port is already in use")
         if not _remote_port_is_closed(self.inventory, self.remote_ingress_port):
             raise R2LabIoTTransportError("remote counted-ingress port is already in use")
-        if not _remote_port_is_closed(self.inventory, REMOTE_EDGE_FORWARD_PORT):
+        if not _remote_port_is_closed(self.inventory, R2LAB_EDGE_FORWARD_PORT):
             raise R2LabIoTTransportError("remote physical UE forward port is already in use")
 
         logs = run_directory / "logs"
@@ -291,7 +291,7 @@ class R2LabIoTTransportAdapter:
                 "physical UE reverse forward",
                 _ssh_reverse_tunnel_command(
                     self.inventory,
-                    remote_port=REMOTE_EDGE_FORWARD_PORT,
+                    remote_port=R2LAB_EDGE_FORWARD_PORT,
                     local_port=relay.port,
                 ),
                 cwd=self.repository_root,
@@ -300,7 +300,7 @@ class R2LabIoTTransportAdapter:
             processes.append(reverse_forward)
             _wait_remote_listener(
                 self.inventory,
-                port=REMOTE_EDGE_FORWARD_PORT,
+                port=R2LAB_EDGE_FORWARD_PORT,
                 process=reverse_forward,
             )
 
@@ -310,7 +310,7 @@ class R2LabIoTTransportAdapter:
                 "--listen-host 127.0.0.1 "
                 f"--listen-port {self.remote_ingress_port} "
                 "--target-host 127.0.0.1 "
-                f"--target-port {REMOTE_EDGE_FORWARD_PORT} "
+                f"--target-port {R2LAB_EDGE_FORWARD_PORT} "
                 f"--snapshot-path {shlex.quote(snapshot_remote)}"
             )
             try:

@@ -144,6 +144,9 @@ class R2LabIoTWorkloadTests(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.dict("os.environ", {"CONDA_DEFAULT_ENV": "synthran"}))
             stack.enter_context(
+                patch("synthran.r2lab.iot_workload.sys.platform", "linux")
+            )
+            stack.enter_context(
                 patch(
                     "synthran.r2lab.iot_workload._validate_ue",
                     return_value=SimpleNamespace(),

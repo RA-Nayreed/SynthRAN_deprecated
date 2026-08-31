@@ -158,6 +158,152 @@ def _remote(
     return _checked(command, label=label, timeout_seconds=timeout_seconds)
 
 
+def _remote_path_exists(
+    inventory: NetworkInventory,
+    path: str,
+    *,
+    timeout_seconds: int = 5,
+) -> bool:
+    """Check one exact remote path without conflating absence and probe failure."""
+
+    try:
+        command = ssh_command(inventory.core_node, "test", "-e", path)
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    result = _run(command, timeout_seconds=timeout_seconds)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    raise ExperimentError(
+        f"remote existence probe for {path} failed with exit code {result.returncode}"
+    )
+
+
+def _remote_process_reap(
+    inventory: NetworkInventory,
+    *,
+    patterns: Sequence[str],
+    orphan_only: bool,
+    label: str,
+) -> Mapping[str, Any]:
+    """Reap only remote processes matching explicit SynthRAN signatures."""
+
+    payload = json.dumps(
+        {
+            "patterns": list(patterns),
+            "orphan_only": orphan_only,
+        },
+        sort_keys=True,
+    )
+    reaper = r'''
+import json, os, re, signal, sys, time
+
+cfg = json.loads(sys.argv[1])
+patterns = [re.compile(value) for value in cfg["patterns"]]
+self_pid = os.getpid()
+
+def read_process(pid):
+    if pid == self_pid:
+        return None
+    try:
+        raw = open(f"/proc/{pid}/cmdline", "rb").read()
+        if not raw:
+            return None
+        cmd = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        ppid = None
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("PPid:"):
+                    ppid = int(line.split()[1])
+                    break
+        if ppid is None:
+            return None
+        return {"pid": pid, "ppid": ppid, "cmd": cmd}
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, ValueError):
+        return None
+
+records = {}
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    record = read_process(int(entry))
+    if record is not None and any(pattern.search(record["cmd"]) for pattern in patterns):
+        records[record["pid"]] = record
+
+def orphaned(record):
+    if record["ppid"] == 1:
+        return True
+    parent = records.get(record["ppid"])
+    return parent is not None and parent["ppid"] == 1
+
+blocked = sorted(
+    record["pid"]
+    for record in records.values()
+    if cfg["orphan_only"] and not orphaned(record)
+)
+if blocked:
+    print(json.dumps({"killed": [], "blocked": blocked, "remaining": []}))
+    raise SystemExit(0)
+
+targets = sorted(records)
+for pid in targets:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+def alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            fields = handle.read().split()
+        return len(fields) > 2 and fields[2] != "Z"
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return False
+
+deadline = time.monotonic() + 5.0
+while time.monotonic() < deadline and any(alive(pid) for pid in targets):
+    time.sleep(0.1)
+for pid in targets:
+    if alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+deadline = time.monotonic() + 2.0
+while time.monotonic() < deadline and any(alive(pid) for pid in targets):
+    time.sleep(0.1)
+
+remaining = sorted(pid for pid in targets if alive(pid))
+print(json.dumps({"killed": targets, "blocked": [], "remaining": remaining}))
+'''
+    output = _remote(
+        inventory,
+        "python3",
+        "-c",
+        reaper,
+        payload,
+        label=label,
+        timeout_seconds=20,
+    )
+    try:
+        result = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ExperimentError(f"{label} did not return JSON") from exc
+    if not isinstance(result, dict):
+        raise ExperimentError(f"{label} returned malformed state")
+    blocked = result.get("blocked")
+    remaining = result.get("remaining")
+    if blocked:
+        raise ExperimentError(
+            "an active SynthRAN runtime already owns reserved resources; "
+            "refusing to terminate a non-orphaned process"
+        )
+    if remaining:
+        raise ExperimentError(f"{label} left matching remote processes alive: {remaining}")
+    return result
+
+
 def _remote_json(
     inventory: NetworkInventory,
     command: str,
@@ -272,6 +418,63 @@ def _wait_tcp(
     raise ExperimentError(f"TCP endpoint {host}:{port} did not become ready")
 
 
+def _wait_remote_tcp(
+    inventory: NetworkInventory,
+    *,
+    host: str,
+    port: int,
+    timeout_seconds: int = 30,
+    process: ManagedProcess | None = None,
+) -> None:
+    """Wait until a remote TCP port is connectable through the selected core."""
+
+    probe = (
+        "import socket; "
+        "s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); "
+        "s.settimeout(2); "
+        f"s.connect(({host!r},{port})); s.close(); print('ok')"
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if process is not None and process.process.poll() is not None:
+            raise ExperimentError(
+                f"{process.name} exited before remote TCP endpoint {host}:{port} became ready"
+            )
+        try:
+            command = ssh_command(inventory.core_node, "python3", "-c", probe)
+        except LivePreflightError as exc:
+            raise ExperimentError(str(exc)) from exc
+        result = _run(command, timeout_seconds=5)
+        if result.returncode == 0 and "ok" in result.stdout:
+            return
+        time.sleep(0.5)
+    raise ExperimentError(f"remote TCP endpoint {host}:{port} did not become ready")
+
+
+def _transfer_file(
+    inventory: NetworkInventory,
+    source_file: Path,
+    remote_path: str,
+    *,
+    label: str,
+) -> None:
+    """Transfer one UTF-8 helper through the existing strict SSH boundary."""
+
+    content = source_file.read_text(encoding="utf-8")
+    try:
+        command = ssh_command(
+            inventory.core_node,
+            "sh",
+            "-c",
+            f"cat > {shlex.quote(remote_path)}",
+        )
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    result = _run(command, input_text=content, timeout_seconds=30)
+    if result.returncode != 0:
+        raise ExperimentError(f"{label} failed")
+
+
 def _start_process(
     name: str,
     command: Sequence[str],
@@ -321,6 +524,34 @@ def _ssh_tunnel_command(
             f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}",
             target,
             remote_command,
+        )
+    )
+    return tuple(base)
+
+
+def _ssh_reverse_tunnel_command(
+    inventory: NetworkInventory,
+    *,
+    remote_port: int,
+    local_port: int,
+) -> tuple[str, ...]:
+    """Build a strict reverse tunnel through the selected core host."""
+
+    try:
+        base = list(ssh_command(inventory.core_node))
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    if not base:
+        raise ExperimentError("unable to construct strict SSH tunnel")
+    target = base.pop()
+    base.extend(
+        (
+            "-N",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-R",
+            f"127.0.0.1:{remote_port}:127.0.0.1:{local_port}",
+            target,
         )
     )
     return tuple(base)
