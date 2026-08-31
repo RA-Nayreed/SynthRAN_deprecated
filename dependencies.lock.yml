@@ -1,6 +1,6 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-08-30T02:10:41Z",
+  "resolved_at_utc": "2026-08-31T05:00:00Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
@@ -9,15 +9,6 @@
       "sync": true,
       "role": "network deployment adapter target",
       "license": "NOASSERTION"
-    },
-    "contiki_ng": {
-      "url": "https://github.com/contiki-ng/contiki-ng.git",
-      "commit": "2b87baf3ebdde3c8e37ca791d2bc84bfd76c49a4",
-      "source_ref": "release/v5.1",
-      "checkout": "contiki-ng",
-      "sync": true,
-      "role": "IoT firmware and Cooja simulation base",
-      "license": "BSD-3-Clause"
     },
     "amber": {
       "url": "https://github.com/RA-Nayreed/Amber.git",
@@ -243,11 +234,6 @@
         "version": "2.20.5",
         "role": "Golden path controller and isolated wrapper execution",
         "license": "GPL-3.0-or-later"
-      },
-      "openjdk": {
-        "version": "21.0.9",
-        "role": "Java runtime required by Cooja",
-        "license": "GPL-2.0-with-classpath-exception"
       },
       "simpy": {
         "version": "4.1.1",
