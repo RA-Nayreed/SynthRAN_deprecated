@@ -1,171 +1,48 @@
-"""One sequential run command across SynthRAN radio backends."""
+"""One sequential run implementation across SynthRAN radio backends."""
 
 from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import shlex
-import sys
-from typing import Mapping, TextIO
+from typing import Mapping
 
 from synthran import command_runtime
 from synthran.backends.base import BackendError
-from synthran.dependencies import DependencyError, load_lock
-from synthran.experiment import ExperimentError
-from synthran.experiment.runtime import DEFAULT_COLLECTION_SECONDS, DEFAULT_MINIMUM_PER_SENSOR
-from synthran.fiveg_ansible import FiveGAnsibleError, parse_inventory
+from synthran.dependencies import load_lock
+from synthran.experiment.live import DEFAULT_COLLECTION_SECONDS, DEFAULT_MINIMUM_PER_SENSOR
+from synthran.fiveg_ansible import parse_inventory
 from synthran.live_preflight import (
     LivePreflightError,
     load_fresh_live_evidence,
     subprocess_runner as cluster_runner,
 )
-from synthran.network.resources import SUPPORTED_NODES, ResourcePreparationError, build_preparation_inventory
-from synthran.network.runtime import NetworkRuntimeError, validate_run_id
-from synthran.privacy import PrivacyError
+from synthran.network.resources import SUPPORTED_NODES, build_preparation_inventory
+from synthran.network.runtime import validate_run_id
 from synthran.provider import ensure_slices_provider_context
-from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence, R2LabAcceptanceError
-from synthran.r2lab.foundation_topology import R2LabTopologyFoundationError, accept_topology_foundation
-from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology, R2LabHardwareError
-from synthran.r2lab.lifecycle import R2LabPhysicalLifecycleError, continue_physical_path, run_physical_workload
-from synthran.r2lab.n3xx import R2LabN3xxError, stage_n3xx_gnb, start_n3xx_gnb, stop_n3xx_gnb
-from synthran.r2lab.reconciliation import R2LabLiveReconciliationError, reconcile_live_resume
+from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence
+from synthran.r2lab.foundation_topology import accept_topology_foundation
+from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology
+from synthran.r2lab.lifecycle import continue_physical_path, run_physical_workload
+from synthran.r2lab.n3xx import stage_n3xx_gnb, start_n3xx_gnb, stop_n3xx_gnb
+from synthran.r2lab.reconciliation import reconcile_live_resume
 from synthran.r2lab.resources import (
-    R2LabTopologyResourceError,
     load_topology,
     prepare_physical_resources,
     reconcile_physical_resources,
     release_physical_resources,
 )
-from synthran.r2lab.ue import R2LabPhysicalUeError
-from synthran.r2lab.upstream_roles import R2LabUpstreamRoleError, stop_role_managed_gnb
-from synthran.slices_controller import SlicesControllerError
+from synthran.r2lab.upstream_roles import stop_role_managed_gnb
+from synthran.run_events import RunProgress
 from synthran.utils.environment import scoped_environment
 from synthran.utils.ssh import strict_ssh_command
-from synthran.workspace.model import WorkspaceError
 
 
 _EXECUTABLE_DEVICES = tuple(sorted(name for name, profile in RADIOS.items() if profile.executable))
 _EXECUTABLE_UES = tuple(sorted(name for name, profile in UES.items() if profile.executable))
-
-
-class _RunEventStream:
-    """Write sanitized run output to the terminal and one JSONL event file."""
-
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        radio: str,
-        terminal: TextIO,
-        terminal_enabled: bool,
-        root: Path = Path(".synthran/events"),
-    ) -> None:
-        self.run_id = run_id
-        self.radio = radio
-        self.terminal = terminal
-        self.terminal_enabled = terminal_enabled
-        self.path = root.expanduser().resolve() / f"{run_id}.jsonl"
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._buffer = ""
-
-    def writable(self) -> bool:
-        return True
-
-    def _record(self, message: str) -> None:
-        message = message.rstrip("\r")
-        if not message:
-            return
-        if self.terminal_enabled:
-            print(message, file=self.terminal, flush=True)
-        payload = {
-            "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "run_id": self.run_id,
-            "radio": self.radio,
-            "message": message,
-        }
-        with self.path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(json.dumps(payload, sort_keys=True) + "\n")
-
-    def write(self, text: str) -> int:
-        self._buffer += text
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            self._record(line)
-        return len(text)
-
-    def flush(self) -> None:
-        if self._buffer:
-            self._record(self._buffer)
-            self._buffer = ""
-        self.terminal.flush()
-
-
-class _RunProgress:
-    """Common live and persisted progress for every run backend."""
-
-    def __init__(
-        self,
-        *,
-        enabled: bool = True,
-        stream: TextIO | None = None,
-        run_id: str | None = None,
-        radio: str | None = None,
-    ) -> None:
-        terminal = stream if stream is not None else sys.stderr
-        if run_id is not None and radio is not None:
-            self.stream: TextIO = _RunEventStream(
-                run_id=run_id,
-                radio=radio,
-                terminal=terminal,
-                terminal_enabled=enabled,
-            )
-            self.event_path: Path | None = self.stream.path
-        else:
-            self.stream = terminal
-            self.event_path = None
-        self.enabled = enabled
-        self.current_stage: str | None = None
-
-    @property
-    def child_stream(self) -> TextIO:
-        return self.stream
-
-    def _emit(self, marker: str, stage: str, detail: str | None = None) -> None:
-        suffix = f": {detail}" if detail else ""
-        if self.event_path is None and not self.enabled:
-            return
-        print(f"{marker} {stage}{suffix}", file=self.stream, flush=True)
-
-    def start(self, stage: str, detail: str | None = None) -> None:
-        self.current_stage = stage
-        self._emit("→", stage, detail)
-
-    def done(self, stage: str, detail: str | None = None) -> None:
-        self._emit("✓", stage, detail)
-        if self.current_stage == stage:
-            self.current_stage = None
-
-    def resumed(self, stage: str, detail: str | None = None) -> None:
-        self._emit("↻", stage, detail)
-        if self.current_stage == stage:
-            self.current_stage = None
-
-    def skipped(self, stage: str, detail: str | None = None) -> None:
-        self._emit("–", stage, detail)
-        if self.current_stage == stage:
-            self.current_stage = None
-
-    def fail(self, detail: str) -> None:
-        stage = self.current_stage or "run"
-        self._emit("✗", stage, detail)
-        self.current_stage = None
-
-    def close(self) -> None:
-        self.stream.flush()
 
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
@@ -282,8 +159,8 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         "run",
         help="execute one complete SynthRAN run",
         description=(
-            "Create or reuse provider context, prepare resources, prove the data path, "
-            "run the deterministic workload, persist evidence, and clean up exact owned resources."
+            "Create or reuse provider context, prepare resources, verify network readiness, "
+            "run the deterministic AMBER workload, persist evidence, and clean up exact owned resources."
         ),
     )
     _add_common(run)
@@ -371,10 +248,24 @@ def _physical_context(args: argparse.Namespace) -> tuple[str, str, str | None, P
     return str(args.r2lab_slice), owner, args.allocation_id, known_hosts
 
 
+def _default_progress(args: argparse.Namespace) -> RunProgress:
+    return RunProgress(
+        enabled=False,
+        run_id=args.run_id,
+        radio=args.radio,
+        network_root=(
+            args.network_run_root if args.radio == "rfsim" else args.r2lab_run_root
+        ),
+        experiment_root=(
+            args.experiment_root if args.radio == "rfsim" else args.r2lab_experiment_root
+        ),
+    )
+
+
 def _run_r2lab(
-    args: argparse.Namespace, progress: _RunProgress | None = None
+    args: argparse.Namespace, progress: RunProgress | None = None
 ) -> dict[str, object]:
-    progress = progress or _RunProgress(enabled=False)
+    progress = progress or _default_progress(args)
     topology = _physical_topology(args)
     slice_name, owner, allocation_id, known_hosts = _physical_context(args)
 
@@ -684,9 +575,9 @@ def _authority(path: Path) -> dict[str, str]:
 
 
 def _run_rfsim(
-    args: argparse.Namespace, progress: _RunProgress | None = None
+    args: argparse.Namespace, progress: RunProgress | None = None
 ) -> dict[str, object]:
-    progress = progress or _RunProgress(enabled=False)
+    progress = progress or _default_progress(args)
     if args.device is not None or args.ue is not None:
         raise BackendError("--device/--ue are only valid with --radio r2lab")
     owner = _require_owner(args)
@@ -830,7 +721,7 @@ def _run_rfsim(
 
     network_evidence = network_dir / "network-evidence.json"
     if not network_evidence.is_file():
-        progress.start("path", "prove RFSIM network path")
+        progress.start("path", "verify RFSIM 5G session readiness")
         with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
             rc = command_runtime._network_verify(
                 argparse.Namespace(
@@ -845,15 +736,15 @@ def _run_rfsim(
                 )
             )
         if rc != 0:
-            raise BackendError("RFSIM network path was not proven")
-        progress.done("path", "network path accepted")
+            raise BackendError("RFSIM 5G session readiness was not verified")
+        progress.done("path", "5G session readiness accepted")
     else:
-        progress.resumed("path", "existing network evidence present")
+        progress.resumed("path", "existing network readiness evidence present")
 
     experiment_dir = args.experiment_root.expanduser().resolve() / args.run_id
     experiment_evidence = experiment_dir / "experiment-evidence.json"
     if not experiment_evidence.is_file():
-        progress.start("workload", "run deterministic experiment and collect data")
+        progress.start("workload", "run deterministic AMBER experiment and collect data")
         with scoped_environment(authority_environment), redirect_stdout(progress.child_stream):
             rc = command_runtime._experiment_run(
                 argparse.Namespace(
@@ -869,8 +760,8 @@ def _run_rfsim(
                 )
             )
         if rc != 0:
-            raise BackendError("RFSIM deterministic workload was not accepted")
-        progress.done("workload", "deterministic workload completed")
+            raise BackendError("RFSIM AMBER workload was not accepted")
+        progress.done("workload", "AMBER workload completed")
     else:
         progress.resumed("workload", "existing experiment evidence present")
 
@@ -900,67 +791,3 @@ def _run_rfsim(
         "evidence_path": str(experiment_evidence),
         "event_path": str(progress.event_path) if progress.event_path is not None else None,
     }
-
-
-class RunCommandAdapter:
-    """Dispatch the backend selected by ``--radio``."""
-
-    def configure_parser(self, parser: argparse.ArgumentParser) -> None:
-        configure_run_parser(parser)
-
-    def dispatch(self, args: argparse.Namespace) -> int:
-        if args.command != "run":
-            raise BackendError("unsupported run command")
-        progress = _RunProgress(
-            enabled=not args.quiet,
-            run_id=args.run_id,
-            radio=args.radio,
-        )
-        try:
-            validate_run_id(args.run_id)
-            if args.core_node == args.ran_node:
-                raise BackendError("core and RAN nodes must differ")
-            payload = (
-                _run_r2lab(args, progress)
-                if args.radio == "r2lab"
-                else _run_rfsim(args, progress)
-            )
-            if args.json:
-                print(json.dumps(payload, indent=2, sort_keys=True))
-            else:
-                print(f"SynthRAN run accepted: {payload['run_id']} ({payload['radio']})")
-                print(f"Evidence: {payload['evidence_path']}")
-                if payload.get("event_path"):
-                    print(f"Events: {payload['event_path']}")
-                if payload.get("released") is True:
-                    print("Physical resources: released")
-            return 0
-        except BackendError as exc:
-            progress.fail(str(exc))
-            raise
-        except (
-            DependencyError,
-            ExperimentError,
-            FiveGAnsibleError,
-            LivePreflightError,
-            NetworkRuntimeError,
-            PrivacyError,
-            ResourcePreparationError,
-            R2LabAcceptanceError,
-            R2LabHardwareError,
-            R2LabLiveReconciliationError,
-            R2LabN3xxError,
-            R2LabPhysicalLifecycleError,
-            R2LabPhysicalUeError,
-            R2LabTopologyFoundationError,
-            R2LabTopologyResourceError,
-            R2LabUpstreamRoleError,
-            SlicesControllerError,
-            WorkspaceError,
-            OSError,
-            ValueError,
-        ) as exc:
-            progress.fail(str(exc))
-            raise BackendError(str(exc)) from exc
-        finally:
-            progress.close()
