@@ -6,7 +6,7 @@ import shlex
 import time
 
 from synthran.experiment import ExperimentError
-from synthran.experiment.runtime import _remote
+from synthran.experiment.live import _remote
 from synthran.fiveg_ansible import NetworkInventory
 
 
