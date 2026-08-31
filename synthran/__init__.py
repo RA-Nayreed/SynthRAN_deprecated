@@ -9,19 +9,13 @@ __version__ = "0.0.1"
 
 
 def _module_alias(name: str, target: str) -> None:
-    """Keep remaining import contracts while implementation lives in domain packages."""
+    """Keep the last test-only import contracts while migration completes."""
 
     sys.modules[f"{__name__}.{name}"] = import_module(target)
 
 
-# Remaining aliases are transitional compatibility for callers not yet migrated
-# to the domain package paths. Do not add new aliases here.
-_module_alias("experiment_resources", "synthran.experiment.resources")
+# Final compatibility debt: older network tests still patch these synthetic
+# module paths. Production code uses the canonical synthran.network package.
 _module_alias("network_runtime", "synthran.network.runtime")
 _module_alias("rfsim_runtime", "synthran.network.rfsim")
 _module_alias("resource_runtime", "synthran.network.resources")
-_module_alias("research_collector", "synthran.research.collector")
-_module_alias("research_iperf", "synthran.research.iperf")
-_module_alias("research_instrumentation", "synthran.research.instrumentation")
-_module_alias("research_sampling", "synthran.research.sampling")
-_module_alias("research_runtime", "synthran.research.runtime")
