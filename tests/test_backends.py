@@ -27,7 +27,7 @@ class OperatorBoundaryTests(unittest.TestCase):
         self.assertEqual(7, dispatch(args))
         run.assert_called_once_with(args)
 
-    def test_cli_uses_one_error_surface(self) -> None:
+    def test_cli_uses_one_prefixed_run_error_surface(self) -> None:
         stderr = io.StringIO()
         with (
             patch("synthran.cli.dispatch", side_effect=BackendError("boundary failure")),
@@ -49,7 +49,7 @@ class OperatorBoundaryTests(unittest.TestCase):
                     ]
                 ),
             )
-        self.assertEqual("error: boundary failure\n", stderr.getvalue())
+        self.assertEqual("[synthran] ✗ run: boundary failure\n", stderr.getvalue())
 
 
 if __name__ == "__main__":
