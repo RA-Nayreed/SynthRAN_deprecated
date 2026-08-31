@@ -15,6 +15,7 @@ from synthran.r2lab.acceptance import (
     R2LabAcceptanceError,
 )
 from synthran.r2lab.controller import subprocess_runner as r2lab_subprocess_runner
+from synthran.r2lab.iot_lifecycle import run_physical_iot_workload as run_physical_workload
 from synthran.r2lab.live_cluster import prove_user_plane
 from synthran.r2lab.ue import R2LabPhysicalUeError
 from synthran.r2lab.ue_activation import (
