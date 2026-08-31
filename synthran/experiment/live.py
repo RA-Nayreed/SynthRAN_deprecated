@@ -158,6 +158,34 @@ def _remote(
     return _checked(command, label=label, timeout_seconds=timeout_seconds)
 
 
+def _transfer_file(
+    inventory: NetworkInventory,
+    source_file: Path,
+    remote_path: str,
+    *,
+    label: str,
+) -> None:
+    """Transfer one UTF-8 experiment artifact through the strict SSH boundary."""
+
+    try:
+        content = source_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ExperimentError(f"{label} source is not readable UTF-8 text") from exc
+    try:
+        command = ssh_command(
+            inventory.core_node,
+            "sh",
+            "-c",
+            f"cat > {shlex.quote(remote_path)}",
+        )
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    result = _run(command, input_text=content, timeout_seconds=30)
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout).strip()
+        raise ExperimentError(f"{label} failed" + (f": {reason}" if reason else ""))
+
+
 def _remote_json(
     inventory: NetworkInventory,
     command: str,
