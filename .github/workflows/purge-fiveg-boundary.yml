@@ -1,0 +1,45 @@
+name: Purge fiveg boundary
+
+on:
+  pull_request:
+    paths:
+      - "synthran/adapters/**"
+      - "synthran/fiveg_ansible.py"
+      - "tests/test_fiveg_adapter.py"
+      - "tests/test_fiveg_ansible.py"
+      - ".github/workflows/purge-fiveg-boundary.yml"
+  push:
+    branches:
+      - purge/thin-fiveg-adapter
+    paths:
+      - "synthran/adapters/**"
+      - "synthran/fiveg_ansible.py"
+      - "tests/test_fiveg_adapter.py"
+      - "tests/test_fiveg_ansible.py"
+      - ".github/workflows/purge-fiveg-boundary.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Compile adapter boundary
+        run: |
+          python -m py_compile \
+            synthran/adapters/fiveg.py \
+            synthran/fiveg_ansible.py
+      - name: Run adapter boundary tests
+        run: |
+          python -m unittest -v \
+            tests.test_fiveg_adapter \
+            tests.test_fiveg_ansible
+      - name: Prove no local topology support matrix
+        run: |
+          ! grep -R -n -E 'SUPPORTED_(CORE|RAN|RADIO)' synthran/adapters synthran/fiveg_ansible.py
+          ! grep -R -n 'apply_network_overlay' synthran/adapters synthran/fiveg_ansible.py
