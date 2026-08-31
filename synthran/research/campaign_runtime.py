@@ -16,7 +16,7 @@ import time
 from typing import Any, Mapping
 
 import synthran.amber_experiment_runtime as amber_runtime
-import synthran.experiment.runtime as base_runtime
+import synthran.experiment.live as base_runtime
 from synthran.dependencies import DependencyLock
 from synthran.experiment.resources import (
     EDGE_VOLUME,
@@ -135,13 +135,8 @@ class CampaignRuntimeSession:
         self._original_amber_config = amber_runtime.render_edge_mosquitto_config
         self._original_amber_restart_wait = amber_runtime._restart_edge_sidecar_and_wait
 
-        # Per-run cleanup must preserve the campaign-owned sidecar and radio
-        # epoch. The final session cleanup restores both exactly once.
         base_runtime.render_edge_cleanup_patch = lambda: {}
         base_runtime.reconcile_rfsim_runtime = self._reconcile_runtime
-
-        # Amber imported these hooks directly, so bind the campaign contract at
-        # the actual live execution boundary too.
         amber_runtime.render_edge_patch = self._render_edge_patch
         amber_runtime.render_experiment_objects = self._render_experiment_objects
         amber_runtime.render_edge_mosquitto_config = self._render_edge_config
@@ -165,8 +160,6 @@ class CampaignRuntimeSession:
         assert self._original_amber_config is not None
         assert self._original_amber_restart_wait is not None
 
-        # Restore canonical functions before final cleanup so cleanup itself
-        # cannot accidentally use the campaign no-op hooks.
         base_runtime.render_edge_cleanup_patch = self._original_cleanup_patch
         base_runtime.reconcile_rfsim_runtime = self._original_base_reconcile
         amber_runtime.reconcile_rfsim_runtime = self._original_amber_reconcile
