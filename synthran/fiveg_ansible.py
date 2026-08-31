@@ -248,6 +248,42 @@ def validate_fiveg_checkout(lock, dependency_root: Path) -> Path:
         raise FiveGAnsibleError(str(exc)) from exc
 
 
+def _locked_commit(lock, name: str) -> str:
+    dependency = next((item for item in lock.git if item.name == name), None)
+    if dependency is None:
+        raise FiveGAnsibleError(f"dependency lock does not define {name}")
+    return dependency.commit
+
+
+@dataclass(frozen=True)
+class NetworkDeploymentPlan:
+    """Temporary topology-neutral handoff used while lifecycle callers migrate.
+
+    It contains no compatibility decision and performs no deployment.  New code
+    should pass a ``fiveg/deployment/v1`` spec directly to ``FiveGAdapter``.
+    """
+
+    inventory: NetworkInventory
+    profile: str
+    fiveg_ansible_commit: str
+    open5gs_k8s_commit: str
+    srsran_helm_commit: str
+
+
+def build_network_plan(*, lock, inventory: NetworkInventory, profile: str) -> NetworkDeploymentPlan:
+    """Build a migration-only plan without rejecting any upstream topology."""
+
+    if not isinstance(profile, str) or not profile or any(ch.isspace() for ch in profile):
+        raise FiveGAnsibleError("profile must be one non-empty scalar value")
+    return NetworkDeploymentPlan(
+        inventory=inventory,
+        profile=profile,
+        fiveg_ansible_commit=_locked_commit(lock, "fiveg_ansible"),
+        open5gs_k8s_commit=_locked_commit(lock, "open5gs_k8s"),
+        srsran_helm_commit=_locked_commit(lock, "srsran_helm"),
+    )
+
+
 def run_offline_doctor(
     *, inventory_path: Path, lock_path: Path, dependency_root: Path
 ) -> DoctorReport:
