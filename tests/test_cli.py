@@ -26,7 +26,7 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(
             project["project"]["scripts"],
-            {"synthran": "synthran.launcher:main"},
+            {"synthran": "synthran.cli:main"},
         )
 
     def test_public_surface_is_intentionally_small(self) -> None:
@@ -202,7 +202,7 @@ class CliTests(unittest.TestCase):
             ["analyze", "--campaign", "campaign.json", "--out", "analysis.json"]
         )
         self.assertEqual("analyze", args.command)
-        self.assertEqual(Path("campaign.json"), args.campaign)
+        self.assertEqual(Path("analysis.json"), args.out)
 
     def test_release_replaces_stop(self) -> None:
         args = _parser().parse_args(["release", "--run-id", "physical-001"])
