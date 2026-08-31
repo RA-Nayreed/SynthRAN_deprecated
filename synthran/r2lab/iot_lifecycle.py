@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TextIO
 
 from synthran.dependencies import load_lock
-from synthran.experiment.r2lab import DEFAULT_PHYSICAL_RUN_ROOT
 from synthran.live_preflight import subprocess_runner as cluster_subprocess_runner
 from synthran.privacy import repository_root
 from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence
@@ -21,6 +20,7 @@ from synthran.utils.environment import scoped_environment
 
 
 DEFAULT_R2LAB_RUN_ROOT = Path(".synthran/r2lab")
+DEFAULT_PHYSICAL_RUN_ROOT = Path(".synthran/experiments-r2lab")
 
 
 class R2LabIoTLifecycleError(RuntimeError):
