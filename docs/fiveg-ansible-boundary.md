@@ -1,56 +1,50 @@
 # 5g-Ansible ownership boundary
 
-SynthRAN uses the dependency-lock entry for `fiveg_ansible` as the implementation source for 5G deployment mechanics whenever the pinned upstream behavior is compatible with SynthRAN's authority and evidence contract.
+SynthRAN pins `RA-Nayreed/5g-Ansible` as the authoritative implementation of 5G deployment and infrastructure mechanics. SynthRAN does not rewrite the pinned checkout and does not maintain a second deployment feature matrix.
 
 ## Rule
 
-SynthRAN owns experiment identity, provider/lease/allocation authority, exact resource ownership, acceptance ordering, evidence, resumability, deterministic workloads, and exact cleanup. 5g-Ansible owns deployment mechanics and R2Lab device mechanics where those mechanics can be invoked without broadening the selected resource set or weakening SSH trust.
+5g-Ansible owns the mechanics required to build and tear down the requested 5G environment: core/RAN selection, POS and Kubernetes preparation, Open5GS/OAI/Free5GC, srsRAN/OAI/UERANSIM, RFSIM, R2Lab RU/UE operations, monitoring, and the generic scenarios already implemented upstream.
 
-The R2Lab transport follows the topology used by 5g-Ansible: the operator reaches `faraday.inria.fr`, and Faraday performs provider/RRU/UE operations. SynthRAN centralizes physical-path OpenSSH policy in `synthran.utils.ssh` and isolates calls from ambient `~/.ssh/config` with `-F /dev/null`. Host-key checking remains strict.
+SynthRAN owns experiment semantics: experiment identity, deterministic workload generation, measurement/evidence, research acceptance, result collection, and experiment-level resumability. During the transition, legacy SynthRAN lifecycle code may still invoke existing upstream playbooks directly, but it must treat the dependency tree as immutable.
 
-## Cross-check against pinned 5g-Ansible
+## Pinned machine interface
 
-The cross-check was performed against the exact `fiveg_ansible` commit in `dependencies.lock.yml`, including `playbooks/deploy.yml`, `playbooks/deploy_r2lab.yml`, `roles/r2lab/*`, `roles/5g/open5gs/*`, and `roles/5g/srsRAN/*`.
+The dependency must expose the machine-facing 5g-Ansible interface introduced by the pinned commit:
 
-| Capability | Owner after refactor | Reason |
-| --- | --- | --- |
-| Open5GS configuration/deployment mechanics | 5g-Ansible, invoked through the pinned checkout | Upstream already owns the Open5GS roles. SynthRAN supplies locked images, selected subscriber, authority gates, and postconditions. |
-| srsRAN N300/N320 RF values and chart source | pinned upstream srsRAN/5g-Ansible dependencies | RF configuration is not reimplemented in SynthRAN. |
-| R2Lab UE setup/connect/stop mechanics | 5g-Ansible role copies | Upstream modem logic is reused. The isolated copy is strict-SSH hardened before execution because the pinned roles contain `StrictHostKeyChecking=no` and, in setup, `UserKnownHostsFile=/dev/null`. |
-| R2Lab RRU power mechanics | provider commands through the Faraday topology | The upstream RRU role is only `rhubarbe pdu on/status`; SynthRAN retains the same provider primitives because it additionally requires current lease authority and exact observed post-state before accepting a mutation. |
-| R2Lab global cleanup | SynthRAN exact cleanup | Upstream `roles/r2lab/cleanup` runs `all-off`, which is incompatible with selected-resource ownership. It must never be called from the canonical SynthRAN lifecycle. |
-| srsRAN gNB deploy/start lifecycle | SynthRAN lifecycle wrapper over pinned chart/config | Upstream `5g/srsRAN/deploy` uninstalls an existing release and immediately starts a replacement. SynthRAN requires zero-replica staging, run labels/annotations, resumability, stable N2 evidence, and exact scale-to-zero recovery. |
-| Kubernetes/Open5GS observations | SynthRAN | These are evidence/postcondition checks, not alternative deployment mechanics. |
-| SLICES reservation/allocation and R2Lab lease | SynthRAN | 5g-Ansible does not own SynthRAN's experiment authority model. |
-| deterministic IoT workload and evidence | SynthRAN | Experiment semantics are outside 5g-Ansible. |
+```text
+bin/fiveg capabilities
+bin/fiveg plan
+bin/fiveg up
+bin/fiveg status
+bin/fiveg down
+bin/fiveg scenario
+```
+
+Deployment policy is expressed through upstream variables rather than source transformations. The required policy surface includes preparation-only mode, live-install policy, OS/Python dependency ownership, disruptive cluster-operation policy, a prepared Python interpreter, selected slices/UEs, optional Open5GS UI/admin setup, POS allocation ownership, explicit cleanup namespaces, and R2Lab host-key policy.
+
+An empty upstream slice/UE selection means the full selected 5G profile. SynthRAN must not hard-code a second list of 5G combinations merely to decide whether 5g-Ansible may deploy them.
+
+## R2Lab cleanup
+
+The pinned 5g-Ansible cleanup path is selected-resource only:
+
+- stop only UEs present in the deployment inventory;
+- power off only the selected RU;
+- never run `all-off`;
+- delete no Kubernetes namespace unless it is explicitly authorized for cleanup.
+
+SynthRAN's compatibility check fails closed if the pinned dependency regresses to global R2Lab cleanup.
 
 ## SSH contract
 
-All SynthRAN-owned SSH/SCP construction on the physical R2Lab path uses `synthran.utils.ssh`.
-
-Required properties:
-
-- `BatchMode=yes`
-- bounded `ConnectTimeout`
-- `StrictHostKeyChecking=yes`
-- explicit `UserKnownHostsFile` when a run supplies one
-- `IdentitiesOnly=yes` with an explicit R2Lab identity when configured
-- `-F /dev/null` for deterministic routing independent of operator SSH configuration
-
-Forbidden in SynthRAN-owned physical-path commands and hardened upstream role copies:
-
-- `StrictHostKeyChecking=no`
-- `accept-new`
-- `UserKnownHostsFile=/dev/null`
-- `GlobalKnownHostsFile=/dev/null`
-
-The explicit SLICES known-hosts file is used for sopnode SSH. Faraday-to-UE role copies use `/home/<slice>/.ssh/known_hosts`, matching the R2Lab jump-host topology while preserving host-key verification.
+Machine-mode R2Lab deployment defaults to strict host-key checking. SynthRAN-owned SSH that remains during the migration must also preserve its existing strict transport policy. No caller is allowed to patch the 5g-Ansible checkout to change SSH behavior; required behavior belongs upstream as an explicit option.
 
 ## Source-tree rules
 
-- No second R2Lab resource lifecycle is allowed beside `synthran/r2lab/resources.py`.
-- `synthran/r2lab/controller.py` is transport only.
-- No runtime monkeypatch is allowed for SSH configuration.
-- Upstream role transformations happen only in isolated temporary copies and are fail-closed against source drift.
-- Run directories contain evidence and small generated inputs, not duplicated dependency checkouts.
-- New cross-domain transport/environment helpers belong under `synthran/utils/` rather than being copied into backend modules.
+- `.deps/5g_ansible*` is immutable after dependency synchronization.
+- Runtime search/replace, monkey-patching, copied role edits, and temporary source transformations are forbidden.
+- `synthran.upstream_overlay` is now a temporary **read-only compatibility validator**; despite its historical name it performs no overlay.
+- If deployment behavior must change, change `RA-Nayreed/5g-Ansible`, validate it there, pin the new commit, then consume it from SynthRAN.
+- Existing SynthRAN deployment wrappers are migration debt and should be removed in later Great Purge batches in favor of the machine interface; they must not grow new deployment mechanics.
+- Experiment workload, measurement and evidence code remains a SynthRAN responsibility.
