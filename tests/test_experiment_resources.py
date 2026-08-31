@@ -5,7 +5,7 @@ import unittest
 
 from synthran.dependencies import load_lock
 from synthran.experiment import ExperimentScenario
-from synthran.experiment_resources import (
+from synthran.experiment.resources import (
     DEFAULT_CONTAINER_ANNOTATION,
     EDGE_CONTAINER,
     EDGE_RUNTIME_VOLUME,
