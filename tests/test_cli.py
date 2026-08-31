@@ -35,7 +35,6 @@ class CliTests(unittest.TestCase):
             "doctor",
             "calibrate",
             "inspect",
-            "logs",
             "analyze",
             "release",
             "deps",
@@ -47,6 +46,7 @@ class CliTests(unittest.TestCase):
     def test_removed_command_groups_do_not_parse(self) -> None:
         parser = _parser()
         for command in (
+            "logs",
             "research",
             "stop",
             "r2lab",
