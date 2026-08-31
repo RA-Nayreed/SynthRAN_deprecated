@@ -11,8 +11,14 @@ import subprocess
 import sys
 from typing import Mapping
 
+from synthran.amber_experiment_runtime import execute_amber_experiment
+from synthran.ambient_contract import (
+    DEFAULT_ENERGY_NODE_VARIATION,
+    DEFAULT_ENERGY_POWER_SCALE,
+)
 from synthran.dependencies import load_lock, sync_dependencies
 from synthran.fiveg_ansible import build_network_plan, load_inventory, run_offline_doctor
+from synthran.iot_source import AMBIENT_PROFILE, DEFAULT_IOT_SEED
 from synthran.live_preflight import run_live_preflight, save_live_evidence
 from synthran.network.resources import (
     ResourcePreparationError,
@@ -270,6 +276,34 @@ def _network_verify(args: argparse.Namespace) -> int:
     print(verification.render())
     print(f"Sanitized evidence: {evidence_path}")
     return 0 if verification.ready else 2
+
+
+def _experiment_run(args: argparse.Namespace) -> int:
+    """Execute the only supported IoT source: AMBER."""
+
+    manifest, evidence = _network_paths(args.network_run_root, args.network_run_id)
+    result = execute_amber_experiment(
+        inventory=load_inventory(args.inventory),
+        lock=load_lock(args.lock),
+        dependency_root=args.deps_root,
+        network_manifest=manifest,
+        network_evidence=evidence,
+        run_id=args.run_id,
+        repository_root=repository_root(),
+        run_root=args.run_root,
+        collection_seconds=args.collection_seconds,
+        minimum_per_sensor=args.minimum_per_sensor,
+        iot_profile=getattr(args, "iot_profile", AMBIENT_PROFILE),
+        iot_seed=getattr(args, "iot_seed", DEFAULT_IOT_SEED),
+        sensor_period_seconds=getattr(args, "sensor_period", 10),
+        energy_power_scale=getattr(args, "energy_power_scale", DEFAULT_ENERGY_POWER_SCALE),
+        energy_node_variation=getattr(args, "energy_node_variation", DEFAULT_ENERGY_NODE_VARIATION),
+        progress=sys.stdout,
+    )
+    print(f"Run directory: {result.run_directory}")
+    if result.evidence_path.is_file():
+        print(f"Sanitized evidence: {result.evidence_path}")
+    return 0 if result.ready else 2
 
 
 def _parse_seeds(value: str) -> tuple[int, ...]:
