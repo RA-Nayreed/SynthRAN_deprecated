@@ -11,26 +11,18 @@ import sys
 from typing import Iterator, Mapping, Sequence
 
 from synthran import command_runtime
-from synthran.amber_experiment_runtime import execute_amber_experiment
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
 )
 from synthran.backends import run as run_backend
 from synthran.backends.base import BackendError
-from synthran.iot_source import (
-    AMBIENT_PROFILE,
-    DEFAULT_IOT_SEED,
-    TRANSPORT_PROFILE,
-)
+from synthran.iot_source import AMBIENT_PROFILE, DEFAULT_IOT_SEED, TRANSPORT_PROFILE
 from synthran.operator import configure_operator_parser, dispatch, release_command
 from synthran.r2lab.iot_lifecycle import run_physical_iot_workload
 from synthran.r2lab.resources import R2LabTopologyResourceError
 from synthran.research import LoadSpec, MeasurementSpec, ResearchError
-from synthran.research.amber_campaign import (
-    analyze_amber_campaign,
-    execute_amber_campaign,
-)
+from synthran.research.amber_campaign import analyze_amber_campaign, execute_amber_campaign
 from synthran.research.amber_runtime import execute_amber_research_experiment
 from synthran.research.v2 import AmberResearchSpec
 from synthran.run_events import RunEventStream
@@ -63,21 +55,15 @@ def _make_optional(parser: argparse.ArgumentParser, *destinations: str) -> None:
 
 
 def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
-    # Full lifecycle runs need these fields; controlled runs reuse an accepted
-    # network and validate their own smaller contract at dispatch time.
+    # Full lifecycle runs require these fields; controlled runs reuse an accepted
+    # network and validate their smaller contract at dispatch time.
     _make_optional(run, "radio", "run_id", "core_node", "ran_node")
 
     run.add_argument(
-        "--iot-source",
-        choices=("cooja", "amber"),
-        default="cooja",
-        help="IoT source for a full lifecycle run; controlled runs use Amber",
-    )
-    run.add_argument(
         "--iot-profile",
-        choices=(TRANSPORT_PROFILE, AMBIENT_PROFILE),
-        default=TRANSPORT_PROFILE,
-        help="Amber source profile",
+        choices=(AMBIENT_PROFILE, TRANSPORT_PROFILE),
+        default=AMBIENT_PROFILE,
+        help="AMBER source profile",
     )
     run.add_argument(
         "--iot-seed",
@@ -85,13 +71,13 @@ def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
         dest="iot_seed",
         type=int,
         default=DEFAULT_IOT_SEED,
-        help="Amber source seed",
+        help="AMBER source seed",
     )
     run.add_argument(
         "--sensor-period",
         type=int,
         default=10,
-        help="IoT sensing/publication period in seconds",
+        help="Ambient-IoT sensing/publication period in seconds",
     )
     run.add_argument(
         "--energy-power-scale",
@@ -137,7 +123,7 @@ def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
 
     campaign = run.add_argument_group("campaign")
     campaign.add_argument("--campaign", type=Path, help="reuse an immutable campaign file")
-    campaign.add_argument("--seeds", help="comma-separated campaign IoT seeds")
+    campaign.add_argument("--seeds", help="comma-separated campaign AMBER seeds")
     campaign.add_argument(
         "--conditions",
         help="comma-separated conditions, e.g. baseline,load50=0.5,load80=0.8",
@@ -165,10 +151,7 @@ def _add_top_level_experiment_commands(root: argparse._SubParsersAction) -> None
     calibrate.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
     calibrate.add_argument("--out", type=Path, required=True)
 
-    analyze = root.add_parser(
-        "analyze",
-        help="analyze a completed persisted campaign",
-    )
+    analyze = root.add_parser("analyze", help="analyze a completed persisted campaign")
     analyze.add_argument("--campaign", type=Path, required=True)
     analyze.add_argument(
         "--run-root",
@@ -205,13 +188,15 @@ def _add_top_level_experiment_commands(root: argparse._SubParsersAction) -> None
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="synthran",
-        description="Run and inspect reproducible SynthRAN experiments across virtual and physical radio backends.",
+        description=(
+            "Run and inspect reproducible AMBER Ambient-IoT experiments across "
+            "virtual and physical radio backends."
+        ),
     )
     parser.add_subparsers(dest="command", required=True)
     configure_operator_parser(parser)
     root = _subparsers(parser)
     _add_top_level_experiment_commands(root)
-
     run = root.choices.get("run")
     if run is None:
         raise BackendError("SynthRAN parser does not expose the run command")
@@ -259,11 +244,7 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
 
     manifest_path: Path | None = None
     if args.radio == "rfsim":
-        candidate = (
-            Path(args.experiment_root).expanduser().resolve()
-            / run_id
-            / "manifest.json"
-        )
+        candidate = Path(args.experiment_root).expanduser().resolve() / run_id / "manifest.json"
         if candidate.is_file():
             manifest_path = candidate
     else:
@@ -274,10 +255,7 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
             / "physical-workload-result.json"
         )
         if result_path.is_file():
-            result = _read_json_object(
-                result_path,
-                label="persisted physical workload result",
-            )
+            result = _read_json_object(result_path, label="persisted physical workload result")
             workload_id = result.get("workload_id")
             if not isinstance(workload_id, str) or not workload_id:
                 raise BackendError("persisted physical workload result has no workload ID")
@@ -292,64 +270,17 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
 
     if manifest_path is None:
         return
-    manifest = _read_json_object(manifest_path, label="persisted IoT workload manifest")
-    observed_source = manifest.get("iot_source", "cooja")
-    requested_source = getattr(args, "iot_source", "cooja")
-    if observed_source != requested_source:
-        raise BackendError(
-            f"persisted workload uses IoT source {observed_source!r}, "
-            f"but this run requested {requested_source!r}"
-        )
-    if requested_source != "amber":
-        return
-
+    manifest = _read_json_object(manifest_path, label="persisted AMBER workload manifest")
+    if manifest.get("iot_source") != "amber":
+        raise BackendError("persisted workload is not an AMBER workload")
     expected = {
-        "iot_profile": getattr(args, "iot_profile", TRANSPORT_PROFILE),
-        "iot_seed": getattr(args, "iot_seed", DEFAULT_IOT_SEED),
-        "sensor_period_seconds": getattr(args, "sensor_period", 10),
+        "iot_profile": args.iot_profile,
+        "iot_seed": args.iot_seed,
+        "sensor_period_seconds": args.sensor_period,
     }
     for key, requested in expected.items():
         if manifest.get(key) != requested:
-            raise BackendError(
-                f"persisted Amber workload {key} does not match the requested value"
-            )
-
-
-def _run_amber_workload(
-    experiment_args: argparse.Namespace,
-    *,
-    iot_profile: str,
-    iot_seed: int,
-    sensor_period_seconds: int,
-    energy_power_scale: float,
-    energy_node_variation: float,
-) -> int:
-    manifest, evidence = command_runtime._network_paths(
-        experiment_args.network_run_root,
-        experiment_args.network_run_id,
-    )
-    result = execute_amber_experiment(
-        inventory=command_runtime.load_inventory(experiment_args.inventory),
-        lock=command_runtime.load_lock(experiment_args.lock),
-        dependency_root=experiment_args.deps_root,
-        network_manifest=manifest,
-        network_evidence=evidence,
-        run_id=experiment_args.run_id,
-        repository_root=command_runtime.repository_root(),
-        run_root=experiment_args.run_root,
-        collection_seconds=experiment_args.collection_seconds,
-        minimum_per_sensor=experiment_args.minimum_per_sensor,
-        iot_profile=iot_profile,
-        iot_seed=iot_seed,
-        sensor_period_seconds=sensor_period_seconds,
-        energy_power_scale=energy_power_scale,
-        energy_node_variation=energy_node_variation,
-        progress=sys.stdout,
-    )
-    print(f"Run directory: {result.run_directory}")
-    if result.evidence_path.is_file():
-        print(f"Sanitized evidence: {result.evidence_path}")
-    return 0 if result.ready else 2
+            raise BackendError(f"persisted AMBER workload {key} does not match the requested value")
 
 
 def _require_controlled_common(args: argparse.Namespace) -> None:
@@ -414,7 +345,6 @@ def _load_or_create_campaign(args: argparse.Namespace):
     path = _campaign_path(args)
     if args.campaign is not None:
         return command_runtime._load_campaign(path), path
-
     required = {
         "--campaign-id": args.campaign_id,
         "--network-run-id": args.network_run_id,
@@ -425,7 +355,6 @@ def _load_or_create_campaign(args: argparse.Namespace):
     missing = [name for name, value in required.items() if value is None]
     if missing:
         raise ResearchError("new campaign requires " + ", ".join(missing))
-
     campaign = command_runtime.build_campaign(
         campaign_id=args.campaign_id,
         network_run_id=args.network_run_id,
@@ -445,7 +374,6 @@ def _load_or_create_campaign(args: argparse.Namespace):
 
 def _dispatch_controlled_run(args: argparse.Namespace) -> int:
     _require_controlled_common(args)
-
     if _is_campaign_run(args):
         campaign, campaign_path = _load_or_create_campaign(args)
         if args.plan:
@@ -453,16 +381,11 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
             print(f"\nCampaign schedule: {campaign_path}")
             print("Execution action: none")
             return 0
-        stream = RunEventStream(
-            run_id=campaign.campaign_id,
-            radio="rfsim",
-            terminal=sys.stdout,
-        )
+        stream = RunEventStream(run_id=campaign.campaign_id, radio="rfsim", terminal=sys.stdout)
         stream.emit("→ workload: controlled AMBER campaign", stage="workload", event="started")
         try:
             manifest, evidence = command_runtime._network_paths(
-                args.network_run_root,
-                campaign.network_run_id,
+                args.network_run_root, campaign.network_run_id
             )
             result_path = execute_amber_campaign(
                 campaign=campaign,
@@ -498,11 +421,13 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
 
     spec = _amber_research_spec(args)
     if args.plan:
-        value = {
-            "schema": "synthran/research-request/v2alpha1",
-            **spec.to_request_dict(),
-        }
-        print(json.dumps(value, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {"schema": "synthran/research-request/v2alpha1", **spec.to_request_dict()},
+                indent=2,
+                sort_keys=True,
+            )
+        )
         print("\nExecution action: none")
         return 0
 
@@ -514,8 +439,7 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
     )
     try:
         manifest, evidence = command_runtime._network_paths(
-            args.network_run_root,
-            spec.network_run_id,
+            args.network_run_root, spec.network_run_id
         )
         summary_path = execute_amber_research_experiment(
             spec=spec,
@@ -565,7 +489,6 @@ def _dispatch_analysis(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         print(f"Campaign analysis: {args.out}")
         return 0
-
     summaries = [
         command_runtime.load_run_summary(path)
         for scheduled in campaign.runs
@@ -599,28 +522,25 @@ def _validate_lifecycle_run(args: argparse.Namespace) -> None:
 
 
 @contextmanager
-def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
-    if args.command != "run" or getattr(args, "iot_source", None) != "amber":
-        yield
-        return
-    if _is_controlled_run(args):
+def _selected_amber_runtime(args: argparse.Namespace) -> Iterator[None]:
+    """Bind the parsed AMBER source settings to the backend workload call."""
+
+    if args.command != "run" or _is_controlled_run(args):
         yield
         return
 
     if args.radio == "rfsim":
         original = command_runtime._experiment_run
 
-        def amber_experiment_run(experiment_args: argparse.Namespace) -> int:
-            return _run_amber_workload(
-                experiment_args,
-                iot_profile=args.iot_profile,
-                iot_seed=args.iot_seed,
-                sensor_period_seconds=args.sensor_period,
-                energy_power_scale=args.energy_power_scale,
-                energy_node_variation=args.energy_node_variation,
-            )
+        def configured(experiment_args: argparse.Namespace) -> int:
+            experiment_args.iot_profile = args.iot_profile
+            experiment_args.iot_seed = args.iot_seed
+            experiment_args.sensor_period = args.sensor_period
+            experiment_args.energy_power_scale = args.energy_power_scale
+            experiment_args.energy_node_variation = args.energy_node_variation
+            return original(experiment_args)
 
-        command_runtime._experiment_run = amber_experiment_run
+        command_runtime._experiment_run = configured
         try:
             yield
         finally:
@@ -635,7 +555,7 @@ def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
             raise BackendError("Ambient energy treatment is currently supported on RFSIM only")
         original = run_backend.run_physical_workload
 
-        def amber_physical_workload(**kwargs):
+        def configured_physical(**kwargs):
             return run_physical_iot_workload(
                 **kwargs,
                 iot_profile=args.iot_profile,
@@ -643,7 +563,7 @@ def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
                 sensor_period_seconds=args.sensor_period,
             )
 
-        run_backend.run_physical_workload = amber_physical_workload
+        run_backend.run_physical_workload = configured_physical
         try:
             yield
         finally:
@@ -654,8 +574,7 @@ def _selected_iot_runtime(args: argparse.Namespace) -> Iterator[None]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = list(sys.argv[1:] if argv is None else argv)
-    args = _parser().parse_args(arguments)
+    args = _parser().parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         if args.command == "run" and _is_controlled_run(args):
             return _dispatch_controlled_run(args)
@@ -668,7 +587,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run":
             _validate_lifecycle_run(args)
             _validate_persisted_iot_identity(args)
-        with _selected_iot_runtime(args):
+        with _selected_amber_runtime(args):
             return dispatch(args)
     except (BackendError, ResearchError, R2LabTopologyResourceError) as exc:
         prefix = "[synthran] ✗ run: " if args.command == "run" else "error: "
