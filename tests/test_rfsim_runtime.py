@@ -8,7 +8,7 @@ from unittest.mock import patch
 from synthran.experiment import ExperimentError
 from synthran.fiveg_ansible import InventoryHost, NetworkInventory
 from synthran.live_preflight import CommandResult
-from synthran.rfsim_runtime import (
+from synthran.network.rfsim import (
     RFSIM_RECOVERY_ATTEMPTS,
     UE_TUNNEL_COMMAND_TIMEOUT_SECONDS,
     RfsimRuntimeState,
@@ -76,7 +76,7 @@ class RfsimRuntimeTests(unittest.TestCase):
             ]
         )
         with patch(
-            "synthran.rfsim_runtime._remote",
+            "synthran.network.rfsim._remote",
             return_value=output,
         ):
             self.assertEqual(
@@ -94,7 +94,7 @@ class RfsimRuntimeTests(unittest.TestCase):
                 }
             ]
         )
-        with patch("synthran.rfsim_runtime._remote", return_value=output):
+        with patch("synthran.network.rfsim._remote", return_value=output):
             with self.assertRaisesRegex(
                 ExperimentError,
                 "expected exactly one UE PDU address",
@@ -120,7 +120,7 @@ class RfsimRuntimeTests(unittest.TestCase):
             },
         ]
         with patch(
-            "synthran.rfsim_runtime._remote_json",
+            "synthran.network.rfsim._remote_json",
             side_effect=responses,
         ):
             self.assertEqual(
@@ -138,7 +138,7 @@ class RfsimRuntimeTests(unittest.TestCase):
             return CommandResult(0, "", "")
 
         with patch(
-            "synthran.rfsim_runtime._remote_result",
+            "synthran.network.rfsim._remote_result",
             side_effect=fake_remote_result,
         ):
             _wait_for_ue_tunnel(inventory, "ue-pod")
@@ -155,7 +155,7 @@ class RfsimRuntimeTests(unittest.TestCase):
     def test_wait_for_ue_tunnel_distinguishes_dead_process(self) -> None:
         inventory = self._inventory()
         with patch(
-            "synthran.rfsim_runtime._remote_result",
+            "synthran.network.rfsim._remote_result",
             return_value=CommandResult(2, "", ""),
         ):
             with self.assertRaisesRegex(
@@ -167,7 +167,7 @@ class RfsimRuntimeTests(unittest.TestCase):
     def test_wait_for_ue_tunnel_reports_live_process_timeout(self) -> None:
         inventory = self._inventory()
         with patch(
-            "synthran.rfsim_runtime._remote_result",
+            "synthran.network.rfsim._remote_result",
             return_value=CommandResult(1, "", ""),
         ):
             with self.assertRaisesRegex(
@@ -186,7 +186,7 @@ class RfsimRuntimeTests(unittest.TestCase):
             * 4
         )
         with patch(
-            "synthran.rfsim_runtime._remote_result",
+            "synthran.network.rfsim._remote_result",
             return_value=CommandResult(0, text, ""),
         ):
             self.assertTrue(_rf_sample_stalled(inventory, "gnb-pod"))
@@ -204,17 +204,17 @@ class RfsimRuntimeTests(unittest.TestCase):
             return ""
 
         with (
-            patch("synthran.rfsim_runtime._discover_pod", side_effect=fake_discover),
+            patch("synthran.network.rfsim._discover_pod", side_effect=fake_discover),
             patch(
-                "synthran.rfsim_runtime._deployment_owner_for_pod",
+                "synthran.network.rfsim._deployment_owner_for_pod",
                 return_value="srsran-gnb",
             ),
-            patch("synthran.rfsim_runtime._remote", side_effect=fake_remote),
-            patch("synthran.rfsim_runtime._wait_for_gnb_cell") as wait_cell,
-            patch("synthran.rfsim_runtime._wait_for_broker") as wait_broker,
-            patch("synthran.rfsim_runtime._wait_for_ue_tunnel") as wait_tunnel,
+            patch("synthran.network.rfsim._remote", side_effect=fake_remote),
+            patch("synthran.network.rfsim._wait_for_gnb_cell") as wait_cell,
+            patch("synthran.network.rfsim._wait_for_broker") as wait_broker,
+            patch("synthran.network.rfsim._wait_for_ue_tunnel") as wait_tunnel,
             patch(
-                "synthran.rfsim_runtime._current_pdu_address",
+                "synthran.network.rfsim._current_pdu_address",
                 return_value="12.1.0.2",
             ),
         ):
@@ -262,17 +262,17 @@ class RfsimRuntimeTests(unittest.TestCase):
                 raise outcome
 
         with (
-            patch("synthran.rfsim_runtime._discover_pod", side_effect=fake_discover),
+            patch("synthran.network.rfsim._discover_pod", side_effect=fake_discover),
             patch(
-                "synthran.rfsim_runtime._deployment_owner_for_pod",
+                "synthran.network.rfsim._deployment_owner_for_pod",
                 return_value="srsran-gnb",
             ),
-            patch("synthran.rfsim_runtime._remote", side_effect=fake_remote),
-            patch("synthran.rfsim_runtime._wait_for_gnb_cell"),
-            patch("synthran.rfsim_runtime._wait_for_broker"),
-            patch("synthran.rfsim_runtime._wait_for_ue_tunnel", side_effect=fake_wait_tunnel),
+            patch("synthran.network.rfsim._remote", side_effect=fake_remote),
+            patch("synthran.network.rfsim._wait_for_gnb_cell"),
+            patch("synthran.network.rfsim._wait_for_broker"),
+            patch("synthran.network.rfsim._wait_for_ue_tunnel", side_effect=fake_wait_tunnel),
             patch(
-                "synthran.rfsim_runtime._current_pdu_address",
+                "synthran.network.rfsim._current_pdu_address",
                 return_value="12.1.0.6",
             ),
         ):
@@ -298,15 +298,15 @@ class RfsimRuntimeTests(unittest.TestCase):
         )
         with (
             patch(
-                "synthran.rfsim_runtime._discover_pod",
+                "synthran.network.rfsim._discover_pod",
                 side_effect=("ue-new", "gnb-old"),
             ),
             patch(
-                "synthran.rfsim_runtime._deployment_owner_for_pod",
+                "synthran.network.rfsim._deployment_owner_for_pod",
                 return_value="srsran-gnb",
             ),
             patch(
-                "synthran.rfsim_runtime._reconcile_attempt",
+                "synthran.network.rfsim._reconcile_attempt",
                 side_effect=(
                     ExperimentError("first stall"),
                     ExperimentError("second stall"),
@@ -326,16 +326,16 @@ class RfsimRuntimeTests(unittest.TestCase):
         discovery = iter(("ue-new", "gnb-old", "gnb-1", "gnb-2", "gnb-3"))
 
         with (
-            patch("synthran.rfsim_runtime._discover_pod", side_effect=lambda *a, **k: next(discovery)),
+            patch("synthran.network.rfsim._discover_pod", side_effect=lambda *a, **k: next(discovery)),
             patch(
-                "synthran.rfsim_runtime._deployment_owner_for_pod",
+                "synthran.network.rfsim._deployment_owner_for_pod",
                 return_value="srsran-gnb",
             ),
-            patch("synthran.rfsim_runtime._remote", return_value=""),
-            patch("synthran.rfsim_runtime._wait_for_gnb_cell"),
-            patch("synthran.rfsim_runtime._wait_for_broker"),
+            patch("synthran.network.rfsim._remote", return_value=""),
+            patch("synthran.network.rfsim._wait_for_gnb_cell"),
+            patch("synthran.network.rfsim._wait_for_broker"),
             patch(
-                "synthran.rfsim_runtime._wait_for_ue_tunnel",
+                "synthran.network.rfsim._wait_for_ue_tunnel",
                 side_effect=ExperimentError("stalled attach"),
             ),
         ):
@@ -358,17 +358,17 @@ class RfsimRuntimeTests(unittest.TestCase):
             return ""
 
         with (
-            patch("synthran.rfsim_runtime._discover_pod", side_effect=lambda *a, **k: next(discovery)),
+            patch("synthran.network.rfsim._discover_pod", side_effect=lambda *a, **k: next(discovery)),
             patch(
-                "synthran.rfsim_runtime._deployment_owner_for_pod",
+                "synthran.network.rfsim._deployment_owner_for_pod",
                 return_value="srsran-gnb",
             ),
-            patch("synthran.rfsim_runtime._remote", side_effect=fake_remote),
-            patch("synthran.rfsim_runtime._wait_for_gnb_cell"),
-            patch("synthran.rfsim_runtime._wait_for_broker"),
-            patch("synthran.rfsim_runtime._wait_for_ue_tunnel"),
+            patch("synthran.network.rfsim._remote", side_effect=fake_remote),
+            patch("synthran.network.rfsim._wait_for_gnb_cell"),
+            patch("synthran.network.rfsim._wait_for_broker"),
+            patch("synthran.network.rfsim._wait_for_ue_tunnel"),
             patch(
-                "synthran.rfsim_runtime._current_pdu_address",
+                "synthran.network.rfsim._current_pdu_address",
                 return_value="12.1.0.2",
             ),
         ):
