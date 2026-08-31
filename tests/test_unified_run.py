@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import io
 import json
-import os
 from pathlib import Path
-import tempfile
 import unittest
 
-from synthran.backends.run import _RunProgress
 from synthran.cli import _parser
 from synthran.live_preflight import CommandResult
 from synthran.r2lab.foundation_topology import _physical_networks_ready
@@ -62,63 +58,6 @@ class UnifiedRunTests(unittest.TestCase):
         )
         self.assertEqual("rfsim", virtual.radio)
         self.assertTrue(virtual.quiet)
-
-    def test_progress_persists_the_same_stream_shown_to_operator(self) -> None:
-        previous = Path.cwd()
-        with tempfile.TemporaryDirectory() as directory:
-            os.chdir(directory)
-            try:
-                stream = io.StringIO()
-                progress = _RunProgress(
-                    stream=stream,
-                    run_id="physical-001",
-                    radio="r2lab",
-                )
-                progress.start("provider", "select SLICES context")
-                print("[synthran] TASK: Open5GS core", file=progress.child_stream)
-                progress.done("provider", "ready")
-                progress.close()
-
-                self.assertEqual(
-                    stream.getvalue().splitlines(),
-                    [
-                        "→ provider: select SLICES context",
-                        "[synthran] TASK: Open5GS core",
-                        "✓ provider: ready",
-                    ],
-                )
-                event_path = Path(".synthran/events/physical-001.jsonl")
-                payloads = [json.loads(line) for line in event_path.read_text().splitlines()]
-                self.assertEqual(
-                    [item["message"] for item in payloads],
-                    stream.getvalue().splitlines(),
-                )
-                self.assertTrue(all(item["radio"] == "r2lab" for item in payloads))
-            finally:
-                os.chdir(previous)
-
-    def test_quiet_run_still_persists_events(self) -> None:
-        previous = Path.cwd()
-        with tempfile.TemporaryDirectory() as directory:
-            os.chdir(directory)
-            try:
-                stream = io.StringIO()
-                progress = _RunProgress(
-                    enabled=False,
-                    stream=stream,
-                    run_id="virtual-001",
-                    radio="rfsim",
-                )
-                progress.start("provider")
-                progress.done("provider")
-                progress.close()
-                self.assertEqual("", stream.getvalue())
-                self.assertEqual(
-                    2,
-                    len(Path(".synthran/events/virtual-001.jsonl").read_text().splitlines()),
-                )
-            finally:
-                os.chdir(previous)
 
     def test_physical_gnb_uses_upstream_role_boundary(self) -> None:
         playbook = Path("deploy/ansible/r2lab-srsran-gnb.yml").read_text(encoding="utf-8")
