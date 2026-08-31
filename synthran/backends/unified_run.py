@@ -16,9 +16,26 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
     backend_run.configure_run_parser(parser)
 
 
-def _mark_reported(exc: BackendError) -> BackendError:
-    setattr(exc, "synthran_reported", True)
-    return exc
+def _persist_failure(progress: RunProgress, detail: str) -> str:
+    """Persist the stage failure; the CLI prints the single terminal error line."""
+
+    stage = progress.current_stage or "run"
+    normalized = (
+        "network"
+        if stage == "path" or stage in progress._R2LAB_NETWORK_STAGES
+        else stage
+    )
+    terminal_enabled = progress.stream.terminal_enabled
+    progress.stream.terminal_enabled = False
+    try:
+        progress.fail(detail)
+    finally:
+        progress.stream.terminal_enabled = terminal_enabled
+    return normalized
+
+
+def _stage_error(stage: str, detail: str) -> BackendError:
+    return BackendError(detail if stage == "run" else f"{stage}: {detail}")
 
 
 class RunCommandAdapter:
@@ -67,12 +84,10 @@ class RunCommandAdapter:
                 )
             return 0
         except BackendError as exc:
-            progress.fail(str(exc))
-            raise _mark_reported(exc)
+            stage = _persist_failure(progress, str(exc))
+            raise _stage_error(stage, str(exc)) from exc
         except Exception as exc:
-            progress.fail(str(exc))
-            wrapped = BackendError(str(exc))
-            _mark_reported(wrapped)
-            raise wrapped from exc
+            stage = _persist_failure(progress, str(exc))
+            raise _stage_error(stage, str(exc)) from exc
         finally:
             progress.close()
