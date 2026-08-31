@@ -6,7 +6,7 @@ import tomllib
 import unittest
 from unittest.mock import patch
 
-from synthran.cli import PUBLIC_COMMANDS, _parser, _selected_iot_runtime
+from synthran.cli import PUBLIC_COMMANDS, _parser, _selected_amber_runtime
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -59,7 +59,7 @@ class CliTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaises(SystemExit):
                 parser.parse_args([command])
 
-    def test_full_lifecycle_run_selects_rfsim_and_defaults_to_cooja(self) -> None:
+    def test_full_lifecycle_run_defaults_to_ambient_amber(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -75,12 +75,31 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual("run", args.command)
         self.assertEqual("rfsim", args.radio)
-        self.assertEqual("cooja", args.iot_source)
-        self.assertEqual("transport-v1", args.iot_profile)
+        self.assertFalse(hasattr(args, "iot_source"))
+        self.assertEqual("ambient-v1", args.iot_profile)
         self.assertEqual(424242, args.iot_seed)
         self.assertEqual(10, args.sensor_period)
         self.assertEqual(1.0, args.energy_power_scale)
         self.assertEqual(0.0, args.energy_node_variation)
+
+    def test_removed_iot_source_selector_does_not_parse(self) -> None:
+        parser = _parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "run",
+                    "--radio",
+                    "rfsim",
+                    "--core-node",
+                    "sopnode-f2",
+                    "--ran-node",
+                    "sopnode-f3",
+                    "--run-id",
+                    "virtual-001",
+                    "--iot-source",
+                    "cooja",
+                ]
+            )
 
     def test_controlled_ambient_measurement_is_a_run(self) -> None:
         args = _parser().parse_args(
@@ -130,8 +149,6 @@ class CliTests(unittest.TestCase):
                 "measurement-001",
                 "--condition",
                 "baseline",
-                "--iot-profile",
-                "ambient-v1",
             ]
         )
         self.assertTrue(args.plan)
@@ -155,8 +172,6 @@ class CliTests(unittest.TestCase):
                 "hosts.ini",
                 "--probe-target",
                 "198.51.100.1",
-                "--iot-profile",
-                "ambient-v1",
             ]
         )
         self.assertEqual("run", args.command)
@@ -184,13 +199,7 @@ class CliTests(unittest.TestCase):
 
     def test_analysis_is_top_level(self) -> None:
         args = _parser().parse_args(
-            [
-                "analyze",
-                "--campaign",
-                "campaign.json",
-                "--out",
-                "analysis.json",
-            ]
+            ["analyze", "--campaign", "campaign.json", "--out", "analysis.json"]
         )
         self.assertEqual("analyze", args.command)
         self.assertEqual(Path("campaign.json"), args.campaign)
@@ -200,28 +209,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual("release", args.command)
         self.assertEqual("physical-001", args.run_id)
 
-    def test_cooja_lifecycle_does_not_replace_experiment_runtime(self) -> None:
-        args = _parser().parse_args(
-            [
-                "run",
-                "--radio",
-                "rfsim",
-                "--core-node",
-                "sopnode-f2",
-                "--ran-node",
-                "sopnode-f3",
-                "--run-id",
-                "virtual-001",
-            ]
-        )
-        from synthran import command_runtime
-
-        original = command_runtime._experiment_run
-        with _selected_iot_runtime(args):
-            self.assertIs(original, command_runtime._experiment_run)
-        self.assertIs(original, command_runtime._experiment_run)
-
-    def test_amber_rfsim_lifecycle_runtime_is_restored_after_scope(self) -> None:
+    def test_rfsim_amber_settings_are_bound_and_runtime_restored(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -233,10 +221,6 @@ class CliTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "amber-001",
-                "--iot-source",
-                "amber",
-                "--iot-profile",
-                "ambient-v1",
                 "--energy-power-scale",
                 "0.42",
             ]
@@ -244,7 +228,7 @@ class CliTests(unittest.TestCase):
         from synthran import command_runtime
 
         original = command_runtime._experiment_run
-        with _selected_iot_runtime(args):
+        with _selected_amber_runtime(args):
             self.assertIsNot(original, command_runtime._experiment_run)
         self.assertIs(original, command_runtime._experiment_run)
 
@@ -260,17 +244,15 @@ class CliTests(unittest.TestCase):
                 "measurement-001",
                 "--condition",
                 "baseline",
-                "--iot-profile",
-                "ambient-v1",
             ]
         )
         from synthran import command_runtime
 
         original = command_runtime._experiment_run
-        with _selected_iot_runtime(args):
+        with _selected_amber_runtime(args):
             self.assertIs(original, command_runtime._experiment_run)
 
-    def test_amber_physical_runtime_passes_source_settings_and_restores_scope(self) -> None:
+    def test_physical_runtime_passes_amber_settings_and_restores_scope(self) -> None:
         args = _parser().parse_args(
             [
                 "run",
@@ -286,8 +268,6 @@ class CliTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "physical-001",
-                "--iot-source",
-                "amber",
                 "--iot-profile",
                 "ambient-v1",
                 "--iot-seed",
@@ -300,7 +280,7 @@ class CliTests(unittest.TestCase):
 
         original = run_backend.run_physical_workload
         with patch("synthran.cli.run_physical_iot_workload", return_value="ok") as execute:
-            with _selected_iot_runtime(args):
+            with _selected_amber_runtime(args):
                 self.assertIsNot(original, run_backend.run_physical_workload)
                 result = run_backend.run_physical_workload(run_id="physical-001")
             self.assertIs(original, run_backend.run_physical_workload)
