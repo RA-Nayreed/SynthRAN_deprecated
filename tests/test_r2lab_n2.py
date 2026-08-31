@@ -3,10 +3,31 @@ from __future__ import annotations
 import unittest
 
 from synthran.r2lab.n2 import (
+    N2State,
     R2LabN2EvidenceError,
     build_amf_n2_evidence,
     parse_amf_n2_acceptance,
+    parse_n2_log_state,
 )
+
+
+class R2LabGnbN2EvidenceTests(unittest.TestCase):
+    def test_affirmative_gnb_log_is_established(self) -> None:
+        self.assertIs(
+            parse_n2_log_state("NGAP connection established with AMF"),
+            N2State.ESTABLISHED,
+        )
+        self.assertIs(
+            parse_n2_log_state("AMF association connected successfully"),
+            N2State.ESTABLISHED,
+        )
+
+    def test_error_or_empty_gnb_log_is_not_proof(self) -> None:
+        self.assertIs(parse_n2_log_state(""), N2State.NOT_OBSERVED)
+        self.assertIs(
+            parse_n2_log_state("NGAP connection failed with timeout"),
+            N2State.NOT_OBSERVED,
+        )
 
 
 class R2LabAmfN2EvidenceTests(unittest.TestCase):
