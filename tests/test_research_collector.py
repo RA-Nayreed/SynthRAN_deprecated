@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from synthran.experiment import ExperimentScenario
-from synthran.research_collector import collect_mqtt_window
+from synthran.research.collector import collect_mqtt_window
 
 
 class _FakeClient:
@@ -64,11 +64,11 @@ class FixedWindowCollectorTests(unittest.TestCase):
             with (
                 patch.dict(sys.modules, self._paho_modules()),
                 patch(
-                    "synthran.research_collector.time.sleep",
+                    "synthran.research.collector.time.sleep",
                     side_effect=lambda seconds: events.append(("sleep", seconds)),
                 ),
                 patch(
-                    "synthran.research_collector.time.monotonic",
+                    "synthran.research.collector.time.monotonic",
                     side_effect=[0.0, 0.0, 2.0],
                 ),
             ):

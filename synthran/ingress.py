@@ -1,4 +1,4 @@
-"""Counted TCP ingress joining the Cooja IPv6 edge to the UE-side broker."""
+"""Counted TCP ingress for the AMBER-to-RFSIM edge transport."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 
 
 class IngressError(RuntimeError):
-    """Raised when the experiment ingress proxy cannot operate safely."""
+    """Raised when the counted AMBER ingress cannot operate safely."""
 
 
 @dataclass(frozen=True)
@@ -34,12 +34,12 @@ class IngressSnapshot:
         }
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> IngressSnapshot:
+    def from_dict(cls, data: Mapping[str, Any]) -> "IngressSnapshot":
         if not isinstance(data, dict):
             raise IngressError("ingress snapshot is malformed")
         for key in ("accepted_connections", "upstream_bytes", "downstream_bytes"):
-            val = data.get(key)
-            if not isinstance(val, int) or val < 0:
+            value = data.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise IngressError(f"ingress snapshot has invalid {key}")
         return cls(
             accepted_connections=int(data["accepted_connections"]),
@@ -49,13 +49,13 @@ class IngressSnapshot:
 
 
 class CountedTcpIngress:
-    """Forward one IPv6 listener to one IPv4 loopback target and count bytes."""
+    """Forward one run-owned TCP listener to the UE-edge broker and count bytes."""
 
     def __init__(
         self,
         *,
-        listen_host: str = "fd00::1",
-        listen_port: int = 1883,
+        listen_host: str = "127.0.0.1",
+        listen_port: int = 18886,
         target_host: str = "127.0.0.1",
         target_port: int = 18883,
         connect_timeout: float = 10.0,
@@ -82,12 +82,7 @@ class CountedTcpIngress:
         if self._thread is not None:
             raise IngressError("ingress is already running")
         try:
-            # Determine address family (support IPv6 and IPv4 for test flexibility)
-            family = (
-                socket.AF_INET
-                if ":" not in self.listen_host and not self.listen_host.startswith("[")
-                else socket.AF_INET6
-            )
+            family = socket.AF_INET if ":" not in self.listen_host else socket.AF_INET6
             listener = socket.socket(family, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind((self.listen_host, self.listen_port))
@@ -96,12 +91,10 @@ class CountedTcpIngress:
             self._listener = listener
         except OSError as exc:
             raise IngressError(
-                f"unable to bind ingress on [{self.listen_host}]:{self.listen_port}"
+                f"unable to bind ingress on {self.listen_host}:{self.listen_port}"
             ) from exc
-
-        thread = threading.Thread(target=self._run, daemon=True)
-        self._thread = thread
-        thread.start()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -124,11 +117,9 @@ class CountedTcpIngress:
             )
 
     def write_snapshot_file(self, destination: Path) -> None:
-        """Atomically persist the current snapshot to disk without raw payloads."""
         destination = destination.resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        current = self.snapshot()
-        content = json.dumps(current.to_dict(), indent=2, sort_keys=True) + "\n"
+        content = json.dumps(self.snapshot().to_dict(), indent=2, sort_keys=True) + "\n"
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -162,12 +153,8 @@ class CountedTcpIngress:
             self._stop.set()
 
     def _forward_connection(self, client: socket.socket) -> None:
-        target_family = (
-            socket.AF_INET
-            if ":" not in self.target_host and not self.target_host.startswith("[")
-            else socket.AF_INET6
-        )
-        upstream = socket.socket(target_family, socket.SOCK_STREAM)
+        family = socket.AF_INET if ":" not in self.target_host else socket.AF_INET6
+        upstream = socket.socket(family, socket.SOCK_STREAM)
         try:
             upstream.settimeout(self.connect_timeout)
             upstream.connect((self.target_host, self.target_port))
@@ -213,55 +200,20 @@ class CountedTcpIngress:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Counted TCP ingress helper for SynthRAN IoT experiments."
+        description="Counted TCP ingress helper for AMBER RFSIM transport."
     )
-    parser.add_argument(
-        "--listen-host",
-        default="fd00::1",
-        help="IPv6 or IPv4 address to listen on (default: fd00::1)",
-    )
-    parser.add_argument(
-        "--listen-port",
-        type=int,
-        default=1883,
-        help="Port to listen on (default: 1883)",
-    )
-    parser.add_argument(
-        "--target-host",
-        default="127.0.0.1",
-        help="Target IPv4 or IPv6 address (default: 127.0.0.1)",
-    )
-    parser.add_argument(
-        "--target-port",
-        type=int,
-        default=18883,
-        help="Target port (default: 18883)",
-    )
-    parser.add_argument(
-        "--snapshot-path",
-        type=Path,
-        required=True,
-        help="File path to write the JSON snapshot of byte/connection counters",
-    )
-    parser.add_argument(
-        "--connect-timeout",
-        type=float,
-        default=10.0,
-        help="Upstream connect timeout in seconds (default: 10.0)",
-    )
-    parser.add_argument(
-        "--poll-interval",
-        type=float,
-        default=0.5,
-        help="Snapshot update interval in seconds (default: 0.5)",
-    )
+    parser.add_argument("--listen-host", default="127.0.0.1")
+    parser.add_argument("--listen-port", type=int, default=18886)
+    parser.add_argument("--target-host", default="127.0.0.1")
+    parser.add_argument("--target-port", type=int, default=18883)
+    parser.add_argument("--snapshot-path", type=Path, required=True)
+    parser.add_argument("--connect-timeout", type=float, default=10.0)
+    parser.add_argument("--poll-interval", type=float, default=0.5)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
+    args = _build_parser().parse_args(argv)
     try:
         ingress = CountedTcpIngress(
             listen_host=args.listen_host,
@@ -277,15 +229,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     stop_event = threading.Event()
 
-    def _handle_signal(_signum: int, _frame: Any) -> None:
+    def handle_signal(_signum: int, _frame: Any) -> None:
         stop_event.set()
 
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
-
-    # Write initial zero snapshot
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
     ingress.write_snapshot_file(args.snapshot_path)
-
     try:
         while not stop_event.is_set():
             time.sleep(args.poll_interval)
@@ -296,7 +245,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         except IngressError:
             pass
         ingress.write_snapshot_file(args.snapshot_path)
-
     return 0
 
 

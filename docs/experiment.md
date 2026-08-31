@@ -1,238 +1,185 @@
-# Experiment and research protocol
+# Experiment protocol
 
-SynthRAN has two connected experiment layers:
+SynthRAN’s scientific unit is an immutable run with deterministic workload inputs, a proven 5G data path, fixed measurement boundaries, persisted validity evidence, and exact cleanup semantics.
 
-1. **Integrated IoT-to-5G experiment** — prove deterministic telemetry can traverse the accepted open 5G path and be collected reproducibly.
-2. **Controlled research experiment** — run the same workload inside a fixed measurement window while adding calibrated background load and instrumentation.
+## Deterministic workload
 
-Both consume an already path-proven Open5GS + srsRAN + RFSIM base network. Experiment commands do not silently reserve resources or redeploy the network.
+The canonical workload contains ten Contiki-NG/Cooja sensors. Each sensor has a stable identity and deterministic timing derived from the selected seed.
 
-Current live results are summarized in [`results.md`](results.md).
-
-Before running the commands in this guide, use the locked environment:
-
-```bash
-conda activate synthran
-```
-
-The complete provider setup — SLICES account/project, provider experiment, Post5G prefix, resource preparation, deployment, calibration, campaign execution, and preservation — is documented end to end in [`operator-guide.md`](operator-guide.md).
-
-## 1. End-to-end path
+At the experiment level the path is:
 
 ```text
-10 deterministic Contiki-NG/Cooja sensors
--> RPL / 6LoWPAN
--> Cooja Serial Socket
--> loopback-only reverse SSH tunnel
--> tunslip6 / tun0
--> counted TCP/MQTT ingress
--> Mosquitto bridge in srsUE network namespace
--> tun_srsue1
--> srsRAN gNB
+10 deterministic sensors
+-> RPL/6LoWPAN border router
+-> counted ingress
+-> UE-side MQTT handoff
+-> 5G user plane
 -> Open5GS UPF
--> run-owned central broker / collector
+-> run-owned central MQTT collector
 -> canonical JSONL
 -> deterministic Parquet
 ```
 
-The edge bridge runs inside the srsUE network namespace because that is where the live UE PDU address and `tun_srsue1` exist. SynthRAN rediscovers the PDU after RFSIM reconciliation rather than trusting an older manifest value.
+RFSIM and R2Lab differ in how the UE and radio are implemented, not in the meaning of the emitted sensor records.
 
-The counted ingress is an integration adapter; it is not the cellular proof boundary. Acceptance also requires current UE/UPF path evidence and exact cleanup/base-network reproof.
+## Run identity
 
-## 2. Deterministic IoT workload
+A run ID is immutable and unique. It binds:
 
-The accepted virtual experiment uses:
+- provider context;
+- selected compute/radio resources;
+- workload identity;
+- evidence directories;
+- sanitized event stream;
+- acceptance outcome.
 
-- exactly ten sensors, `sensor-01` through `sensor-10`;
-- one RPL border router;
-- deterministic Cooja seed/topology;
-- run-scoped MQTT topics;
-- canonical `synthran/telemetry/v1alpha1` records;
-- per-sensor sequence integrity checks.
+A failed run ID is never reused for a retry with different state or intent.
 
-Research campaigns vary the Cooja seed between blocks while keeping the scenario fixed within a block. Conditions inside a block therefore observe the same deterministic workload under different network treatments.
+## Acceptance
 
-## 3. Controlled research conditions
-
-The accepted campaign studies controlled user-plane background load:
+An accepted run must prove the required path rather than infer success from process exit codes. The common logical order is:
 
 ```text
-baseline  no background load
-load50    0.50 × calibrated reference capacity
-load80    0.80 × calibrated reference capacity
-load95    0.95 × calibrated reference capacity
+provider
+-> resources
+-> 5G path
+-> UE/PDU/user plane
+-> workload
+-> acceptance
+-> cleanup
 ```
 
-Research load is UDP. The reference capacity is calibrated separately over the UE path to the external measurement peer. All loaded campaign-06 treatments use two parallel UDP flows while keeping aggregate target bitrate fixed by condition.
+R2Lab records additional hardware-specific boundaries such as N2, UE management, cell acquisition, registration, and PDU state. Those checks strengthen physical safety but do not change the scientific workload definition.
 
-The current accepted calibration is:
+## Telemetry record semantics
 
-```text
-network run:        network-acceptance-20260818-09
-measurement peer:   172.28.2.95
-reference capacity: 66,366,402 bps
-artifact:           calibration-20260819-external-08.json
-```
+Canonical telemetry records preserve at least:
 
-This is an empirical UE-path reference for the accepted testbed epoch, not a claim about physical radio capacity.
+- run identity;
+- sensor identity;
+- sequence identity;
+- source timestamp/order information required by the collector;
+- payload fields defined by the deterministic sensor program;
+- collection metadata required for provenance.
 
-## 4. External measurement peer
+JSONL is the append-only audit representation. Deterministic Parquet files are analysis derivatives and must be reproducible from the accepted JSONL source.
 
-Capacity calibration and loaded research traffic must terminate outside the 5G core host:
+## Sequence integrity
+
+Observation-window occupancy and packet loss are different concepts.
+
+A periodic source may contribute one fewer record when the fixed window starts or ends between transmissions. Therefore:
+
+- nominal expected count is a window-occupancy reference;
+- a missing sequence inside an observed contiguous range is an observed sequence gap;
+- a repeated sequence identity is a duplicate;
+- fixed-window count alone is not an end-to-end loss estimator.
+
+Scientific reporting should state sequence gaps and duplicates explicitly.
+
+## Measurement window
+
+Research runs separate startup/warmup from the fixed measurement interval.
+
+A measurement specification records:
+
+- warmup duration;
+- measurement duration;
+- requested telemetry/sample cadence;
+- RTT probe cadence;
+- load configuration;
+- external measurement peer;
+- deterministic seed and condition.
+
+Requested cadence is not evidence of achieved cadence. Instrumentation validity is determined from persisted timestamps, durations, and scheduling lag.
+
+## RTT probes
+
+RTT probing is collected independently from slower network-counter sampling. Each probe attempt belongs to the fixed measurement interval and records success/failure plus timing information required for analysis.
+
+A probe timeout is a measured outcome when the measurement path and instrumentation remain valid; it is not automatically an infrastructure failure.
+
+## Network counters
+
+Network counters provide path-health and transport evidence such as ingress, UE-side transfer, UPF transfer, and drop counters. They are sampled read-only.
+
+The sampler must record enough timing information to determine whether the requested cadence was actually achieved. A run that materially misses its instrumentation contract may remain useful diagnostic evidence but must fail the corresponding research-validity gate.
+
+## Controlled load
+
+Controlled research load uses an external peer outside the 5G core host. The supported virtual research path is:
 
 ```text
 UE PDU
--> tun_srsue1
--> srsRAN / 5G user plane
+-> 5G user plane
 -> Open5GS UPF
--> core egress / NAT
--> prepared RAN node
+-> core egress
+-> prepared external measurement peer
 ```
 
-The core node is rejected as the research iperf3 server because a same-host endpoint can collapse into a Kubernetes/hairpin path and misrepresent external user-plane transport.
+Load conditions may use an absolute target bitrate or a fraction of a freshly calibrated reference capacity. The run records configured target, achieved transfer evidence, and cleanup.
 
-See [`research-measurement-peer.md`](research-measurement-peer.md) for the exact ownership/readiness contract.
+The core node must not be used as the measurement server when that choice can collapse into a same-host or Kubernetes hairpin path.
 
-## 5. Measurement window
+## Calibration
 
-A controlled run has explicit warmup and measurement boundaries. Campaign-06 uses:
+Capacity calibration belongs to the current accepted network epoch. It is not a universal property of the testbed.
+
+Calibration evidence records the target peer, duration, transport configuration, resulting reference bitrate, and enough path identity to prevent accidental reuse on a different network state.
+
+## Campaigns
+
+A campaign is a deterministic schedule of conditions and seeds. The schedule is persisted before execution. Typical blocked conditions are:
 
 ```text
-sensor count:            10
-sensor period:           5 s
-warmup:                  30 s
-measurement:             180 s
-RTT probe request:       1 s
-network sample request:  1 s
-loaded UDP flows:        2
+baseline
+load50=0.5
+load80=0.8
+load95=0.95
 ```
 
-During the measurement window SynthRAN records, as applicable:
+Each condition is paired with the baseline from the same seed block during analysis. Failed or invalid runs remain in the evidence set but are excluded from scientific summaries according to explicit validity gates.
 
-- telemetry received by the run-owned collector;
-- continuous ICMP RTT attempts bound to the UE path;
-- UE `tun_srsue1` counters;
-- UPF `ogstun` counters;
-- counted ingress state;
-- iperf3 background goodput;
-- exact UTC window bounds and measurement-path evidence.
+## Validity layers
 
-## 6. Readiness and validity
+Keep these questions separate:
 
-A loaded condition is not scientifically valid merely because iperf3 printed throughput. The runtime independently checks the path, load, instrumentation, and cleanup boundaries.
+1. Was the base 5G path accepted?
+2. Did the deterministic IoT path remain valid?
+3. Was the external measurement peer valid?
+4. Was the requested load actually sustained?
+5. Did RTT/network instrumentation meet its contract?
+6. Did cleanup and post-run path verification succeed?
+7. What scientific outcome was observed?
 
-Before/during/after the window, the current runtime requires the applicable checks to pass:
+The expected scientific result must never be encoded into infrastructure validity. For example, higher latency, lower latency, packet loss, or zero packet loss can all be legitimate outcomes if the path and instrumentation are independently valid.
 
-- current base network is path-proven;
-- current run-owned UE/PDU handoff is consistent;
-- exact target route uses `tun_srsue1`;
-- baseline target is reachable through the bounded baseline readiness proof;
-- loaded conditions have a run-owned external iperf3 server and an `ESTABLISHED` UE TCP control connection before the window opens;
-- requested load reaches the configured target-ratio gate;
-- RTT instrumentation produces records;
-- network counter sampling covers the transport path;
-- post-window network proof succeeds;
-- run-owned cleanup succeeds and the base network is reproven.
+## Physical backend boundary
 
-`CLOSE-WAIT` is never accepted as loaded readiness. Failed runs retain their evidence and IDs; they are not silently retried under the same identity.
+The deterministic workload is implemented through the R2Lab physical user plane. Physical controlled-load research campaigns are not yet claimed as accepted scientific capability because the physical measurement-peer/load-control contract has not been validated to the same standard as the current virtual campaign.
 
-## 7. Network-sampling cadence
+Do not reinterpret architectural run parity as measured research parity.
 
-The network sampler records `sample_duration_seconds` and `schedule_lag_seconds`; therefore the configured interval and the achieved interval are distinct pieces of evidence.
+## Preservation
 
-Campaign-06 requested 1-second network-counter sampling but achieved approximately one sample every three seconds because the ingress, UE, and UPF queries were collected sequentially. The run-level first/last counter deltas remain usable, but campaign-06 must not be described as 1 Hz counter-resolution evidence.
-
-The sampler is hardened for future runs by:
-
-1. collecting the independent ingress, UE, and UPF read-only sources concurrently;
-2. retaining deadline-based scheduling;
-3. rejecting a run when achieved sample count falls below the accepted fraction of the requested cadence.
-
-RTT probing is independent and did achieve 180 attempts in each 180-second campaign-06 window.
-
-## 8. Telemetry count semantics
-
-A periodic source and a hard observation window do not guarantee exactly `duration / period` records inside the window. The first transmission can occur at an arbitrary timing offset relative to the window boundary.
-
-For the current v1alpha1 summaries:
-
-- `expected_events` is a **nominal fixed-window expectation**;
-- `delivery_ratio` should be interpreted as nominal window occupancy;
-- per-sensor sequence gaps and duplicates are the direct observed integrity metrics.
-
-Campaign-06 contains zero sequence gaps and zero duplicates, including the few streams that contain 35 rather than 36 records inside the window. Do not report those boundary-aligned 35-record streams as observed packet loss.
-
-This distinction is intentionally scientific: actual sequence loss is allowed to be an experimental outcome when the independent network/load/instrumentation validity gates remain healthy.
-
-## 9. Campaign design
-
-Campaigns use a randomized blocked design:
-
-- each Cooja seed is one block;
-- every condition appears once in each block;
-- condition order is randomized reproducibly with a fixed campaign seed;
-- a **run**, not an individual packet or RTT sample, is the statistical unit;
-- loaded runs are paired with the baseline from the same seed block.
-
-Example planning command:
-
-```bash
-python -m synthran experiment research campaign-plan \
-  --campaign-id campaign-01 \
-  --network-run-id NETWORK_RUN_ID \
-  --seeds 424242,424243,424244 \
-  --conditions baseline,load50:0.5,load80:0.8,load95:0.95 \
-  --campaign-seed 12345 \
-  --out .synthran/campaigns/campaign-01.json
-```
-
-Offline analysis reads only persisted run summaries whose own validity gates report readiness.
-
-```bash
-python -m synthran experiment research analyze \
-  --campaign .synthran/campaigns/campaign-01.json \
-  --run-root /path/to/experiments \
-  --out .synthran/reports/campaign-01-analysis.json
-```
-
-## 10. Research artifacts
-
-A controlled run persists the applicable evidence below its run directory:
+A complete research bundle should preserve:
 
 ```text
-experiment-spec.json
-measurement-window.json
-measurement-path.json
-telemetry.jsonl / telemetry.parquet
-probe.jsonl / probe.parquet
-network-samples.jsonl / network-samples.parquet
-load.jsonl / load.parquet       # loaded conditions only
-research-summary.json
-logs and integrated experiment evidence
+run/campaign specification
+measurement window
+measurement path
+telemetry.jsonl + telemetry.parquet
+probe.jsonl + probe.parquet
+network-samples.jsonl + network-samples.parquet
+load.jsonl + load.parquet
+research summary
+artifact digests
+provider/dependency provenance
+unified event log
 ```
 
-JSONL is the append-only audit source. Parquet is a deterministic analysis derivative.
+Raw immutable campaign bundles belong in durable research/object storage rather than ordinary Git history.
 
-## 11. Accepted campaign and next question
+## Current accepted results
 
-`campaign-20260819-06` completed all 12 runs across three seeds and four conditions. It established valid controlled transport up to 95% of the reference capacity with no RTT timeouts, no observed telemetry sequence gaps/duplicates, and no receiver-reported UDP packet loss in the loaded runs.
-
-The unexpected result is that RTT was consistently lower during all three continuously loaded conditions than during baseline. Because load50/load80/load95 cluster close together, the next experiment should distinguish **idle versus active path state** from **load magnitude** before any causal claim is made.
-
-See [`results.md`](results.md) for the measured values, preservation identifiers, limitations, and proposed follow-up.
-
-## 12. Operator entry points
-
-The scripted CLI remains the live execution path. Typical research stages are:
-
-```text
-prepare resources
--> deploy 5G network
--> verify path
--> calibrate external UE path
--> plan campaign
--> run campaign
--> analyze persisted valid runs offline
-```
-
-Exact commands and safety boundaries are in [`operator-guide.md`](operator-guide.md). The interactive terminal may create state-sensitive operation plans but does not yet execute these provider/domain workflows itself.
+The canonical current measurements, checksums, limitations, and interpretation boundaries are maintained in [`results.md`](results.md).

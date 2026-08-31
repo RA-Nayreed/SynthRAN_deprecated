@@ -1,121 +1,100 @@
 # Research measurement peer
 
-Controlled capacity calibration and background-load experiments must terminate **outside the 5G core host**.
+Controlled capacity calibration and background load require a peer outside the 5G core host. This prevents a nominal “user-plane” measurement from collapsing into a same-host or Kubernetes hairpin path.
 
-## Required topology
+## Accepted virtual path
+
+For the current RFSIM research implementation:
 
 ```text
-srsUE PDU
--> tun_srsue1
--> srsRAN / 5G user plane
+srsUE PDU interface
+-> srsRAN/RFSIM
 -> Open5GS UPF
--> core egress / NAT
--> external measurement peer
+-> core egress/NAT
+-> prepared external measurement peer
 ```
 
-For the reviewed two-node SLICES virtual inventory, the prepared RAN node is the measurement peer. The core node is never the iperf3 server for controlled research measurements.
+In the reviewed two-node layout, the RAN-side prepared compute node is used as the external peer while the separate core node hosts Open5GS.
 
-A server on the core host can create a same-host Kubernetes/hairpin path in which the UE binds its PDU address but the flow does not exercise the intended external egress. Such a run can look reachable while being scientifically invalid for external user-plane capacity/load claims.
+## Why the core node is rejected
 
-## Runtime contract
+Running the iperf3 server on the same host as the core can create a path that no longer measures the intended external UE-to-network traversal. Depending on routing/Kubernetes state, traffic can terminate locally or take a hairpin path that bypasses meaningful external transport.
 
-The run-owned iperf3 lifecycle must preserve:
+A successful TCP/UDP connection is therefore insufficient evidence that the selected peer is scientifically valid.
 
-- the selected server is the prepared external measurement node, not `inventory.core_node`;
-- an explicitly supplied target is proven assigned to that selected node;
-- the UE client binds the live PDU and the exact target route uses `tun_srsue1`;
-- stale recovery targets only the exact SynthRAN-owned server signature;
-- listener ownership is proven from the run-owned process/socket state, not from an untrusted PID file alone;
-- cleanup runs on the same peer that started the server and fails closed when ownership is ambiguous.
+## Peer selection requirements
 
-Temporary server state remains run-scoped below `/tmp/synthran-research/<run-id>/` on the peer.
+A measurement peer must:
 
-## Operator target selection
-
-Inspect the prepared RAN node:
-
-```bash
-ansible -i "$INVENTORY" ran_node -m shell -a '
-hostname
-ip -4 -o addr show
-ip -4 route show default
-'
-```
-
-Choose its provider-facing IPv4 address:
-
-```bash
-MEASUREMENT_PEER_IP=<prepared-ran-node-provider-ip>
-```
-
-Do not use:
-
-- the core-node provider address;
-- a Kubernetes/Post5G LoadBalancer address;
-- a stale address copied from an older network epoch.
+- be outside the selected 5G core host;
+- have a current reachable address on the intended external path;
+- be bound to the accepted network epoch/run;
+- support exact run-owned iperf server lifecycle;
+- avoid ambiguous same-host/container routing;
+- remain independently observable during the measurement window.
 
 ## Calibration
 
-```bash
-python -m synthran experiment research calibrate \
+After an accepted virtual run:
+
+```zsh
+export NETWORK_RUN='virtual-001'
+export INVENTORY=".synthran/preparations/$NETWORK_RUN/hosts.ini"
+export MEASUREMENT_PEER_IP='PEER_IPV4'
+
+synthran research calibrate \
   --inventory "$INVENTORY" \
-  --network-run-id "$NETWORK_RUN_ID" \
+  --network-run-id "$NETWORK_RUN" \
   --target "$MEASUREMENT_PEER_IP" \
   --duration-seconds 10 \
   --out .synthran/research/capacity.json
 ```
 
-Fractional loaded conditions must use the same peer and a reference calibration valid for the current network/dependency epoch.
+The resulting reference capacity belongs to that accepted network context. Recalibrate after network/resource changes that can alter the path.
 
-## Loaded pre-window readiness
+## Controlled load
 
-Readiness should prove the transport that defines the experimental condition.
+Loaded conditions use either an absolute target bitrate or a fraction of the calibrated reference capacity. The research runtime records the requested target and transfer evidence so analysis can reject runs where the treatment was not actually sustained.
 
-For loaded runs, SynthRAN does not use ICMP success as the veto for whether iperf3 load may begin. Instead it proves:
+The load server/client lifecycle must be run-owned and exact. A previous iperf server process is not silently adopted as current measurement infrastructure.
 
-1. the exact target route is through `tun_srsue1`;
-2. the run-owned iperf3 server is listening on the external peer;
-3. the UE iperf3 client is bound to the live PDU address;
-4. the client's TCP control connection becomes genuinely `ESTABLISHED` before the measurement window opens.
+## Routing proof
 
-`CLOSE-WAIT` is not accepted as readiness.
+The research path should demonstrate that traffic is associated with the current UE/PDU network boundary rather than generic host reachability. Current route/PDU evidence is preferred over historical addresses.
 
-UDP data then runs under that established iperf3 control session. ICMP remains an independent RTT observation during the measurement window.
+Never reuse a PDU address merely because it appeared in a previous accepted run.
 
-Baseline has no load transport to prove, so it retains its bounded baseline target-reachability check.
+## Physical backend
 
-## Evidence required for a loaded result
+The physical deterministic workload proves a route-bound user plane through the selected physical UE interface. That is necessary but not yet sufficient for controlled research-campaign parity.
 
-Before a run is scientifically usable, confirm the applicable persisted validity evidence shows:
+Before physical campaigns are claimed, the physical research implementation must establish an accepted contract for:
 
-- target route through `tun_srsue1`;
-- external peer/server ownership proven;
-- load control connection established before the window;
-- target load achieved;
-- path instrumentation remained healthy;
-- post-window network proof succeeded;
-- run-owned cleanup succeeded and the base network was reproven.
+- external peer selection relative to the physical PDU path;
+- capacity calibration;
+- load generation bound to the selected UE interface;
+- achieved-load validation;
+- counter/probe timing validity;
+- run-owned server/client cleanup;
+- post-measurement path reproof.
 
-A failed or same-host calibration remains diagnostic evidence and must not be reused as a fractional reference.
+Until that evidence exists, the published `synthran research` controlled-load workflow remains the accepted virtual research path.
 
-## Current live acceptance
+## Evidence to preserve
 
-The current accepted research epoch used:
+For every calibration or loaded run preserve enough information to reconstruct:
 
 ```text
-network_run_id:         network-acceptance-20260818-09
-measurement peer:       sopnode-f3 / 172.28.2.95
-calibration artifact:   calibration-20260819-external-08.json
-reference capacity:     66,366,402 bps
-campaign:               campaign-20260819-06
+network/run identity
+peer identity/address at measurement time
+UE/PDU path identity
+server port and transport
+calibration duration/result
+configured load target
+achieved transfer evidence
+measurement timing
+cleanup result
+artifact hashes
 ```
 
-The campaign completed all 12 blocked runs across baseline, 50%, 80%, and 95% of the reference capacity. All nine loaded runs sustained their target aggregate UDP goodput and the external receiver reported zero UDP packet loss.
-
-The complete result, preservation identifiers, and interpretation limits are in [`results.md`](results.md).
-
-## Historical reason for this invariant
-
-Earlier same-host tests showed why a core-host target was unsafe: the transport could collapse into a Kubernetes/hairpin path and the iperf3 control state could look misleading even though the intended external UE path had not been established correctly.
-
-Those failures are intentionally retained as diagnostic history in [`live-results-20260818.md`](live-results-20260818.md). They must not be promoted into current campaign evidence.
+The peer address may be private runtime evidence; public summaries should expose only what is required for reproducibility and privacy policy.

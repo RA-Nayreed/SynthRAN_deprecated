@@ -1,4 +1,4 @@
-"""Deterministic IoT-to-5G experiment contracts and artifact handling."""
+"""Amber IoT-to-5G experiment contracts and artifact handling."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 
-EXPERIMENT_SCHEMA = "synthran/iot-experiment/v1alpha1"
-EXPERIMENT_EVIDENCE_SCHEMA = "synthran/iot-evidence/v1alpha1"
+EXPERIMENT_SCHEMA = "synthran/iot-experiment/v2alpha1"
+EXPERIMENT_EVIDENCE_SCHEMA = "synthran/iot-evidence/v2alpha1"
 TELEMETRY_SCHEMA = "synthran/telemetry/v1alpha1"
 SENSOR_COUNT = 10
 DEFAULT_TOPIC_PREFIX = "synthran"
@@ -69,18 +69,20 @@ def load_path_proven_network(
     manifest_path: Path,
     evidence_path: Path,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    """Load and validate the accepted network prerequisite evidence."""
+    """Load the persisted network/session readiness evidence used by a workload."""
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ExperimentError("path-proven network evidence is missing") from exc
+        raise ExperimentError("accepted network evidence is missing") from exc
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ExperimentError("network acceptance evidence must be readable JSON") from exc
 
+    # The persisted network schema still uses the historical status token.  It is
+    # treated here as session-readiness evidence, not as an end-to-end traffic proof.
     if not isinstance(manifest, dict) or manifest.get("status") != "path-proven":
-        raise ExperimentError("experiment requires a network manifest with status=path-proven")
+        raise ExperimentError("experiment requires an accepted network manifest")
     if (
         not isinstance(evidence, dict)
         or evidence.get("schema") != "synthran/network-evidence/v1alpha1"
@@ -94,7 +96,7 @@ def load_path_proven_network(
 
     path = evidence.get("path")
     if not isinstance(path, dict):
-        raise ExperimentError("network path evidence is malformed")
+        raise ExperimentError("network session evidence is malformed")
     pdu_address = path.get("pdu_address")
     pdu_network = path.get("pdu_network")
     if not isinstance(pdu_address, str) or not isinstance(pdu_network, str):
@@ -105,7 +107,7 @@ def load_path_proven_network(
     except ValueError as exc:
         raise ExperimentError("network PDU evidence contains invalid IP data") from exc
     if observed_network != EXPECTED_PDU_NETWORK or observed_address not in observed_network:
-        raise ExperimentError("PDU path does not match the accepted golden path")
+        raise ExperimentError("PDU session does not match the accepted golden path")
     if path.get("ue_interface") != "tun_srsue1":
         raise ExperimentError("accepted UE interface is not tun_srsue1")
     if (
@@ -119,26 +121,22 @@ def load_path_proven_network(
 
 @dataclass(frozen=True)
 class ExperimentScenario:
+    """Network attachment context shared by Amber source/transport execution."""
+
     run_id: str
     network_run_id: str
     pdu_address: str
     sensor_count: int = SENSOR_COUNT
     sensor_period_seconds: int = DEFAULT_SENSOR_PERIOD_SECONDS
-    cooja_seed: int = 424242
-    serial_socket_port: int = 60001
     topic_prefix: str = DEFAULT_TOPIC_PREFIX
 
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)
         validate_run_id(self.network_run_id)
         if self.sensor_count != SENSOR_COUNT:
-            raise ExperimentError("golden path requires exactly 10 sensors")
+            raise ExperimentError("Ambient-IoT profile requires exactly 10 sensors")
         if self.sensor_period_seconds <= 0 or self.sensor_period_seconds > 3600:
             raise ExperimentError("sensor period must be between 1 and 3600 seconds")
-        if self.cooja_seed < 0:
-            raise ExperimentError("Cooja seed must be non-negative")
-        if self.serial_socket_port < 1024 or self.serial_socket_port > 65535:
-            raise ExperimentError("serial socket port must be between 1024 and 65535")
         try:
             pdu = ipaddress.ip_address(self.pdu_address)
         except ValueError as exc:
@@ -156,13 +154,6 @@ class ExperimentScenario:
     def sensor_topic(self) -> str:
         return f"{self.topic_root}/sensor/+"
 
-    @property
-    def exact_sensor_topics(self) -> tuple[str, ...]:
-        return tuple(
-            f"{self.topic_root}/sensor/sensor-{index:02d}"
-            for index in range(1, self.sensor_count + 1)
-        )
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": EXPERIMENT_SCHEMA,
@@ -172,11 +163,7 @@ class ExperimentScenario:
             "ue_interface": "tun_srsue1",
             "sensor_count": self.sensor_count,
             "sensor_period_seconds": self.sensor_period_seconds,
-            "cooja_seed": self.cooja_seed,
-            "serial_socket_port": self.serial_socket_port,
             "topic_root": self.topic_root,
-            "rpl_prefix": "fd00::/64",
-            "edge_broker_address": "fd00::1",
             "data_contract": TELEMETRY_SCHEMA,
         }
 
@@ -187,8 +174,6 @@ def build_scenario(
     network_manifest: Path,
     network_evidence: Path,
     sensor_period_seconds: int = DEFAULT_SENSOR_PERIOD_SECONDS,
-    cooja_seed: int = 424242,
-    serial_socket_port: int = 60001,
 ) -> ExperimentScenario:
     manifest, evidence = load_path_proven_network(network_manifest, network_evidence)
     path = evidence["path"]
@@ -197,8 +182,6 @@ def build_scenario(
         network_run_id=str(manifest["run_id"]),
         pdu_address=str(path["pdu_address"]),
         sensor_period_seconds=sensor_period_seconds,
-        cooja_seed=cooja_seed,
-        serial_socket_port=serial_socket_port,
     )
 
 
@@ -269,34 +252,24 @@ class TelemetryEvent:
             value = json.loads(text)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ExperimentError("telemetry payload is not valid JSON") from exc
-
         if not isinstance(value, dict):
             raise ExperimentError("telemetry payload must be a JSON object")
         if value.get("schema") != TELEMETRY_SCHEMA:
             raise ExperimentError("telemetry payload schema is unsupported")
         if value.get("run_id") != expected_run_id:
             raise ExperimentError("telemetry event run ID does not match the active experiment")
-
         sensor_id = value.get("sensor_id")
         if not isinstance(sensor_id, str) or not SENSOR_RE.fullmatch(sensor_id):
             raise ExperimentError("telemetry sensor ID must match sensor-01..sensor-10")
-
         sequence = value.get("sequence")
         if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
             raise ExperimentError("telemetry sequence must be a positive integer")
-
         sensor_time_ms = value.get("sensor_time_ms")
-        if (
-            not isinstance(sensor_time_ms, int)
-            or isinstance(sensor_time_ms, bool)
-            or sensor_time_ms < 0
-        ):
+        if not isinstance(sensor_time_ms, int) or isinstance(sensor_time_ms, bool) or sensor_time_ms < 0:
             raise ExperimentError("telemetry sensor_time_ms must be a non-negative integer")
-
         value_milli = value.get("value_milli")
         if not isinstance(value_milli, int) or isinstance(value_milli, bool):
             raise ExperimentError("telemetry value_milli must be an integer")
-
         return cls(
             run_id=expected_run_id,
             sensor_id=sensor_id,
@@ -367,26 +340,18 @@ def load_jsonl(path: Path, *, expected_run_id: str) -> list[dict[str, Any]]:
     return records
 
 
-def deterministic_records(
-    records: Sequence[Mapping[str, Any]],
-) -> list[dict[str, Any]]:
+def deterministic_records(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     canonical = [dict(record) for record in records]
     canonical.sort(key=lambda item: (str(item["sensor_id"]), int(item["sequence"])))
     return canonical
 
 
-def write_parquet(
-    records: Sequence[Mapping[str, Any]],
-    destination: Path,
-) -> None:
-    """Write the deterministic derived dataset using the locked PyArrow runtime."""
-
+def write_parquet(records: Sequence[Mapping[str, Any]], destination: Path) -> None:
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
     except ImportError as exc:
         raise ExperimentError("PyArrow is required for Parquet derivation") from exc
-
     canonical = deterministic_records(records)
     schema = pa.schema(
         [
@@ -429,8 +394,7 @@ def validate_sequence_integrity(
         sequence = record.get("sequence")
         if sensor_id not in by_sensor or not isinstance(sequence, int):
             raise ExperimentError("dataset contains telemetry outside the sensor contract")
-        by_sensor[sensor_id].append(sequence)
-
+        by_sensor[str(sensor_id)].append(sequence)
     failures: list[str] = []
     for sensor_id, sequences in by_sensor.items():
         if len(sequences) < minimum_per_sensor:
@@ -440,8 +404,7 @@ def validate_sequence_integrity(
             failures.append(f"{sensor_id}: duplicate sequence")
             continue
         ordered = sorted(sequences)
-        expected = list(range(ordered[0], ordered[-1] + 1))
-        if ordered != expected:
+        if ordered != list(range(ordered[0], ordered[-1] + 1)):
             failures.append(f"{sensor_id}: sequence gap")
     return tuple(failures)
 
@@ -488,12 +451,8 @@ class ExperimentEvidence:
     def render(self) -> str:
         lines = [f"SynthRAN experiment verification ({self.run_id})"]
         for check in self.checks:
-            lines.append(
-                f"[{'PASS' if check.passed else 'FAIL'}] {check.name}: {check.detail}"
-            )
-        lines.append(
-            f"Result: {'IOT-TO-5G PATH PROVEN' if self.ready else 'NOT PROVEN'}"
-        )
+            lines.append(f"[{'PASS' if check.passed else 'FAIL'}] {check.name}: {check.detail}")
+        lines.append(f"Result: {'ACCEPTED' if self.ready else 'NOT ACCEPTED'}")
         return "\n".join(lines)
 
 
@@ -508,17 +467,13 @@ def build_data_evidence(
     now: datetime | None = None,
 ) -> ExperimentEvidence:
     records = load_jsonl(jsonl_path, expected_run_id=scenario.run_id)
-    failures = validate_sequence_integrity(
-        records,
-        minimum_per_sensor=minimum_per_sensor,
-    )
+    failures = validate_sequence_integrity(records, minimum_per_sensor=minimum_per_sensor)
     sensors = {str(record["sensor_id"]) for record in records}
     checks = [
         ExperimentCheck(
             "sensor-coverage",
-            sensors
-            == set(f"sensor-{index:02d}" for index in range(1, SENSOR_COUNT + 1)),
-            f"observed {len(sensors)}/10 deterministic sensors",
+            sensors == set(f"sensor-{index:02d}" for index in range(1, SENSOR_COUNT + 1)),
+            f"observed {len(sensors)}/10 Ambient-IoT sources",
         ),
         ExperimentCheck(
             "sequence-integrity",

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synthran.local/contracts/iot-experiment-v2alpha1.schema.json",
+  "title": "SynthRAN portable IoT experiment v2alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "network_run_id",
+    "iot_source",
+    "iot_profile",
+    "iot_seed",
+    "duration_seconds",
+    "sensor_count",
+    "sensor_period_seconds",
+    "sensor_ids",
+    "topic_root",
+    "profile_digest",
+    "amber_commit",
+    "energy_trace_sha256",
+    "data_contract"
+  ],
+  "properties": {
+    "schema": {"const": "synthran/iot-experiment/v2alpha1"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 63},
+    "network_run_id": {"type": "string", "minLength": 1, "maxLength": 63},
+    "iot_source": {"const": "amber"},
+    "iot_profile": {"enum": ["transport-v1", "ambient-v1"]},
+    "iot_seed": {"type": "integer", "minimum": 0},
+    "duration_seconds": {"type": "integer", "minimum": 1},
+    "sensor_count": {"const": 10},
+    "sensor_period_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+    "sensor_ids": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "uniqueItems": true,
+      "items": {"pattern": "^sensor-(0[1-9]|10)$"}
+    },
+    "topic_root": {"type": "string", "minLength": 1},
+    "profile_digest": {"pattern": "^[0-9a-f]{64}$"},
+    "amber_commit": {"pattern": "^[0-9a-f]{40}$"},
+    "energy_trace_sha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"pattern": "^[0-9a-f]{64}$"}
+      ]
+    },
+    "data_contract": {"const": "synthran/telemetry/v1alpha1"}
+  }
+}

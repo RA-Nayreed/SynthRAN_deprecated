@@ -4,13 +4,15 @@
   "title": "SynthRAN controlled research contracts",
   "oneOf": [
     {"$ref": "#/$defs/experiment"},
+    {"$ref": "#/$defs/experimentV2"},
     {"$ref": "#/$defs/campaign"},
     {"$ref": "#/$defs/capacity"},
     {"$ref": "#/$defs/measurementWindow"},
     {"$ref": "#/$defs/probe"},
     {"$ref": "#/$defs/networkSample"},
     {"$ref": "#/$defs/loadResult"},
-    {"$ref": "#/$defs/summary"}
+    {"$ref": "#/$defs/summary"},
+    {"$ref": "#/$defs/summaryV2"}
   ],
   "$defs": {
     "identifier": {
@@ -93,6 +95,49 @@
         "probe_target": {"type": ["string", "null"]},
         "expected_events_per_sensor": {"type": "integer", "minimum": 1},
         "expected_events_total": {"type": "integer", "minimum": 10}
+      }
+    },
+    "experimentV2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "campaign_id",
+        "run_id",
+        "network_run_id",
+        "condition",
+        "iot_source",
+        "iot_profile",
+        "iot_seed",
+        "sensor_period_seconds",
+        "sensor_count",
+        "measurement",
+        "load",
+        "probe_target",
+        "profile_digest",
+        "amber_commit",
+        "energy_trace_sha256"
+      ],
+      "properties": {
+        "schema": {"const": "synthran/research-experiment/v2alpha1"},
+        "campaign_id": {"$ref": "#/$defs/identifier"},
+        "run_id": {"$ref": "#/$defs/identifier"},
+        "network_run_id": {"$ref": "#/$defs/identifier"},
+        "condition": {"$ref": "#/$defs/conditionName"},
+        "iot_source": {"const": "amber"},
+        "iot_profile": {"enum": ["transport-v1", "ambient-v1"]},
+        "iot_seed": {"type": "integer", "minimum": 0},
+        "sensor_period_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "sensor_count": {"const": 10},
+        "measurement": {"$ref": "#/$defs/measurement"},
+        "load": {"$ref": "#/$defs/load"},
+        "probe_target": {"type": ["string", "null"]},
+        "profile_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "amber_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "energy_trace_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     },
     "campaignCondition": {
@@ -327,6 +372,65 @@
             "pattern": "^[0-9a-f]{64}$"
           }
         }
+      }
+    },
+    "summaryV2": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "schema",
+        "campaign_id",
+        "run_id",
+        "network_run_id",
+        "condition",
+        "iot_source",
+        "iot_profile",
+        "iot_seed",
+        "profile_digest",
+        "sensor_period_seconds",
+        "measurement",
+        "source",
+        "transport",
+        "measurement_received_events",
+        "infrastructure_valid",
+        "scientific_valid"
+      ],
+      "properties": {
+        "schema": {"const": "synthran/research-summary/v2alpha1"},
+        "campaign_id": {"$ref": "#/$defs/identifier"},
+        "run_id": {"$ref": "#/$defs/identifier"},
+        "network_run_id": {"$ref": "#/$defs/identifier"},
+        "condition": {"$ref": "#/$defs/conditionName"},
+        "iot_source": {"const": "amber"},
+        "iot_profile": {"enum": ["transport-v1", "ambient-v1"]},
+        "iot_seed": {"type": "integer", "minimum": 0},
+        "profile_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sensor_period_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "measurement": {"$ref": "#/$defs/measurement"},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["planned_opportunities", "decoded_opportunities", "source_loss"],
+          "properties": {
+            "planned_opportunities": {"type": "integer", "minimum": 0},
+            "decoded_opportunities": {"type": "integer", "minimum": 0},
+            "source_loss": {"type": "integer", "minimum": 0}
+          }
+        },
+        "transport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["published_events", "received_events", "transport_loss", "duplicate_count"],
+          "properties": {
+            "published_events": {"type": "integer", "minimum": 0},
+            "received_events": {"type": "integer", "minimum": 0},
+            "transport_loss": {"type": "integer", "minimum": 0},
+            "duplicate_count": {"type": "integer", "minimum": 0}
+          }
+        },
+        "measurement_received_events": {"type": "integer", "minimum": 0},
+        "infrastructure_valid": {"type": "boolean"},
+        "scientific_valid": {"type": "boolean"}
       }
     }
   }

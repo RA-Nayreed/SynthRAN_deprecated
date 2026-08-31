@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from synthran.live_preflight import CommandResult
 from synthran.research import (

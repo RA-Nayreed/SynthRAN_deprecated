@@ -10,7 +10,7 @@ import threading
 from typing import Any, Callable, Mapping, TextIO
 
 from synthran.dependencies import DependencyLock
-from synthran.experiment import runtime as base_runtime
+from synthran.experiment import live as base_runtime
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.network.rfsim import reconcile_rfsim_runtime
 from synthran.network.runtime import verify_network_path

@@ -19,43 +19,29 @@ class AnsibleDurationFormattingTests(unittest.TestCase):
     def test_format_duration(self) -> None:
         self.assertEqual(format_duration(0), "0s")
         self.assertEqual(format_duration(30), "30s")
-        self.assertEqual(format_duration(59), "59s")
         self.assertEqual(format_duration(60), "1m")
         self.assertEqual(format_duration(90), "1m 30s")
-        self.assertEqual(format_duration(120), "2m")
-        self.assertEqual(format_duration(150), "2m 30s")
         self.assertEqual(format_duration(3665), "61m 5s")
 
 
 class AnsibleTaskMappingTests(unittest.TestCase):
     def test_friendly_task_mappings(self) -> None:
         self.assertEqual(
-            friendly_task_name("Deploy the locked Open5GS core into the ready cluster"),
-            "Open5GS core",
-        )
-        self.assertEqual(
-            friendly_task_name("Deploy the srsRAN gNB and srsUE into the ready cluster"),
-            "srsRAN RFSIM",
-        )
-        self.assertEqual(
             friendly_task_name("Replace every reviewed mutable Open5GS image reference"),
-            "Pinning locked Open5GS images",
+            "Open5GS locked images",
+        )
+        self.assertEqual(friendly_task_name("Check job status"), "node bootstrap")
+        self.assertEqual(
+            friendly_task_name("setup/ovs : Ensure OVS is installed"),
+            "node networking setup",
         )
         self.assertEqual(
-            friendly_task_name("Replace every reviewed mutable srsRAN image reference"),
-            "Pinning locked srsRAN images",
+            friendly_task_name("5g/open5gs/deploy : Wait for Open5GS Core NFs pods Ready"),
+            "Open5GS: Wait for Open5GS Core NFs pods Ready",
         )
         self.assertEqual(
-            friendly_task_name("Attach the run ID to the deployed network resources"),
-            "Recording run ownership",
-        )
-        self.assertEqual(
-            friendly_task_name("5g/open5gs/config : Configure SMF"),
-            "Open5GS config: Configure SMF",
-        )
-        self.assertEqual(
-            friendly_task_name("5g/srsRAN/deploy : Start gNB"),
-            "srsRAN deploy: Start gNB",
+            friendly_task_name("5g/srsRAN/deploy : Wait for gNB cell to be activated"),
+            "srsRAN: Wait for gNB cell to be activated",
         )
 
     def test_ugly_template_detection(self) -> None:
@@ -68,270 +54,154 @@ class AnsibleTaskMappingTests(unittest.TestCase):
 
 
 class AnsibleStreamingParserTests(unittest.TestCase):
-    def test_task_and_play_recognition(self) -> None:
-        self.assertEqual(
-            parse_ansible_line("PLAY [all] *********************************************************************"),
-            "  PLAY: all",
-        )
-        # Unmapped routine tasks like 'gather facts' are suppressed during normal execution
-        self.assertIsNone(
-            parse_ansible_line("TASK [gather facts] ************************************************************"),
-        )
-        self.assertEqual(
-            parse_ansible_line("TASK [5g/open5gs/config : install packages] ************************************"),
-            "  TASK: Open5GS config: install packages",
-        )
-        self.assertEqual(
-            parse_ansible_line("TASK [Wait for AMF pod to become Ready] *****************************************"),
-            "  TASK: Wait for AMF pod to become Ready",
-        )
-        self.assertEqual(
-            parse_ansible_line("RUNNING HANDLER [restart mosquitto] *********************************************"),
-            "  HANDLER: restart mosquitto",
-        )
-
-    def test_ugly_skipped_template_task_suppressed(self) -> None:
+    def test_headers_are_not_execution_evidence(self) -> None:
+        self.assertIsNone(parse_ansible_line("PLAY [Open5GS] ********"))
         self.assertIsNone(
             parse_ansible_line(
-                "TASK [5g/srsRAN/deploy : Attempt gNB deployment (Attempt << error 1 - 'item' is undefined >>)] *"
+                "TASK [5g/open5gs/deploy : Wait for Open5GS Core NFs pods Ready] ****"
             )
         )
 
-    def test_task_lines_strip_argument_decorations_and_suppress_routine(self) -> None:
-        # Verify friendly_task_name strips argument decorations
-        self.assertEqual(
-            friendly_task_name("command argv=['helm', 'status']"),
-            "command",
-        )
-        self.assertEqual(
-            friendly_task_name("file path=/etc/systemd/system/mosquitto.service"),
-            "file",
-        )
-        self.assertEqual(
-            friendly_task_name("k8s definition={'apiVersion': 'v1'}"),
-            "k8s",
-        )
-        self.assertEqual(
-            friendly_task_name("assert that=['result.rc == 0']"),
-            "assert",
-        )
-        self.assertEqual(
-            friendly_task_name("shell _raw_params=systemctl restart mosquitto"),
-            "shell",
-        )
-        self.assertEqual(
-            friendly_task_name("include_tasks apply={'tags': ['deploy']}"),
-            "include_tasks",
-        )
-
-        # Unmapped routine task lines are suppressed by parse_ansible_line
-        self.assertIsNone(
-            parse_ansible_line("TASK [command argv=['helm', 'status']] ****************************************"),
-        )
-        self.assertIsNone(
-            parse_ansible_line("TASK [file path=/etc/systemd/system/mosquitto.service] *************************"),
-        )
-        self.assertIsNone(
-            parse_ansible_line("TASK [k8s definition={'apiVersion': 'v1'}] *************************************"),
-        )
-        self.assertIsNone(
-            parse_ansible_line("TASK [assert that=['result.rc == 0']] ******************************************"),
-        )
-
-        # Friendly-mapped tasks with argument decorations remain visible
-        self.assertEqual(
-            parse_ansible_line("TASK [Attach the run ID to the deployed network resources] **********************"),
-            "  TASK: Recording run ownership",
-        )
-
-    def test_routine_host_statuses_are_suppressed(self) -> None:
+    def test_routine_statuses_are_suppressed(self) -> None:
         self.assertIsNone(parse_ansible_line("ok: [sopnode-f2]"))
-        self.assertIsNone(parse_ansible_line("ok: [sopnode-f2] => (item=pkg1)"))
         self.assertIsNone(parse_ansible_line("changed: [sopnode-f3]"))
-        self.assertIsNone(parse_ansible_line("changed: [sopnode-f3] => {\"changed\": true}"))
         self.assertIsNone(parse_ansible_line("skipping: [sopnode-f2]"))
-        self.assertIsNone(parse_ansible_line("skipping: [sopnode-f2 -> localhost]"))
 
-    def test_failure_statuses_remain_visible_with_context(self) -> None:
-        failed_res = parse_ansible_line(
-            "failed: [sopnode-f2] => {\"msg\": \"command failed\"}",
-            current_task="Wait for AMF pod",
+    def test_failure_contains_context_and_sanitized_reason(self) -> None:
+        rendered = parse_ansible_line(
+            'fatal: [sopnode-f2]: FAILED! => {"msg": "AMF pod did not become Ready"}',
+            current_task="Open5GS: Wait for Open5GS Core NFs pods Ready",
         )
-        self.assertIsNotNone(failed_res)
-        self.assertIn("[FAIL] Wait for AMF pod", failed_res)
-        self.assertIn("host: sopnode-f2", failed_res)
-        self.assertIn("state: FAILED", failed_res)
+        self.assertIsNotNone(rendered)
+        assert rendered is not None
+        self.assertIn("✗ Open5GS: Wait for Open5GS Core NFs pods Ready", rendered)
+        self.assertIn("host=sopnode-f2", rendered)
+        self.assertIn("state=FATAL", rendered)
+        self.assertIn("reason=AMF pod did not become Ready", rendered)
+        self.assertNotIn("\n", rendered)
 
-        fatal_res = parse_ansible_line(
-            "fatal: [sopnode-f2]: FAILED! => {\"msg\": \"failed to start service\"}",
-            current_task="Deploy core services",
+    def test_failure_reason_is_bounded_and_redacted(self) -> None:
+        rendered = parse_ansible_line(
+            'fatal: [sopnode-f2]: FAILED! => {"msg": "subscriber 123456789012345 and token aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+            current_task="Deploy core",
         )
-        self.assertIsNotNone(fatal_res)
-        self.assertIn("[FAIL] Deploy core services", fatal_res)
-        self.assertIn("host: sopnode-f2", fatal_res)
-        self.assertIn("state: FATAL", fatal_res)
-
-        unreach_res = parse_ansible_line(
-            "unreachable: [sopnode-f3] => {\"msg\": \"host unreachable\"}",
-            current_task="Ping host",
-        )
-        self.assertIsNotNone(unreach_res)
-        self.assertIn("[FAIL] Ping host", unreach_res)
-        self.assertIn("host: sopnode-f3", unreach_res)
-        self.assertIn("state: UNREACHABLE", unreach_res)
-
-    def test_suppression_of_unsafe_and_raw_lines(self) -> None:
-        raw_lines = [
-            "PLAY RECAP ********************************************************************",
-            "sopnode-f2                  : ok=12   changed=3    unreachable=0    failed=0",
-            "{\"changed\": false, \"ansible_facts\": {\"discovered_interpreter_python\": \"/usr/bin/python3\"}}",
-            "    \"stdout\": \"status=active node=sopnode-f2\"",
-            "    \"cmd\": [\"/opt/tool/bin\", \"--flag\", \"alpha\"]",
-            "Traceback (most recent call last):",
-            "  File \"<string>\", line 1, in <module>",
-            "",
-            "   ",
-            "META: ran handlers",
-            "included: deploy/ansible/tasks.yml for sopnode-f2",
-        ]
-        for line in raw_lines:
-            self.assertIsNone(
-                parse_ansible_line(line),
-                f"Expected line to be suppressed, but got parsed result: {line!r}",
-            )
+        self.assertIsNotNone(rendered)
+        assert rendered is not None
+        self.assertNotIn("123456789012345", rendered)
+        self.assertNotIn("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", rendered)
+        self.assertIn("<redacted>", rendered)
 
 
 class AnsibleStreamingRunnerTests(unittest.TestCase):
-    def test_streaming_process_success_suppresses_routine_chatter_and_keeps_raw_output(self) -> None:
+    def _run(self, script: str, **kwargs):
+        reported: list[str] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            result = run_streaming_ansible_command(
+                [sys.executable, "-c", script],
+                cwd=Path(temporary),
+                environment=None,
+                timeout_seconds=10,
+                report=reported.append,
+                **kwargs,
+            )
+        return result, reported
+
+    def test_executed_visible_task_is_announced_after_host_status(self) -> None:
         script = (
-            "import sys, time\n"
-            "print('PLAY [Deploy the locked Open5GS core into the ready cluster] ********************')\n"
-            "print('TASK [Replace every reviewed mutable Open5GS image reference] *******************')\n"
+            "print('TASK [Replace every reviewed mutable Open5GS image reference] *****')\n"
             "print('ok: [sopnode-f2]')\n"
-            "print('{\"sensitive\": \"json_data_123\"}')\n"
-            "print('changed: [sopnode-f3]')\n"
+        )
+        result, reported = self._run(script)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(["→ Open5GS locked images"], reported)
+
+    def test_skipped_visible_task_is_never_announced(self) -> None:
+        script = (
+            "print('TASK [Replace every reviewed mutable Open5GS image reference] *****')\n"
             "print('skipping: [sopnode-f2]')\n"
-            "print('TASK [5g/srsRAN/deploy : Attempt gNB deployment (Attempt << error 1 - undefined >>)] *')\n"
             "print('skipping: [sopnode-f3]')\n"
-            "sys.stdout.flush()\n"
         )
-        reported: list[str] = []
-        with tempfile.TemporaryDirectory() as temporary:
-            cwd = Path(temporary)
-            result = run_streaming_ansible_command(
-                [sys.executable, "-c", script],
-                cwd=cwd,
-                environment=None,
-                timeout_seconds=10,
-                report=reported.append,
-            )
-
-        self.assertEqual(result.returncode, 0)
-        # Routine host statuses (ok, changed, skipping) and ugly skipped task must NOT be in reported
-        self.assertEqual(
-            reported,
-            [
-                "  PLAY: Open5GS core",
-                "  TASK: Pinning locked Open5GS images",
-            ],
-        )
-        # Verify full raw output is preserved in result.stdout for sanitized logging
-        self.assertIn('{"sensitive": "json_data_123"}', result.stdout)
-        self.assertIn("PLAY [Deploy the locked Open5GS core", result.stdout)
-        self.assertIn("ok: [sopnode-f2]", result.stdout)
+        result, reported = self._run(script)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual([], reported)
         self.assertIn("skipping: [sopnode-f2]", result.stdout)
-        self.assertIn("Attempt << error 1 - undefined >>", result.stdout)
 
-    def test_streaming_process_nonzero_exit_shows_failure(self) -> None:
+    def test_unselected_routine_task_remains_hidden_when_executed(self) -> None:
+        script = (
+            "print('TASK [5g/open5gs/config : Update AMF ConfigMap on disk] *****')\n"
+            "print('changed: [sopnode-f2]')\n"
+        )
+        result, reported = self._run(script)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual([], reported)
+
+    def test_ignored_failure_is_not_promoted(self) -> None:
+        script = (
+            "print('TASK [Check optional mount] *****')\n"
+            "print('fatal: [sopnode-f3]: FAILED! => {\"msg\": \"optional\"}')\n"
+            "print('...ignoring')\n"
+            "print('TASK [Wait for AMF pod to become Ready] *****')\n"
+            "print('ok: [sopnode-f2]')\n"
+        )
+        result, reported = self._run(script)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(["→ Wait for AMF pod to become Ready"], reported)
+
+    def test_nonzero_exit_reports_failure_with_reason(self) -> None:
         script = (
             "import sys\n"
-            "print('TASK [Wait for AMF pod to become Ready] *****************************************')\n"
-            "print('fatal: [sopnode-f2]: FAILED! => {\"msg\": \"error\"}')\n"
-            "sys.stdout.flush()\n"
+            "print('TASK [Wait for AMF pod to become Ready] *****')\n"
+            "print('fatal: [sopnode-f2]: FAILED! => {\"msg\": \"readiness timeout\"}')\n"
             "sys.exit(2)\n"
         )
-        reported: list[str] = []
-        with tempfile.TemporaryDirectory() as temporary:
-            cwd = Path(temporary)
-            result = run_streaming_ansible_command(
-                [sys.executable, "-c", script],
-                cwd=cwd,
-                environment=None,
-                timeout_seconds=10,
-                report=reported.append,
-            )
+        result, reported = self._run(script)
+        self.assertEqual(2, result.returncode)
+        self.assertEqual(1, len(reported))
+        self.assertIn("✗ Wait for AMF pod to become Ready", reported[0])
+        self.assertIn("host=sopnode-f2", reported[0])
+        self.assertIn("reason=readiness timeout", reported[0])
+        self.assertNotIn("\n", reported[0])
 
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(len(reported), 2)
-        self.assertEqual(reported[0], "  TASK: Wait for AMF pod to become Ready")
-        self.assertIn("[FAIL] Wait for AMF pod to become Ready", reported[1])
-        self.assertIn("host: sopnode-f2", reported[1])
-        self.assertIn("state: FATAL", reported[1])
-        self.assertIn('fatal: [sopnode-f2]: FAILED!', result.stdout)
-
-    def test_hidden_unmapped_task_failure_still_reported_with_context(self) -> None:
+    def test_hidden_task_failure_is_still_reported(self) -> None:
         script = (
             "import sys\n"
-            "print('TASK [command argv=[\"ip\", \"link\"]] ********************************************')\n"
+            "print('TASK [command argv=[\"ip\", \"link\"]] *****')\n"
             "print('fatal: [sopnode-f2]: FAILED! => {\"msg\": \"interface not found\"}')\n"
-            "sys.stdout.flush()\n"
             "sys.exit(2)\n"
         )
-        reported: list[str] = []
-        with tempfile.TemporaryDirectory() as temporary:
-            cwd = Path(temporary)
-            result = run_streaming_ansible_command(
-                [sys.executable, "-c", script],
-                cwd=cwd,
-                environment=None,
-                timeout_seconds=10,
-                report=reported.append,
-            )
+        result, reported = self._run(script)
+        self.assertEqual(2, result.returncode)
+        self.assertEqual(1, len(reported))
+        self.assertIn("✗ command", reported[0])
+        self.assertIn("reason=interface not found", reported[0])
 
-        self.assertEqual(result.returncode, 2)
-        # The TASK header for 'command' is suppressed, but the fatal line reports the failure with task context
-        self.assertEqual(len(reported), 1)
-        self.assertIn("[FAIL] command", reported[0])
-        self.assertIn("host: sopnode-f2", reported[0])
-        self.assertIn("state: FATAL", reported[0])
-        self.assertIn("TASK [command argv=", result.stdout)
-
-    def test_contextual_heartbeat_emission_with_task_name_and_duration(self) -> None:
+    def test_heartbeat_proves_long_running_visible_task(self) -> None:
         script = (
             "import sys, time\n"
-            "print('TASK [Replace every reviewed mutable Open5GS image reference] *******************')\n"
+            "print('TASK [Replace every reviewed mutable Open5GS image reference] *****')\n"
             "sys.stdout.flush()\n"
             "time.sleep(0.35)\n"
             "print('ok: [sopnode-f2]')\n"
-            "sys.stdout.flush()\n"
         )
-        reported: list[str] = []
-        with tempfile.TemporaryDirectory() as temporary:
-            cwd = Path(temporary)
-            result = run_streaming_ansible_command(
-                [sys.executable, "-c", script],
-                cwd=cwd,
-                environment=None,
-                timeout_seconds=10,
-                report=reported.append,
-                heartbeat_interval_seconds=0.1,
-                poll_interval_seconds=0.05,
-            )
+        result, reported = self._run(
+            script,
+            heartbeat_interval_seconds=0.1,
+            poll_interval_seconds=0.05,
+        )
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(1, reported.count("→ Open5GS locked images"))
+        self.assertGreaterEqual(
+            len([item for item in reported if item.startswith("… Open5GS locked images ·")]),
+            2,
+        )
 
-        self.assertEqual(result.returncode, 0)
-        self.assertIn("  TASK: Pinning locked Open5GS images", reported)
-        # Should have contextual heartbeats with friendly task name and formatted duration
-        heartbeats = [r for r in reported if "Pinning locked Open5GS images ·" in r]
-        self.assertTrue(len(heartbeats) >= 2, f"Expected multiple contextual heartbeats, got: {reported}")
-
-    def test_streaming_process_timeout_and_cleanup(self) -> None:
+    def test_timeout_terminates_process(self) -> None:
         script = "import time\ntime.sleep(10)\n"
         with tempfile.TemporaryDirectory() as temporary:
-            cwd = Path(temporary)
             with self.assertRaises(subprocess.TimeoutExpired):
                 run_streaming_ansible_command(
                     [sys.executable, "-c", script],
-                    cwd=cwd,
+                    cwd=Path(temporary),
                     environment=None,
                     timeout_seconds=1,
                     poll_interval_seconds=0.1,

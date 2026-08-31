@@ -48,14 +48,17 @@
     regexp: '^\s*-\s*slice2\s*$'
     state: absent
 
-- name: Add the run ID before Kustomize creates resources
+- name: Add metadata-only run ownership before Kustomize creates resources
   ansible.builtin.blockinfile:
     path: "{{ item }}/kustomization.yaml"
     marker: "# {mark} SYNTHRAN RUN OWNERSHIP"
     insertafter: EOF
     block: |
-      commonLabels:
-        synthran.run/id: "{{ synthran_run_id }}"
+      labels:
+        - pairs:
+            synthran.run/id: "{{ synthran_run_id }}"
+          includeSelectors: false
+          includeTemplates: false
   loop:
     - "{{ repo_dest }}/mongodb"
     - "{{ repo_dest }}/networks5g"

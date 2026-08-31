@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from synthran.dependencies import load_lock
 from synthran.live_preflight import CommandResult
-from synthran.resource_runtime import (
+from synthran.network.resources import (
     PREPARATION_SCHEMA,
     ResourcePreparationError,
     build_preparation_inventory,
@@ -128,15 +128,15 @@ class ResourcePreparationTests(unittest.TestCase):
     def _runtime_patches(self, checkout: Path):
         return (
             patch(
-                "synthran.resource_runtime.validate_fiveg_checkout",
+                "synthran.network.resources.validate_fiveg_checkout",
                 return_value=checkout,
             ),
-            patch("synthran.resource_runtime.shutil.which", return_value="/tool"),
+            patch("synthran.network.resources.shutil.which", return_value="/tool"),
             patch(
-                "synthran.resource_runtime.verify_slices_controller",
+                "synthran.network.resources.verify_slices_controller",
                 return_value=self.controller,
             ),
-            patch("synthran.resource_runtime.apply_preparation_overlay"),
+            patch("synthran.network.resources.apply_preparation_overlay"),
         )
 
     def test_inventory_uses_locked_upstream_node_mappings(self) -> None:

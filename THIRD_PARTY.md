@@ -8,6 +8,7 @@ The immutable identifiers below mirror `dependencies.lock.yml`. The lock file is
 |---|---|---|---|---|
 | `sopnode/5g_ansible` | SLICES 5G deployment | `a0149fc0dde39e2872945a0f3c91e804ece52d4f` | External detached checkout | No top-level license found in the reviewed tree; do not copy or publish derivative source without clarification |
 | `contiki-ng/contiki-ng` | Firmware, RPL/6LoWPAN, Cooja | release 5.1 at `2b87baf3ebdde3c8e37ca791d2bc84bfd76c49a4` | External detached checkout and out-of-tree application | BSD-3-Clause unless a source file states otherwise |
+| `RA-Nayreed/Amber` | 6G Ambient IoT discrete-event source model | `08dd6bd445e607ad3accf4e9a2dff51a499ebdf9` | External detached checkout at `.deps/amber`; SynthRAN-specific adapters remain in SynthRAN | BSD-3-Clause |
 | `sopnode/open5gs-k8s` | Transitive Open5GS Kubernetes deployment | `e53601e5209425867413d45d3d01ed9a1b696de7` | Referenced through the `5g_ansible` adapter | MIT license present in the pinned tree |
 | `turletti/srsran-helm` | Transitive srsRAN Helm deployment | `8dfb9890d127734cdcd6eee9df8c5d09b1a8076a` | Referenced through the `5g_ansible` adapter | License not yet asserted; inspect before copying or modifying upstream source |
 | `eclipse-mosquitto` | Edge and central MQTT brokers | `2.1.2-alpine@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797` | Container image | EPL-2.0 OR EDL-1.0; retain image notices |
@@ -22,6 +23,11 @@ The immutable identifiers below mirror `dependencies.lock.yml`. The lock file is
 | OpenJDK | Java runtime required by Cooja | `21.0.9` | Conda package from `conda-forge` | GPL-2.0-with-classpath-exception |
 | Git | Detached dependency synchronization and repository hooks | `2.51.0` | Conda package from `conda-forge` | GPL-2.0-only |
 | Ansible Core | Golden-path controller | `2.20.5` | Conda package from `conda-forge` | GPL-3.0-or-later |
+| SimPy | Amber discrete-event runtime | `4.1.1` | Conda package from `conda-forge` | MIT |
+| NumPy | Amber numerical runtime | `2.3.2` | Conda package from `conda-forge` | BSD-3-Clause |
+| pandas | Amber trace and result processing | `2.3.2` | Conda package from `conda-forge` | BSD-3-Clause |
+| Matplotlib | Amber upstream plotting import dependency | `3.10.5` | Conda package from `conda-forge` | PSF-based license; retain package notices |
+| openpyxl | Amber energy-trace workbook reader | `3.1.5` | Conda package from `conda-forge` | MIT |
 | `kubernetes.core` | Golden-path Kubernetes and Helm modules | `6.5.0` | Ansible Galaxy collection | GPL-3.0-or-later |
 | `community.general` | Kernel module management required by locked upstream preparation | `13.0.1` | Ansible Galaxy collection | GPL-3.0-or-later; individual files may use documented compatible licenses |
 | `ansible.posix` | Mount management required by locked upstream preparation | `2.2.2` | Ansible Galaxy collection | GPL-3.0-or-later |

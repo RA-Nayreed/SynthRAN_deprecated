@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synthran.local/contracts/iot-source-event-v2alpha1.schema.json",
+  "title": "SynthRAN IoT source event v2alpha1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "source",
+    "profile",
+    "profile_digest",
+    "planned_at_ms",
+    "sensor_id",
+    "sequence",
+    "value_milli",
+    "transmitted",
+    "decoded",
+    "outcome",
+    "slot_index",
+    "details"
+  ],
+  "properties": {
+    "schema": {"const": "synthran/iot-source-event/v2alpha1"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 63},
+    "source": {"const": "amber"},
+    "profile": {"enum": ["transport-v1", "ambient-v1"]},
+    "profile_digest": {"pattern": "^[0-9a-f]{64}$"},
+    "planned_at_ms": {"type": "integer", "minimum": 0},
+    "sensor_id": {"pattern": "^sensor-(0[1-9]|10)$"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "value_milli": {"type": "integer"},
+    "transmitted": {"type": "boolean"},
+    "decoded": {"type": "boolean"},
+    "outcome": {"type": "string", "minLength": 1},
+    "slot_index": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 0}
+      ]
+    },
+    "details": {"type": "object"}
+  }
+}

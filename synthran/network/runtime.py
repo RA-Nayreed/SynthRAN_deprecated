@@ -34,7 +34,7 @@ from synthran.live_preflight import (
 )
 from synthran.slices_controller import (
     SlicesControllerError,
-    dependency_lock_sha256,
+    dependency_lock_sha256 as dependency_lock_sha256,
     fingerprint as context_fingerprint,
     verify_slices_controller,
 )

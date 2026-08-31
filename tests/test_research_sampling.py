@@ -13,7 +13,7 @@ from synthran.research import (
     load_jsonl,
     network_metrics,
 )
-from synthran.research_sampling import ResearchNetworkSampler, _active_run_owned_upf
+from synthran.research.sampling import ResearchNetworkSampler, _active_run_owned_upf
 
 
 def _ready_status() -> dict[str, object]:
@@ -34,7 +34,7 @@ class UpfOwnershipTests(unittest.TestCase):
             ]
         }
         with patch(
-            "synthran.research_sampling.base_runtime._remote",
+            "synthran.research.sampling.base_runtime._remote",
             return_value=json.dumps(payload),
         ):
             name = _active_run_owned_upf(MagicMock(), "network-accepted")
@@ -53,7 +53,7 @@ class UpfOwnershipTests(unittest.TestCase):
             ]
         }
         with patch(
-            "synthran.research_sampling.base_runtime._remote",
+            "synthran.research.sampling.base_runtime._remote",
             return_value=json.dumps(payload),
         ):
             with self.assertRaisesRegex(ResearchError, "exactly one"):
@@ -72,7 +72,7 @@ class UpfOwnershipTests(unittest.TestCase):
             ]
         }
         with patch(
-            "synthran.research_sampling.base_runtime._remote",
+            "synthran.research.sampling.base_runtime._remote",
             return_value=json.dumps(payload),
         ):
             with self.assertRaisesRegex(ResearchError, "Ready"):
@@ -122,14 +122,14 @@ class SynchronizedSamplerTests(unittest.TestCase):
             destination = Path(temporary) / "network-samples.jsonl"
             with (
                 patch(
-                    "synthran.research_sampling._active_run_owned_upf",
+                    "synthran.research.sampling._active_run_owned_upf",
                     return_value="upf-pod",
                 ),
                 patch(
-                    "synthran.research_sampling._interface_counters",
+                    "synthran.research.sampling._interface_counters",
                     side_effect=counters,
                 ),
-                patch("synthran.research_sampling._ingress_snapshot") as ingress,
+                patch("synthran.research.sampling._ingress_snapshot") as ingress,
             ):
                 ingress.return_value.accepted_connections = 10
                 ingress.return_value.upstream_bytes = 500
@@ -144,7 +144,7 @@ class SynchronizedSamplerTests(unittest.TestCase):
                 )
                 sampler._started = 1.0
                 with patch(
-                    "synthran.research_sampling.time.monotonic",
+                    "synthran.research.sampling.time.monotonic",
                     return_value=2.5,
                 ):
                     sampler._sample()
@@ -176,15 +176,15 @@ class SynchronizedSamplerTests(unittest.TestCase):
             destination = Path(temporary) / "network-samples.jsonl"
             with (
                 patch(
-                    "synthran.research_sampling._active_run_owned_upf",
+                    "synthran.research.sampling._active_run_owned_upf",
                     return_value="upf-pod",
                 ),
                 patch(
-                    "synthran.research_sampling._interface_counters",
+                    "synthran.research.sampling._interface_counters",
                     side_effect=counters,
                 ),
                 patch(
-                    "synthran.research_sampling._ingress_snapshot",
+                    "synthran.research.sampling._ingress_snapshot",
                     side_effect=ingress_sample,
                 ),
             ):
@@ -207,7 +207,7 @@ class SynchronizedSamplerTests(unittest.TestCase):
     def test_stop_rejects_materially_missed_requested_cadence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with patch(
-                "synthran.research_sampling._active_run_owned_upf",
+                "synthran.research.sampling._active_run_owned_upf",
                 return_value="upf-pod",
             ):
                 sampler = ResearchNetworkSampler(
@@ -221,7 +221,7 @@ class SynchronizedSamplerTests(unittest.TestCase):
             sampler._started = 0.0
             sampler._sample_count = 3
             with patch(
-                "synthran.research_sampling.time.monotonic",
+                "synthran.research.sampling.time.monotonic",
                 return_value=10.0,
             ):
                 with self.assertRaisesRegex(ResearchError, "cadence"):
@@ -230,7 +230,7 @@ class SynchronizedSamplerTests(unittest.TestCase):
     def test_stop_accepts_at_least_eighty_percent_cadence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with patch(
-                "synthran.research_sampling._active_run_owned_upf",
+                "synthran.research.sampling._active_run_owned_upf",
                 return_value="upf-pod",
             ):
                 sampler = ResearchNetworkSampler(
@@ -244,7 +244,7 @@ class SynchronizedSamplerTests(unittest.TestCase):
             sampler._started = 0.0
             sampler._sample_count = 8
             with patch(
-                "synthran.research_sampling.time.monotonic",
+                "synthran.research.sampling.time.monotonic",
                 return_value=10.0,
             ):
                 sampler.stop()

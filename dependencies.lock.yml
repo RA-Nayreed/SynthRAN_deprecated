@@ -1,22 +1,21 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-08-19T03:09:41Z",
+  "resolved_at_utc": "2026-08-31T11:18:00Z",
   "git": {
     "fiveg_ansible": {
-      "url": "https://github.com/sopnode/5g_ansible.git",
-      "commit": "a0149fc0dde39e2872945a0f3c91e804ece52d4f",
-      "checkout": "5g_ansible",
+      "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
+      "commit": "b207228ba02ae30cb1155d1d2e06ae235d61a37c",
+      "checkout": "5g_ansible-r2lab",
       "sync": true,
-      "role": "network deployment adapter target",
+      "role": "network deployment authority",
       "license": "NOASSERTION"
     },
-    "contiki_ng": {
-      "url": "https://github.com/contiki-ng/contiki-ng.git",
-      "commit": "2b87baf3ebdde3c8e37ca791d2bc84bfd76c49a4",
-      "source_ref": "release/v5.1",
-      "checkout": "contiki-ng",
+    "amber": {
+      "url": "https://github.com/RA-Nayreed/Amber.git",
+      "commit": "08dd6bd445e607ad3accf4e9a2dff51a499ebdf9",
+      "checkout": "amber",
       "sync": true,
-      "role": "IoT firmware and Cooja simulation base",
+      "role": "Ambient IoT discrete-event source model",
       "license": "BSD-3-Clause"
     },
     "open5gs_k8s": {
@@ -85,6 +84,22 @@
       "digest": "sha256:89ceaebc6adddb9900b3cae01316fadea8660aeff6ce60e1b335ba0a9d0ff9cd",
       "platform": "linux/amd64",
       "role": "Golden path srsRAN RFSIM gNB",
+      "license": "NOASSERTION"
+    },
+    "srsran_gnb_physical": {
+      "image": "docker.io/r2labuser/srsran-gnb-uhd-csi",
+      "tag": "v1.0.0.21",
+      "digest": "sha256:7c3bd04fca5e241e9e245c52cc5882bb47c522a55c32b5ed1b9a1ed8fc56a7f2",
+      "platform": "linux/amd64",
+      "role": "Physical R2Lab N300 srsRAN gNB",
+      "license": "NOASSERTION"
+    },
+    "srsran_gnb_physical_n320": {
+      "image": "docker.io/r2labuser/srsran-gnb-uhd",
+      "tag": "v1.0",
+      "digest": "sha256:f22e391ff19bb4d838e24962f6429a64abae0bd6abd812f4be8c10f8af8fe690",
+      "platform": "linux/amd64",
+      "role": "Physical R2Lab N320 srsRAN gNB",
       "license": "NOASSERTION"
     },
     "srsran_ue": {
@@ -195,11 +210,6 @@
         "role": "runtime",
         "license": "PSF-2.0"
       },
-      "nodejs": {
-        "version": "22.21.1",
-        "role": "Ink workbench runtime and package tooling",
-        "license": "MIT"
-      },
       "git": {
         "version": "2.51.0",
         "role": "dependency synchronization and repository hooks",
@@ -225,15 +235,30 @@
         "role": "Golden path controller and isolated wrapper execution",
         "license": "GPL-3.0-or-later"
       },
-      "openjdk": {
-        "version": "21.0.9",
-        "role": "Java runtime required by Cooja",
-        "license": "GPL-2.0-with-classpath-exception"
+      "simpy": {
+        "version": "4.1.1",
+        "role": "Amber discrete-event simulation runtime",
+        "license": "MIT"
       },
-      "prompt-toolkit": {
-        "version": "3.0.52",
-        "role": "interactive terminal input, completion, and history",
+      "numpy": {
+        "version": "2.3.2",
+        "role": "Amber numerical runtime",
         "license": "BSD-3-Clause"
+      },
+      "pandas": {
+        "version": "2.3.2",
+        "role": "Amber trace and result processing",
+        "license": "BSD-3-Clause"
+      },
+      "matplotlib": {
+        "version": "3.10.5",
+        "role": "Amber optional plotting dependency required by upstream imports",
+        "license": "PSF-2.0"
+      },
+      "openpyxl": {
+        "version": "3.1.5",
+        "role": "Amber energy-trace workbook reader",
+        "license": "MIT"
       }
     },
     "lock_status": "direct-versions-only"

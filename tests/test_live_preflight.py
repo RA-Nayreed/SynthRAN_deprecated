@@ -16,6 +16,8 @@ from synthran.live_preflight import (
     golden_path_image_references,
     run_live_preflight,
     save_live_evidence,
+    verify_allocations,
+    verify_reservation,
 )
 from synthran.slices_controller import (
     SlicesControllerReport,
@@ -250,6 +252,27 @@ class LivePreflightTests(unittest.TestCase):
                 for call in fake.calls
             ),
         )
+
+    def test_current_owner_authority_can_be_resolved_without_identifiers(self) -> None:
+        runner = FakeRunner()
+        reservation_id = verify_reservation(
+            runner=runner,
+            reservation_id=None,
+            owner="operator",
+            nodes={"lab-core", "lab-ran"},
+            now=NOW,
+            timeout_seconds=30,
+        )
+        allocation_id = verify_allocations(
+            runner=runner,
+            allocation_id=None,
+            owner="operator",
+            nodes={"lab-core", "lab-ran"},
+            timeout_seconds=30,
+        )
+
+        self.assertEqual(RESERVATION_ID, reservation_id)
+        self.assertEqual("alloc-test", allocation_id)
 
     def test_evidence_uses_fingerprints_not_provider_identifiers(self) -> None:
         _fake, report = self.run_ready()
