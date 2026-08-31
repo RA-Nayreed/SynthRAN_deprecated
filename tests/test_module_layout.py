@@ -27,6 +27,8 @@ class ModuleLayoutTests(unittest.TestCase):
             "backends/__init__.py",
             "backends/base.py",
             "backends/run.py",
+            "backends/unified_run.py",
+            "run_events.py",
             "experiment/__init__.py",
             "experiment/resources.py",
             "experiment/runtime.py",
