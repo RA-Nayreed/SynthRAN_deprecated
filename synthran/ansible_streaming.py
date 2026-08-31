@@ -48,10 +48,7 @@ FRIENDLY_MAPPINGS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"^Replace every reviewed mutable srsRAN image reference$", re.I),
         "srsRAN locked images",
     ),
-    (
-        re.compile(r"^Check job status$", re.I),
-        "node bootstrap",
-    ),
+    (re.compile(r"^Check job status$", re.I), "node bootstrap"),
     (
         re.compile(r"^setup/ovs\s*:\s*Ensure OVS is installed$", re.I),
         "node networking setup",
@@ -100,8 +97,6 @@ _GENERIC_HEARTBEAT_TASKS = {
 
 
 def format_duration(seconds: float) -> str:
-    """Format elapsed seconds as human-readable string."""
-
     total = int(max(0, seconds))
     mins = total // 60
     secs = total % 60
@@ -118,13 +113,11 @@ def _clean_ansible_title(raw_name: str) -> str:
     if match:
         cleaned = name[: match.start()].strip().rstrip(":")
         if cleaned:
-            return cleaned.strip()
+            return cleaned
     return name
 
 
 def friendly_task_name(name: str) -> str:
-    """Map raw upstream names to concise operator-facing labels."""
-
     cleaned = _clean_ansible_title(name)
     for pattern, replacement in FRIENDLY_MAPPINGS:
         if pattern.search(cleaned):
@@ -133,8 +126,6 @@ def friendly_task_name(name: str) -> str:
 
 
 def is_ugly_template_task(name: str) -> bool:
-    """Detect upstream template-noise names that should never reach operators."""
-
     lower = name.lower()
     return "<<" in name and ">>" in name and ("error" in lower or "undefined" in lower)
 
@@ -165,10 +156,9 @@ def _sanitize_reason(value: str) -> str:
 
 
 def _failure_reason(line: str) -> str | None:
-    marker = "=>"
-    if marker not in line:
+    if "=>" not in line:
         return None
-    raw = line.split(marker, 1)[1].strip()
+    raw = line.split("=>", 1)[1].strip()
     if not raw.startswith("{"):
         return None
     try:
@@ -185,46 +175,40 @@ def _failure_reason(line: str) -> str | None:
 
 
 def parse_ansible_line(line: str, current_task: str | None = None) -> str | None:
-    """Translate one completed Ansible status line into a SynthRAN event.
+    """Translate completed Ansible status into one atomic SynthRAN event.
 
-    PLAY and TASK headers are intentionally not rendered here. A task header
-    alone does not prove execution because Ansible may immediately mark that
-    task skipped. The streaming runner promotes a visible task only after a
-    non-skipped host status or a live heartbeat proves it is actually running.
+    A TASK header alone is not execution evidence: the task may immediately be
+    skipped. The streaming runner announces a visible task only after a
+    non-skipped status or a heartbeat proves that it is actually running.
     """
 
     stripped = line.strip()
     if not stripped:
         return None
-
     if PLAY_RE.match(stripped) or TASK_RE.match(stripped):
         return None
 
     match = HANDLER_RE.match(stripped)
     if match:
-        raw_name = _clean_ansible_title(match.group(1))
-        return f"→ {friendly_task_name(raw_name)}"
+        return f"→ {friendly_task_name(_clean_ansible_title(match.group(1)))}"
 
     match = HOST_STATUS_RE.match(stripped)
     if match:
         raw_status = match.group(1).lower()
+        if raw_status in {"ok", "changed", "skipping"}:
+            return None
         host = match.group(2).strip()
         status = STATUS_MAP.get(raw_status, raw_status.upper())
-        if status in ("OK", "CHANGED", "SKIPPED"):
-            return None
         task = current_task or "Ansible task"
-        lines = [f"✗ {task}", f"  host: {host}", f"  state: {status}"]
+        event = f"✗ {task} · host={host} · state={status}"
         reason = _failure_reason(stripped)
         if reason:
-            lines.append(f"  reason: {reason}")
-        return "\n".join(lines)
-
+            event += f" · reason={reason}"
+        return event
     return None
 
 
 def _kill_process_tree(process: subprocess.Popen) -> None:
-    """Terminate and reap child process upon timeout or cancellation."""
-
     try:
         process.terminate()
         try:
@@ -252,7 +236,7 @@ def run_streaming_ansible_command(
     heartbeat_interval_seconds: float = 30.0,
     poll_interval_seconds: float = 0.5,
 ) -> CommandResult:
-    """Stream truthful, sparse progress while preserving complete raw output."""
+    """Stream truthful sparse progress while retaining complete raw output."""
 
     process = subprocess.Popen(
         list(command),
@@ -263,10 +247,9 @@ def run_streaming_ansible_command(
         text=True,
         bufsize=1,
     )
-
     output_queue: queue.Queue[str | None] = queue.Queue()
 
-    def _reader() -> None:
+    def reader() -> None:
         try:
             if process.stdout:
                 for line in process.stdout:
@@ -279,7 +262,7 @@ def run_streaming_ansible_command(
                 except OSError:
                     pass
 
-    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread = threading.Thread(target=reader, daemon=True)
     reader_thread.start()
 
     output_lines: list[str] = []
@@ -330,7 +313,6 @@ def run_streaming_ansible_command(
                 if process.poll() is not None and not reader_thread.is_alive():
                     break
                 continue
-
             if line is None:
                 break
 
@@ -375,8 +357,6 @@ def run_streaming_ansible_command(
                     announce_current()
                     continue
                 if status == "skipping":
-                    # A TASK header followed only by skipping statuses was never
-                    # executed. Do not promote it to the operator stream.
                     continue
                 if status in {"failed", "fatal", "unreachable"}:
                     parsed = parse_ansible_line(line, current_task=current_task)
