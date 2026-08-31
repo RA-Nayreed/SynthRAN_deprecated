@@ -54,6 +54,16 @@ class ModuleLayoutTests(unittest.TestCase):
         for relative in required:
             self.assertTrue((SOURCE / relative).is_file(), relative)
 
+    def test_retired_architecture_packages_do_not_return(self) -> None:
+        for relative in ("app", "control", "operations", "resources"):
+            self.assertFalse((SOURCE / relative).exists(), relative)
+
+        workspace = SOURCE / "workspace"
+        self.assertEqual(
+            {"__init__.py", "model.py", "store.py"},
+            {path.name for path in workspace.iterdir() if path.is_file()},
+        )
+
     def test_flat_duplicate_modules_do_not_return(self) -> None:
         removed = {
             "entrypoint.py",
