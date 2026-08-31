@@ -19,7 +19,7 @@ from typing import Callable, Mapping, Protocol, Sequence
 from synthran.live_preflight import CommandResult, subprocess_runner
 from synthran.r2lab.acceptance import PhysicalAcceptanceStage, PhysicalRunEvidence
 from synthran.r2lab.hardware import PhysicalTopology
-from synthran.r2lab.n2 import build_amf_n2_evidence
+from synthran.r2lab.n2 import N2State, build_amf_n2_evidence, parse_n2_log_state
 from synthran.r2lab.radio import (
     CellAcquisitionState,
     Ipv4State,
@@ -29,7 +29,6 @@ from synthran.r2lab.radio import (
     execute_user_plane_probe,
 )
 from synthran.r2lab.resources import load_topology, ue_gateway_command, verify_physical_authority
-from synthran.r2lab.runtime import N2State, parse_n2_log_state
 from synthran.utils.ssh import strict_ssh_command
 
 
