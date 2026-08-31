@@ -5,6 +5,7 @@ on:
     paths:
       - "synthran/adapters/**"
       - "synthran/fiveg_ansible.py"
+      - "synthran/network/runtime.py"
       - "tests/test_fiveg_adapter.py"
       - "tests/test_fiveg_ansible.py"
       - ".github/workflows/purge-fiveg-boundary.yml"
@@ -14,6 +15,7 @@ on:
     paths:
       - "synthran/adapters/**"
       - "synthran/fiveg_ansible.py"
+      - "synthran/network/runtime.py"
       - "tests/test_fiveg_adapter.py"
       - "tests/test_fiveg_ansible.py"
       - ".github/workflows/purge-fiveg-boundary.yml"
@@ -33,7 +35,8 @@ jobs:
         run: |
           python -m py_compile \
             synthran/adapters/fiveg.py \
-            synthran/fiveg_ansible.py
+            synthran/fiveg_ansible.py \
+            synthran/network/runtime.py
       - name: Run adapter boundary tests
         run: |
           python -m unittest -v \
@@ -43,3 +46,7 @@ jobs:
         run: |
           ! grep -R -n -E 'SUPPORTED_(CORE|RAN|RADIO)' synthran/adapters synthran/fiveg_ansible.py
           ! grep -R -n 'apply_network_overlay' synthran/adapters synthran/fiveg_ansible.py
+      - name: Prove network executor delegates upstream
+        run: |
+          grep -q 'FiveGAdapter' synthran/network/runtime.py
+          ! grep -n -E 'ansible-playbook|worktree add|apply_network_overlay|copytree' synthran/network/runtime.py
