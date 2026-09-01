@@ -1,4 +1,4 @@
-"""Portable IoT transport through the selected physical R2Lab UE."""
+"""Portable IoT transport through the selected upstream-provisioned R2Lab UE."""
 
 from __future__ import annotations
 
@@ -171,8 +171,8 @@ class R2LabIoTTransportSession:
             self._cleanup_errors.append("remote physical UE forward still listens")
 
         try:
-            profile = _validate_ue(self.ue)
-            if _ue_relay_process_count(self.slice_name, profile, self.run_id) != 0:
+            endpoint = _validate_ue(self.inventory, self.ue)
+            if _ue_relay_process_count(endpoint, self.run_id) != 0:
                 self._cleanup_errors.append("physical UE relay processes remain after cleanup")
         except Exception as exc:
             self._cleanup_errors.append(f"physical UE relay postcondition: {exc}")
@@ -234,10 +234,10 @@ class R2LabIoTTransportAdapter:
         run_directory: Path,
     ) -> R2LabIoTTransportSession:
         validate_run_id(run_id)
-        profile = _validate_ue(self.ue)
+        endpoint = _validate_ue(self.inventory, self.ue)
         central_address = _core_address(self.inventory)
-        _prove_ue_route(self.slice_name, profile, central_address)
-        if _ue_relay_process_count(self.slice_name, profile, run_id) != 0:
+        _prove_ue_route(endpoint, central_address)
+        if _ue_relay_process_count(endpoint, run_id) != 0:
             raise R2LabIoTTransportError(
                 "an existing physical UE relay already owns this workload ID"
             )
@@ -278,7 +278,7 @@ class R2LabIoTTransportAdapter:
             raise
 
         relay_command = build_physical_ue_stdio_relay_command(
-            slice_name=self.slice_name,
+            inventory=self.inventory,
             ue=self.ue,
             run_id=run_id,
             central_address=central_address,
