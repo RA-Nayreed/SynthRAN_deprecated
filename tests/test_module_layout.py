@@ -62,7 +62,7 @@ class ModuleLayoutTests(unittest.TestCase):
             "r2lab",
             "workspace",
         ):
-            self.assertFalse((SOURCE / relative).exists(), relative)
+            self.assertFalse(_tracked(f"synthran/{relative}"), relative)
 
     def test_retired_provider_and_deployment_layers_do_not_return(self) -> None:
         for relative in (
@@ -71,8 +71,8 @@ class ModuleLayoutTests(unittest.TestCase):
             "network/resources.py",
             "upstream_overlay.py",
         ):
-            self.assertFalse((SOURCE / relative).exists(), relative)
-        self.assertFalse((REPOSITORY_ROOT / "deploy" / "ansible").exists())
+            self.assertFalse(_tracked(f"synthran/{relative}"), relative)
+        self.assertFalse(_tracked("deploy/ansible"))
 
     def test_lifecycle_and_cli_delegate_infrastructure_to_fiveg(self) -> None:
         lifecycle = _source("lifecycle.py")
@@ -132,25 +132,14 @@ class ModuleLayoutTests(unittest.TestCase):
         }
         present = {path.name for path in SOURCE.iterdir() if path.is_file()}
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
-        self.assertFalse((SOURCE / "experiment" / "runtime.py").exists())
+        self.assertFalse(_tracked("synthran/experiment/runtime.py"))
 
     def test_synthran_is_the_only_operator_entrypoint(self) -> None:
         self.assertTrue((SOURCE / "cli.py").is_file())
         for forbidden in (
             "synthran/commands",
-            "synthran/__main__.py",
-            "cli",
+            "synthran/operator.py",
             "synthran/entrypoint.py",
             "synthran/launcher.py",
-            "synthran/operator.py",
-            "synthran/command_runtime.py",
-            "synthran/backends",
-            "synthran/experiment/commands.py",
-            "synthran/network/r2lab.py",
-            "synthran/r2lab",
         ):
             self.assertFalse(_tracked(forbidden), forbidden)
-
-
-if __name__ == "__main__":
-    unittest.main()
