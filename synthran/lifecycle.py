@@ -1,8 +1,8 @@
 """Canonical SynthRAN experiment orchestration.
 
-5g-Ansible owns reservation, preparation, 5G deployment, physical resources,
-and teardown.  SynthRAN submits one upstream deployment request, observes its
-result, runs Amber, and persists experiment evidence.
+5g-Ansible owns provider context, reservation, preparation, 5G deployment,
+physical resources, and teardown. SynthRAN submits one upstream deployment
+request, observes its result, runs Amber, and persists experiment evidence.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from synthran.experiment.physical import execute_physical_amber_experiment
 from synthran.fiveg_ansible import NetworkInventory, load_inventory
 from synthran.network.runtime import save_network_evidence, validate_run_id, verify_network_path
 from synthran.privacy import repository_root
-from synthran.provider import ensure_slices_provider_context
 from synthran.run_events import RunProgress
 from synthran.utils.environment import scoped_environment
 
@@ -48,8 +47,9 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         "run",
         help="execute one complete SynthRAN experiment",
         description=(
-            "Ask 5g-Ansible for a deployment, run Amber over the resulting path, "
-            "persist scientific evidence, and optionally tear the deployment down."
+            "Ask 5g-Ansible for provider context and a deployment, run Amber over "
+            "the resulting path, persist scientific evidence, and optionally tear "
+            "the deployment down."
         ),
     )
     run.add_argument("--radio", required=True, choices=("rfsim", "r2lab"))
@@ -59,9 +59,16 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
     run.add_argument("--core-node", required=True)
     run.add_argument("--ran-node", required=True)
     run.add_argument("--fiveg-profile", default="default")
-    run.add_argument("--owner", default=os.environ.get("SYNTHRAN_OWNER"))
-    run.add_argument("--slices-project", default=os.environ.get("SYNTHRAN_SLICES_PROJECT"))
-    run.add_argument("--slices-experiment", default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"))
+    run.add_argument(
+        "--slices-project",
+        default=os.environ.get("SYNTHRAN_SLICES_PROJECT"),
+        help="SLICES project delegated to 5g-Ansible",
+    )
+    run.add_argument(
+        "--slices-experiment",
+        default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"),
+        help="SLICES experiment delegated to 5g-Ansible (defaults to run ID)",
+    )
     run.add_argument("--slices-duration", default="4h")
     run.add_argument("--duration-minutes", type=int, default=120)
     run.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
@@ -72,14 +79,13 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
     run.add_argument("--json", action="store_true")
     run.add_argument("--quiet", action="store_true")
 
-    # Physical selections are passed through to the upstream deployment spec.
     run.add_argument("--device", help="physical RU selection for 5g-Ansible")
     run.add_argument("--ue", help="physical UE selection for 5g-Ansible")
     run.add_argument(
         "--slice",
         dest="r2lab_slice",
         default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-        help="R2Lab account used by 5g-Ansible",
+        help="R2Lab account delegated to 5g-Ansible",
     )
     run.add_argument(
         "--known-hosts",
@@ -92,8 +98,6 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="retain the upstream deployment after experiment acceptance",
     )
-
-    # Controlled experiments reuse these persisted roots.
     run.add_argument(
         "--network-run-root",
         type=Path,
@@ -153,6 +157,22 @@ def _ue_selection(ue: str | None) -> dict[str, list[str]]:
     return {"qhats": [], "qfits": [], "phones": [ue]}
 
 
+def _provider_request(args: argparse.Namespace) -> dict[str, object]:
+    project = getattr(args, "slices_project", None)
+    if not project:
+        raise SynthRANError(
+            "run requires --slices-project or SYNTHRAN_SLICES_PROJECT"
+        )
+    experiment = getattr(args, "slices_experiment", None) or str(args.run_id)
+    duration = str(getattr(args, "slices_duration", "4h"))
+    return {
+        "manage": True,
+        "project": str(project),
+        "experiment": experiment,
+        "experiment_duration": duration,
+    }
+
+
 def _deployment_spec(args: argparse.Namespace, *, known_hosts: Path) -> dict[str, Any]:
     physical = args.radio == "r2lab"
     if physical and (not args.device or not args.ue or not args.r2lab_slice):
@@ -162,6 +182,7 @@ def _deployment_spec(args: argparse.Namespace, *, known_hosts: Path) -> dict[str
     return {
         "schema": FIVEG_SPEC_SCHEMA,
         "id": args.run_id,
+        "provider": _provider_request(args),
         "core": {"type": args.core, "node": args.core_node},
         "ran": {"type": args.ran, "node": args.ran_node},
         "platform": {
@@ -197,15 +218,38 @@ def _locked_fiveg_commit(lock: Any) -> str:
     return dependency.commit
 
 
+def _provider_from_manifest(
+    manifest: Mapping[str, Any], *, args: argparse.Namespace
+) -> dict[str, object]:
+    value = manifest.get("provider")
+    if not isinstance(value, Mapping):
+        raise SynthRANError("5g-Ansible manifest is missing provider evidence")
+    expected = _provider_request(args)
+    if value.get("type") != "slices":
+        raise SynthRANError("5g-Ansible provider type is unsupported")
+    if value.get("project") != expected["project"]:
+        raise SynthRANError("5g-Ansible provider project does not match the request")
+    if value.get("experiment") != expected["experiment"]:
+        raise SynthRANError("5g-Ansible provider experiment does not match the request")
+    network = value.get("network")
+    if not isinstance(network, Mapping):
+        raise SynthRANError("5g-Ansible manifest is missing Post5G network evidence")
+    for key in ("subnet", "lb", "expiration_time"):
+        if not isinstance(network.get(key), str) or not str(network[key]).strip():
+            raise SynthRANError(f"5g-Ansible provider network is missing {key}")
+    return dict(value)
+
+
 def _validate_manifest(
-    manifest: Mapping[str, Any], *, run_id: str, locked_commit: str
+    manifest: Mapping[str, Any], *, args: argparse.Namespace, locked_commit: str
 ) -> None:
     if manifest.get("schema") != "fiveg/deployment-manifest/v1":
         raise SynthRANError("5g-Ansible deployment manifest schema is unsupported")
-    if manifest.get("id") != run_id or manifest.get("state") != "ready":
+    if manifest.get("id") != args.run_id or manifest.get("state") != "ready":
         raise SynthRANError("5g-Ansible deployment is not ready")
     if manifest.get("fiveg_ansible_commit") != locked_commit:
         raise SynthRANError("5g-Ansible deployment provenance does not match the lock")
+    _provider_from_manifest(manifest, args=args)
 
 
 def _status_ready(adapter: FiveGAdapter, run_id: str) -> Mapping[str, Any]:
@@ -250,15 +294,30 @@ def _deploy(
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SynthRANError("5g-Ansible deployment manifest is unreadable") from exc
     else:
-        _component(progress, "network", "5G deployment", "5g-Ansible plan/up", event="started")
+        _component(
+            progress,
+            "network",
+            "5G deployment",
+            "5g-Ansible provider/plan/up",
+            event="started",
+        )
         adapter.plan(spec_path)
-        manifest = adapter.up(spec_path, resume=(directory / "state.json").is_file())
-        _component(progress, "network", "5G deployment", "upstream deployment ready", event="completed")
+        manifest = adapter.up(
+            spec_path,
+            resume=(directory / "state.json").is_file(),
+        )
+        _component(
+            progress,
+            "network",
+            "5G deployment",
+            "upstream deployment ready",
+            event="completed",
+        )
     if not isinstance(manifest, dict):
         raise SynthRANError("5g-Ansible deployment manifest is malformed")
     _validate_manifest(
         manifest,
-        run_id=args.run_id,
+        args=args,
         locked_commit=_locked_fiveg_commit(lock),
     )
     return adapter, manifest, load_inventory(directory / "hosts.ini"), manifest_path
@@ -272,17 +331,6 @@ def _read_json(path: Path) -> Mapping[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-def _provider_payload(args: argparse.Namespace) -> dict[str, object]:
-    project, experiment, created, controller = ensure_slices_provider_context(args)
-    assert controller.post5g_network is not None
-    return {
-        "project": project,
-        "experiment": experiment,
-        "experiment_created": created,
-        "network": controller.post5g_network.to_dict(),
-    }
-
-
 def _accepted_experiment(path: Path) -> bool:
     payload = _read_json(path)
     return payload is not None and payload.get("ready") is True
@@ -292,14 +340,16 @@ def _run_rfsim(
     args: argparse.Namespace,
     *,
     progress: RunProgress,
-    provider: Mapping[str, object],
     known_hosts: Path,
 ) -> dict[str, object]:
-    progress.start("network", "5g-Ansible deployment and path observation")
+    progress.start("network", "5g-Ansible provider/deployment and path observation")
     adapter, manifest, inventory, manifest_path = _deploy(
-        args, known_hosts=known_hosts, progress=progress
+        args,
+        known_hosts=known_hosts,
+        progress=progress,
     )
     del adapter
+    provider = _provider_from_manifest(manifest, args=args)
     lock = load_lock(args.lock)
     network_directory = args.network_run_root.expanduser().resolve() / args.run_id
     network_evidence = network_directory / "network-evidence.json"
@@ -353,7 +403,7 @@ def _run_rfsim(
         "run_id": args.run_id,
         "radio": "rfsim",
         "deployment": dict(manifest),
-        "provider": dict(provider),
+        "provider": provider,
         "accepted": True,
         "released": False,
         "evidence_path": str(evidence),
@@ -365,13 +415,15 @@ def _run_physical(
     args: argparse.Namespace,
     *,
     progress: RunProgress,
-    provider: Mapping[str, object],
     known_hosts: Path,
 ) -> dict[str, object]:
-    progress.start("network", "5g-Ansible physical deployment and current status gate")
+    progress.start("network", "5g-Ansible provider/physical deployment and status gate")
     adapter, manifest, inventory, _manifest_path = _deploy(
-        args, known_hosts=known_hosts, progress=progress
+        args,
+        known_hosts=known_hosts,
+        progress=progress,
     )
+    provider = _provider_from_manifest(manifest, args=args)
     _status_ready(adapter, args.run_id)
     progress.done("network", "READY")
 
@@ -421,7 +473,7 @@ def _run_physical(
         "device": args.device,
         "ue": args.ue,
         "deployment": dict(manifest),
-        "provider": dict(provider),
+        "provider": provider,
         "accepted": True,
         "released": release_payload is not None,
         "release": dict(release_payload) if release_payload is not None else None,
@@ -431,30 +483,23 @@ def _run_physical(
 
 
 def execute_run(args: argparse.Namespace) -> dict[str, object]:
-    """Execute one experiment while leaving all 5G ownership to 5g-Ansible."""
+    """Execute one experiment while leaving infrastructure ownership to 5g-Ansible."""
 
     if args.command != "run":
         raise SynthRANError("unsupported lifecycle command")
     progress = RunProgress(enabled=not args.quiet, run_id=args.run_id, radio=args.radio)
     try:
         validate_run_id(args.run_id)
-        if not args.owner:
-            raise SynthRANError("run requires --owner or SYNTHRAN_OWNER")
         known_hosts = _known_hosts(args)
-        progress.start("provider", "verify SLICES experiment context")
-        provider = _provider_payload(args)
-        progress.done("provider", f"{provider['project']}/{provider['experiment']}")
         if args.radio == "r2lab":
             return _run_physical(
                 args,
                 progress=progress,
-                provider=provider,
                 known_hosts=known_hosts,
             )
         return _run_rfsim(
             args,
             progress=progress,
-            provider=provider,
             known_hosts=known_hosts,
         )
     except (FiveGAdapterError, SynthRANError) as exc:
