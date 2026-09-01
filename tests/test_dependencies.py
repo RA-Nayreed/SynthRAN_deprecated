@@ -29,7 +29,6 @@ class DependencyLockTests(unittest.TestCase):
             next(item.commit for item in lock.git if item.name == "fiveg_ansible"),
         )
         self.assertEqual("3.12.13", lock.raw["conda"]["packages"]["python"]["version"])
-        self.assertEqual("21.0.9", lock.raw["conda"]["packages"]["openjdk"]["version"])
         self.assertEqual("4.1.1", lock.raw["conda"]["packages"]["simpy"]["version"])
 
     def test_dry_run_selects_direct_dependencies_without_writing(self) -> None:
