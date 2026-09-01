@@ -37,13 +37,13 @@ SynthRAN does not run `slices project use`, create SLICES experiments, acquire P
 
 Unless `--slices-experiment` is supplied, the provider experiment defaults to the SynthRAN run ID. `--slices-duration` controls the requested provider-experiment duration for first creation.
 
-Prepare strict host-key state for experiment observation and physical access:
+SynthRAN-owned SSH observation always uses strict host-key checking. A custom reviewed trust store is optional:
 
 ```zsh
 export SYNTHRAN_SLICES_KNOWN_HOSTS='/absolute/path/to/sopnodes_known_hosts'
 ```
 
-Do not disable strict host-key checking to make a run pass.
+If no custom file is supplied, normal OpenSSH user/system known-hosts files are used. Do not disable strict host-key checking to make a run pass. Physical runs may pass `--known-hosts` when a separate reviewed trust store is required.
 
 ## 3. Full validation order on Duckburg
 
@@ -77,8 +77,7 @@ synthran doctor \
   --radio rfsim \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
-  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
 Only after those checks pass should live RFSIM acceptance be attempted. Physical R2Lab acceptance comes after RFSIM acceptance.
@@ -94,8 +93,7 @@ synthran doctor \
   --radio rfsim \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
-  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
 Physical R2Lab:
@@ -124,7 +122,7 @@ That output is the pinned 5g-Ansible capability response; SynthRAN has no hardwa
 
 ## 5. Virtual RFSIM run
 
-Use a fresh run ID for acceptance. Do not reuse a failed run ID with different intent.
+Use a fresh run ID for acceptance. Do not reuse a failed deployment state across changed intent or changed upstream provenance.
 
 ```zsh
 export RUN_ID="rfsim-acceptance-$(date +%Y%m%d-%H%M%S)"
@@ -134,8 +132,7 @@ synthran run \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
   --run-id "$RUN_ID" \
-  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
 The control flow is:
@@ -149,6 +146,8 @@ native deployment request
 → Amber workload
 → experiment evidence
 ```
+
+A provider experiment may be intentionally reused independently of the SynthRAN deployment ID by supplying `--slices-experiment`. Provider network assignments are still discovered dynamically by 5g-Ansible; they are not copied into SynthRAN configuration.
 
 SynthRAN does not patch the upstream UE Deployment or restart/reconcile gNB/UE state. The accepted RFSIM deployment remains available for controlled measurements until `synthran release` is called.
 
@@ -208,24 +207,31 @@ find ".synthran/runs/$RUN_ID" -maxdepth 2 -type f -print | sort
 
 ## 7. Live progress
 
-`synthran run` emits one normalized operator stream and persists canonical events to:
+`synthran run` persists canonical experiment events to:
 
 ```text
 .synthran/events/<run-id>.jsonl
 ```
 
-Typical output is:
+Deployment progress is not inferred from Ansible text. SynthRAN requests the upstream `fiveg/event/v1` channel and relays those already-semantic records into the same operator stream. Typical output is:
 
 ```text
-[synthran] → network
-[synthran]   ✓ 5g-Ansible provider/deployment ready
-[synthran] → workload
-[synthran]   ✓ Amber transport accepted
-[synthran] → acceptance
-[synthran] → cleanup
+[synthran] → network: 5g-Ansible deployment and experiment path observation
+[synthran]   → SLICES provider
+[synthran]   ✓ SLICES provider
+[synthran]   → SLICES reservation
+[synthran]   ✓ SLICES reservation
+[synthran]   → deployment dependencies
+[synthran]   ✓ deployment dependencies
+[synthran]   → 5G deployment
+[synthran]   ✓ 5G deployment
+[synthran] ✓ network: READY
+[synthran] → workload: deterministic Amber experiment
+[synthran] ✓ workload: accepted
+[synthran] → acceptance: verify experiment evidence
 ```
 
-Upstream deployment logs remain in the 5g-Ansible state directory. SynthRAN does not re-stream or reinterpret Ansible tasks as a second deployment engine.
+5g-Ansible keeps stdout for its final machine result and writes detailed Ansible/provider evidence to its own run logs. SynthRAN never parses or re-streams raw `PLAY`, `TASK`, handler, host-change, or module-result output. `--quiet` suppresses terminal rendering while preserving evidence.
 
 ## 8. Inspect and release
 
@@ -312,19 +318,20 @@ Preserve complete raw run or campaign bundles outside normal Git history, includ
 
 - upstream deployment manifest and generated inventory;
 - provider identity/network evidence from the upstream manifest;
+- structured `fiveg/event/v1` deployment progress;
+- upstream deployment forensic logs when relevant;
 - SynthRAN network and experiment evidence;
 - telemetry and sequence records;
 - measurement windows and probes;
 - network-counter samples and load records;
 - dependency identities and artifact hashes;
-- canonical structured run events;
-- upstream and experiment forensic logs when relevant.
+- canonical structured SynthRAN run events.
 
 JSONL is the audit source. Parquet is a deterministic analysis derivative.
 
 ## Failure rules
 
-- never reuse a run ID for different intent or topology;
+- never reuse a run ID for different intent, topology, or upstream provenance;
 - preserve partial evidence after failure;
 - diagnose the smallest failing boundary first;
 - do not repair infrastructure from experiment code;
