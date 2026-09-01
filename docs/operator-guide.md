@@ -17,6 +17,8 @@ For repository validation:
 ```zsh
 python -m unittest discover -s tests -v
 synthran dev privacy scan --worktree
+git diff --check
+git status --short
 ```
 
 There is one installed executable. Do not operate infrastructure by calling historical backend helpers or deleted internal command groups.
@@ -43,7 +45,45 @@ export SYNTHRAN_SLICES_KNOWN_HOSTS='/absolute/path/to/sopnodes_known_hosts'
 
 Do not disable strict host-key checking to make a run pass.
 
-## 3. Doctor
+## 3. Full validation order on Duckburg
+
+Before mutating live resources, prove the checked-out PR and direct dependencies:
+
+```zsh
+cd ~/SynthRAN
+git switch purge/thin-fiveg-adapter
+git pull --ff-only origin purge/thin-fiveg-adapter
+git status --short
+git rev-parse HEAD
+
+conda activate synthran
+python -m pip install --no-deps -e .
+synthran deps sync
+synthran --help
+
+python -m unittest discover -s tests -v
+synthran dev privacy scan --worktree
+git diff --check
+git status --short
+```
+
+Then validate the provider session and upstream machine request without deployment:
+
+```zsh
+slices auth login
+slices project list
+
+synthran doctor \
+  --radio rfsim \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+```
+
+Only after those checks pass should live RFSIM acceptance be attempted. Physical R2Lab acceptance comes after RFSIM acceptance.
+
+## 4. Doctor
 
 `doctor` is a structural upstream check. It calls 5g-Ansible `capabilities` and `plan`; it does not select provider state, reserve resources, deploy, or connect a UE.
 
@@ -82,10 +122,12 @@ synthran inspect --radio r2lab
 
 That output is the pinned 5g-Ansible capability response; SynthRAN has no hardware catalogue of its own.
 
-## 4. Virtual RFSIM run
+## 5. Virtual RFSIM run
+
+Use a fresh run ID for acceptance. Do not reuse a failed run ID with different intent.
 
 ```zsh
-export RUN_ID='virtual-001'
+export RUN_ID="rfsim-acceptance-$(date +%Y%m%d-%H%M%S)"
 
 synthran run \
   --radio rfsim \
@@ -110,12 +152,36 @@ native deployment request
 
 SynthRAN does not patch the upstream UE Deployment or restart/reconcile gNB/UE state. The accepted RFSIM deployment remains available for controlled measurements until `synthran release` is called.
 
-## 5. Physical R2Lab run
-
-A physical run delegates the RU, UE, R2Lab identity, provider intent, reservation policy, and deployment to 5g-Ansible.
+Immediately inspect the accepted deployment and preserve its run directory:
 
 ```zsh
-export RUN_ID='physical-001'
+synthran inspect --run-id "$RUN_ID"
+find ".synthran/runs/$RUN_ID" -maxdepth 2 -type f -print | sort
+```
+
+When the retained RFSIM deployment is no longer needed:
+
+```zsh
+synthran release --run-id "$RUN_ID"
+```
+
+## 6. Physical R2Lab run
+
+A physical run delegates the RU, UE, R2Lab identity, provider intent, reservation policy, and deployment to 5g-Ansible. Confirm an appropriate R2Lab lease/reservation window before starting.
+
+```zsh
+export SYNTHRAN_R2LAB_SLICE='YOUR_R2LAB_SLICE'
+export RUN_ID="r2lab-acceptance-$(date +%Y%m%d-%H%M%S)"
+
+synthran doctor \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 
 synthran run \
   --radio r2lab \
@@ -133,7 +199,14 @@ After the upstream deployment is ready, SynthRAN resolves the selected UE from t
 
 Unless `--keep-resources` is supplied, an accepted physical run ends by calling 5g-Ansible `down` for the exact deployment ID.
 
-## 6. Live progress
+Inspect and preserve the run evidence after completion:
+
+```zsh
+synthran inspect --run-id "$RUN_ID"
+find ".synthran/runs/$RUN_ID" -maxdepth 2 -type f -print | sort
+```
+
+## 7. Live progress
 
 `synthran run` emits one normalized operator stream and persists canonical events to:
 
@@ -154,7 +227,7 @@ Typical output is:
 
 Upstream deployment logs remain in the 5g-Ansible state directory. SynthRAN does not re-stream or reinterpret Ansible tasks as a second deployment engine.
 
-## 7. Inspect and release
+## 8. Inspect and release
 
 ```zsh
 synthran inspect --run-id "$RUN_ID"
@@ -165,7 +238,7 @@ synthran release --run-id "$RUN_ID"
 
 Historical evidence is not current mutation authority. Live deployment mutation always belongs to 5g-Ansible.
 
-## 8. Controlled measurements
+## 9. Controlled measurements
 
 Controlled measurements operate on an accepted RFSIM deployment and its generated inventory:
 
@@ -208,7 +281,7 @@ synthran run \
 
 Controlled measurements may create bounded experiment-owned routes, probes, MQTT resources, or load instrumentation. They must remove what they create and never repair the 5G deployment.
 
-## 9. Campaigns and analysis
+## 10. Campaigns and analysis
 
 ```zsh
 synthran run \
@@ -233,7 +306,7 @@ synthran analyze \
 
 Physical Amber support does not imply physical controlled-load campaign acceptance. Do not claim that parity without reviewed implementation and accepted evidence.
 
-## 10. Preserve evidence
+## 11. Preserve evidence
 
 Preserve complete raw run or campaign bundles outside normal Git history, including:
 
