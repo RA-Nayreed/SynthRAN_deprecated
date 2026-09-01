@@ -53,21 +53,15 @@ def subprocess_runner(command: Sequence[str], timeout_seconds: int) -> CommandRe
 def ssh_command(host: InventoryHost, *remote_command: str) -> tuple[str, ...]:
     """Build one strict SSH command from upstream inventory facts.
 
-    Host-key policy is never relaxed here. The trusted known-hosts file remains
-    an explicit controller input and remote argv is shell-quoted exactly once.
+    Host-key checking is always enabled. ``SYNTHRAN_KNOWN_HOSTS`` is an optional
+    trust-store override; when it is absent, OpenSSH uses its normal user/system
+    known-hosts files. Remote argv is shell-quoted exactly once.
     """
 
     address = host.variables.get("ansible_host", host.name)
     user = host.variables.get("ansible_user")
     if not user:
         raise LivePreflightError("inventory host is missing ansible_user")
-
-    known_hosts_value = os.environ.get("SYNTHRAN_KNOWN_HOSTS")
-    if not known_hosts_value:
-        raise LivePreflightError("SYNTHRAN_KNOWN_HOSTS is required for strict SSH")
-    known_hosts = Path(known_hosts_value).expanduser().resolve()
-    if not known_hosts.is_file():
-        raise LivePreflightError("SYNTHRAN_KNOWN_HOSTS does not name an existing file")
 
     command: list[str] = [
         "ssh",
@@ -77,9 +71,14 @@ def ssh_command(host: InventoryHost, *remote_command: str) -> tuple[str, ...]:
         "ConnectTimeout=10",
         "-o",
         "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts}",
     ]
+    known_hosts_value = os.environ.get("SYNTHRAN_KNOWN_HOSTS")
+    if known_hosts_value:
+        known_hosts = Path(known_hosts_value).expanduser().resolve()
+        if not known_hosts.is_file():
+            raise LivePreflightError("SYNTHRAN_KNOWN_HOSTS does not name an existing file")
+        command.extend(("-o", f"UserKnownHostsFile={known_hosts}"))
+
     port = host.variables.get("ansible_port")
     if port:
         if not port.isdigit() or not 1 <= int(port) <= 65535:
