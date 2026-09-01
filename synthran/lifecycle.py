@@ -1,8 +1,8 @@
-"""Canonical SynthRAN run orchestration.
+"""Canonical SynthRAN experiment orchestration.
 
-5g-Ansible owns the network lifecycle. SynthRAN submits one declarative
-``fiveg/deployment/v1`` request, observes the resulting deployment, runs the
-AMBER experiment, and records experiment acceptance.
+5g-Ansible owns reservation, preparation, 5G deployment, physical resources,
+and teardown.  SynthRAN submits one upstream deployment request, observes its
+result, runs Amber, and persists experiment evidence.
 """
 
 from __future__ import annotations
@@ -18,16 +18,17 @@ from synthran.amber_experiment_runtime import execute_amber_experiment
 from synthran.dependencies import load_lock
 from synthran.errors import SynthRANError
 from synthran.experiment.live import DEFAULT_COLLECTION_SECONDS, DEFAULT_MINIMUM_PER_SENSOR
+from synthran.experiment.physical import execute_physical_amber_experiment
 from synthran.fiveg_ansible import NetworkInventory, load_inventory
 from synthran.network.runtime import save_network_evidence, validate_run_id, verify_network_path
 from synthran.privacy import repository_root
 from synthran.provider import ensure_slices_provider_context
-from synthran.r2lab.iot_lifecycle import run_physical_iot_workload
 from synthran.run_events import RunProgress
 from synthran.utils.environment import scoped_environment
 
 
 DEFAULT_NETWORK_ROOT = Path(".synthran/runs")
+DEFAULT_EXPERIMENT_ROOT = Path(".synthran/experiments")
 
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
@@ -37,21 +38,8 @@ def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     raise SynthRANError("SynthRAN parser does not expose top-level commands")
 
 
-def _add_slices_context(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--slices-project",
-        default=os.environ.get("SYNTHRAN_SLICES_PROJECT"),
-        help="SLICES project (or SYNTHRAN_SLICES_PROJECT)",
-    )
-    parser.add_argument(
-        "--slices-experiment",
-        default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"),
-        help="provider experiment override; defaults to the run ID",
-    )
-
-
 def configure_run_parser(parser: argparse.ArgumentParser) -> None:
-    """Install the one full-run command without duplicating upstream capabilities."""
+    """Install the single full-run command without duplicating upstream capabilities."""
 
     root = _subparsers(parser)
     if "run" in root.choices:
@@ -60,8 +48,8 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         "run",
         help="execute one complete SynthRAN experiment",
         description=(
-            "Submit a 5g-Ansible deployment request, observe the resulting path, "
-            "run AMBER, persist experiment evidence, and clean up when requested."
+            "Ask 5g-Ansible for a deployment, run Amber over the resulting path, "
+            "persist scientific evidence, and optionally tear the deployment down."
         ),
     )
     run.add_argument("--radio", required=True, choices=("rfsim", "r2lab"))
@@ -72,7 +60,8 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
     run.add_argument("--ran-node", required=True)
     run.add_argument("--fiveg-profile", default="default")
     run.add_argument("--owner", default=os.environ.get("SYNTHRAN_OWNER"))
-    _add_slices_context(run)
+    run.add_argument("--slices-project", default=os.environ.get("SYNTHRAN_SLICES_PROJECT"))
+    run.add_argument("--slices-experiment", default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"))
     run.add_argument("--slices-duration", default="4h")
     run.add_argument("--duration-minutes", type=int, default=120)
     run.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
@@ -83,37 +72,28 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
     run.add_argument("--json", action="store_true")
     run.add_argument("--quiet", action="store_true")
 
-    run.add_argument("--device", help="5g-Ansible physical RU selection")
-    run.add_argument("--ue", help="5g-Ansible physical UE selection")
+    # Physical selections are passed through to the upstream deployment spec.
+    run.add_argument("--device", help="physical RU selection for 5g-Ansible")
+    run.add_argument("--ue", help="physical UE selection for 5g-Ansible")
     run.add_argument(
         "--slice",
         dest="r2lab_slice",
         default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-        help="R2Lab username/slice",
+        help="R2Lab account used by 5g-Ansible",
     )
     run.add_argument(
         "--known-hosts",
         type=Path,
         default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
-        help="strict SSH known-hosts file used by upstream and experiment probes",
+        help="strict SSH known-hosts file",
     )
     run.add_argument(
         "--keep-resources",
         action="store_true",
-        help="leave the upstream physical deployment active after acceptance",
+        help="retain the upstream deployment after experiment acceptance",
     )
-    run.add_argument("--allocation-id", help=argparse.SUPPRESS)
-    run.add_argument("--previous-run-id", help=argparse.SUPPRESS)
-    run.add_argument("--n2-attempts", type=int, default=12, help=argparse.SUPPRESS)
-    run.add_argument("--n2-convergence-attempts", type=int, default=12, help=argparse.SUPPRESS)
-    run.add_argument("--n2-interval", type=float, default=5.0, help=argparse.SUPPRESS)
-    run.add_argument("--r2lab-run-root", type=Path, default=Path(".synthran/r2lab"), help=argparse.SUPPRESS)
-    run.add_argument(
-        "--r2lab-experiment-root",
-        type=Path,
-        default=Path(".synthran/experiments-r2lab"),
-        help=argparse.SUPPRESS,
-    )
+
+    # Controlled experiments reuse these persisted roots.
     run.add_argument(
         "--network-run-root",
         type=Path,
@@ -121,15 +101,9 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         help=argparse.SUPPRESS,
     )
     run.add_argument(
-        "--preparation-root",
-        type=Path,
-        default=Path(".synthran/preparations"),
-        help=argparse.SUPPRESS,
-    )
-    run.add_argument(
         "--experiment-root",
         type=Path,
-        default=Path(".synthran/experiments"),
+        default=DEFAULT_EXPERIMENT_ROOT,
         help=argparse.SUPPRESS,
     )
 
@@ -158,16 +132,10 @@ def _component(
     )
 
 
-def _require_owner(args: argparse.Namespace) -> str:
-    if not args.owner:
-        raise SynthRANError("run requires --owner or SYNTHRAN_OWNER")
-    return str(args.owner)
-
-
 def _known_hosts(args: argparse.Namespace) -> Path:
     if args.known_hosts is None:
         raise SynthRANError(
-            "run requires --known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS for strict experiment probes"
+            "run requires --known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS"
         )
     path = Path(args.known_hosts).expanduser().resolve()
     if not path.is_file():
@@ -186,18 +154,11 @@ def _ue_selection(ue: str | None) -> dict[str, list[str]]:
 
 
 def _deployment_spec(args: argparse.Namespace, *, known_hosts: Path) -> dict[str, Any]:
-    if args.core_node == args.ran_node:
-        raise SynthRANError("core and RAN nodes must differ")
     physical = args.radio == "r2lab"
-    if physical and not args.device:
-        raise SynthRANError("--radio r2lab requires --device")
-    if physical and not args.ue:
-        raise SynthRANError("--radio r2lab requires --ue")
-    if physical and not args.r2lab_slice:
-        raise SynthRANError("--radio r2lab requires --slice or SYNTHRAN_R2LAB_SLICE")
+    if physical and (not args.device or not args.ue or not args.r2lab_slice):
+        raise SynthRANError("physical run requires --device, --ue, and --slice")
     if not 10 <= args.duration_minutes <= 1440:
         raise SynthRANError("reservation duration must be between 10 and 1440 minutes")
-
     return {
         "schema": FIVEG_SPEC_SCHEMA,
         "id": args.run_id,
@@ -229,7 +190,7 @@ def _deployment_spec(args: argparse.Namespace, *, known_hosts: Path) -> dict[str
     }
 
 
-def _locked_fiveg_commit(lock) -> str:
+def _locked_fiveg_commit(lock: Any) -> str:
     dependency = next((item for item in lock.git if item.name == "fiveg_ansible"), None)
     if dependency is None:
         raise SynthRANError("dependency lock does not define fiveg_ansible")
@@ -237,15 +198,12 @@ def _locked_fiveg_commit(lock) -> str:
 
 
 def _validate_manifest(
-    manifest: Mapping[str, Any],
-    *,
-    run_id: str,
-    locked_commit: str,
+    manifest: Mapping[str, Any], *, run_id: str, locked_commit: str
 ) -> None:
     if manifest.get("schema") != "fiveg/deployment-manifest/v1":
         raise SynthRANError("5g-Ansible deployment manifest schema is unsupported")
     if manifest.get("id") != run_id or manifest.get("state") != "ready":
-        raise SynthRANError("5g-Ansible deployment is not ready for the requested run")
+        raise SynthRANError("5g-Ansible deployment is not ready")
     if manifest.get("fiveg_ansible_commit") != locked_commit:
         raise SynthRANError("5g-Ansible deployment provenance does not match the lock")
 
@@ -276,11 +234,16 @@ def _deploy(
         state_root=state_root,
         timeout_seconds=args.timeout,
     )
-    deployment_directory = state_root / args.run_id
-    manifest_path = deployment_directory / "manifest.json"
-
+    directory = state_root / args.run_id
+    manifest_path = directory / "manifest.json"
     if manifest_path.is_file():
-        _component(progress, "network", "5G deployment", "upstream deployment retained", event="resumed")
+        _component(
+            progress,
+            "network",
+            "5G deployment",
+            "upstream deployment retained",
+            event="resumed",
+        )
         _status_ready(adapter, args.run_id)
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -289,9 +252,8 @@ def _deploy(
     else:
         _component(progress, "network", "5G deployment", "5g-Ansible plan/up", event="started")
         adapter.plan(spec_path)
-        manifest = adapter.up(spec_path, resume=(deployment_directory / "state.json").is_file())
+        manifest = adapter.up(spec_path, resume=(directory / "state.json").is_file())
         _component(progress, "network", "5G deployment", "upstream deployment ready", event="completed")
-
     if not isinstance(manifest, dict):
         raise SynthRANError("5g-Ansible deployment manifest is malformed")
     _validate_manifest(
@@ -299,8 +261,7 @@ def _deploy(
         run_id=args.run_id,
         locked_commit=_locked_fiveg_commit(lock),
     )
-    inventory = load_inventory(deployment_directory / "hosts.ini")
-    return adapter, manifest, inventory, manifest_path
+    return adapter, manifest, load_inventory(directory / "hosts.ini"), manifest_path
 
 
 def _read_json(path: Path) -> Mapping[str, object] | None:
@@ -311,43 +272,20 @@ def _read_json(path: Path) -> Mapping[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-def _amber_details(experiment_directory: Path) -> tuple[str, ...]:
-    wrapper = _read_json(experiment_directory / "experiment-evidence.json")
-    if wrapper is None:
-        return ()
-    iot_name = wrapper.get("iot_evidence")
-    if not isinstance(iot_name, str) or not iot_name:
-        return ()
-    iot = _read_json(experiment_directory / iot_name)
-    if iot is None:
-        return ()
-    live = iot.get("live_transport")
-    reconciliation = live.get("reconciliation") if isinstance(live, dict) else None
-    if not isinstance(reconciliation, dict):
-        return ()
-    fields = ("published_count", "central_received_count", "transport_loss_count", "duplicate_count")
-    values = [reconciliation.get(name) for name in fields]
-    if not all(isinstance(value, int) and not isinstance(value, bool) for value in values):
-        return ("PDU-bound TCP transport gate passed",)
-    published, received, loss, duplicates = values
-    return (
-        "PDU-bound TCP transport gate passed",
-        f"transport · published={published} · received={received} · loss={loss} · duplicates={duplicates}",
-    )
-
-
-def _provider_payload(args: argparse.Namespace) -> tuple[dict[str, object], object]:
+def _provider_payload(args: argparse.Namespace) -> dict[str, object]:
     project, experiment, created, controller = ensure_slices_provider_context(args)
     assert controller.post5g_network is not None
-    return (
-        {
-            "project": project,
-            "experiment": experiment,
-            "experiment_created": created,
-            "network": controller.post5g_network.to_dict(),
-        },
-        controller,
-    )
+    return {
+        "project": project,
+        "experiment": experiment,
+        "experiment_created": created,
+        "network": controller.post5g_network.to_dict(),
+    }
+
+
+def _accepted_experiment(path: Path) -> bool:
+    payload = _read_json(path)
+    return payload is not None and payload.get("ready") is True
 
 
 def _run_rfsim(
@@ -357,16 +295,14 @@ def _run_rfsim(
     provider: Mapping[str, object],
     known_hosts: Path,
 ) -> dict[str, object]:
-    progress.start("network", "5g-Ansible deployment and experiment-side path proof")
+    progress.start("network", "5g-Ansible deployment and path observation")
     adapter, manifest, inventory, manifest_path = _deploy(
-        args,
-        known_hosts=known_hosts,
-        progress=progress,
+        args, known_hosts=known_hosts, progress=progress
     )
     del adapter
     lock = load_lock(args.lock)
     network_directory = args.network_run_root.expanduser().resolve() / args.run_id
-    evidence_path = network_directory / "network-evidence.json"
+    network_evidence = network_directory / "network-evidence.json"
     with scoped_environment({"SYNTHRAN_KNOWN_HOSTS": str(known_hosts)}):
         verification = verify_network_path(
             inventory=inventory,
@@ -374,22 +310,22 @@ def _run_rfsim(
             run_id=args.run_id,
             timeout_seconds=min(args.timeout, 300),
         )
-    save_network_evidence(verification, evidence_path, manifest_path)
+    save_network_evidence(verification, network_evidence, manifest_path)
     if not verification.ready:
         raise SynthRANError("RFSIM experiment path was not proven")
     progress.done("network", "READY")
 
     experiment_directory = args.experiment_root.expanduser().resolve() / args.run_id
-    experiment_evidence = experiment_directory / "experiment-evidence.json"
-    progress.start("workload", "deterministic AMBER source and PDU-bound transport")
-    if not experiment_evidence.is_file():
+    evidence = experiment_directory / "experiment-evidence.json"
+    progress.start("workload", "deterministic Amber experiment")
+    if not evidence.is_file():
         with scoped_environment({"SYNTHRAN_KNOWN_HOSTS": str(known_hosts)}):
             result = execute_amber_experiment(
                 inventory=inventory,
                 lock=lock,
                 dependency_root=args.deps_root,
                 network_manifest=manifest_path,
-                network_evidence=evidence_path,
+                network_evidence=network_evidence,
                 run_id=args.run_id,
                 repository_root=repository_root(),
                 run_root=args.experiment_root,
@@ -403,18 +339,14 @@ def _run_rfsim(
                 progress=progress.child_stream,
             )
         if not result.ready:
-            raise SynthRANError("RFSIM AMBER workload was not accepted")
+            raise SynthRANError("RFSIM Amber experiment was not accepted")
         progress.done("workload", "accepted")
     else:
         progress.resumed("workload", "accepted experiment evidence retained")
-    for detail in _amber_details(experiment_directory):
-        progress.stream.emit(f"  ✓ {detail}", stage="workload", event="detail")
-
-    accepted = _read_json(experiment_evidence)
-    if accepted is None or accepted.get("ready") is not True:
+    if not _accepted_experiment(evidence):
         raise SynthRANError("RFSIM experiment evidence is not accepted")
     progress.start("acceptance", "verify experiment evidence")
-    progress.done("acceptance", str(experiment_evidence))
+    progress.done("acceptance", str(evidence))
     progress.skipped("cleanup", "virtual deployment retained for controlled measurements")
     return {
         "schema": "synthran/run/v2",
@@ -424,12 +356,12 @@ def _run_rfsim(
         "provider": dict(provider),
         "accepted": True,
         "released": False,
-        "evidence_path": str(experiment_evidence),
+        "evidence_path": str(evidence),
         "event_path": str(progress.event_path),
     }
 
 
-def _run_r2lab(
+def _run_physical(
     args: argparse.Namespace,
     *,
     progress: RunProgress,
@@ -438,40 +370,41 @@ def _run_r2lab(
 ) -> dict[str, object]:
     progress.start("network", "5g-Ansible physical deployment and current status gate")
     adapter, manifest, inventory, _manifest_path = _deploy(
-        args,
-        known_hosts=known_hosts,
-        progress=progress,
+        args, known_hosts=known_hosts, progress=progress
     )
     _status_ready(adapter, args.run_id)
     progress.done("network", "READY")
 
-    progress.start("workload", "deterministic AMBER source through the selected physical UE")
-    workload = run_physical_iot_workload(
-        run_id=args.run_id,
-        workload_id=args.run_id,
-        slice_name=str(args.r2lab_slice),
-        ue=str(args.ue),
-        known_hosts=known_hosts,
-        inventory=inventory,
-        lock_path=args.lock,
-        deps_root=args.deps_root,
-        experiment_root=args.r2lab_experiment_root,
-        collection_seconds=args.collection_seconds,
-        minimum_per_sensor=args.minimum_per_sensor,
-        iot_profile=args.iot_profile,
-        iot_seed=args.iot_seed,
-        sensor_period_seconds=args.sensor_period,
-        progress=progress.child_stream,
-    )
-    if not workload.accepted or not workload.cleanup_proven:
-        raise SynthRANError("physical AMBER workload was not accepted")
+    experiment_directory = args.experiment_root.expanduser().resolve() / args.run_id
+    evidence = experiment_directory / "experiment-evidence.json"
+    progress.start("workload", "deterministic Amber experiment through physical UE")
+    if not evidence.is_file():
+        result = execute_physical_amber_experiment(
+            inventory=inventory,
+            lock=load_lock(args.lock),
+            dependency_root=args.deps_root,
+            run_id=args.run_id,
+            ue=str(args.ue),
+            repository_root=repository_root(),
+            run_root=args.experiment_root,
+            collection_seconds=args.collection_seconds,
+            minimum_per_sensor=args.minimum_per_sensor,
+            iot_profile=args.iot_profile,
+            iot_seed=args.iot_seed,
+            sensor_period_seconds=args.sensor_period,
+            progress=progress.child_stream,
+        )
+        if not result.ready:
+            raise SynthRANError("physical Amber experiment was not accepted")
+        progress.done("workload", "accepted")
+    else:
+        progress.resumed("workload", "accepted experiment evidence retained")
+    if not _accepted_experiment(evidence):
+        raise SynthRANError("physical experiment evidence is not accepted")
     _status_ready(adapter, args.run_id)
-    progress.done("workload", "accepted")
+    progress.start("acceptance", "verify experiment evidence")
+    progress.done("acceptance", str(evidence))
 
-    progress.start("acceptance", "verify upstream deployment and physical workload evidence")
-    progress.done("acceptance", str(workload.workload_result_path))
-
-    released = False
     release_payload: Mapping[str, Any] | None = None
     if args.keep_resources:
         progress.skipped("cleanup", "upstream deployment retained by --keep-resources")
@@ -479,10 +412,8 @@ def _run_r2lab(
         progress.start("cleanup", "5g-Ansible down")
         release_payload = adapter.down(args.run_id)
         if release_payload.get("state") != "stopped":
-            raise SynthRANError("5g-Ansible physical cleanup did not reach stopped state")
-        released = True
+            raise SynthRANError("5g-Ansible cleanup did not reach stopped state")
         progress.done("cleanup", "upstream deployment stopped")
-
     return {
         "schema": "synthran/run/v2",
         "run_id": args.run_id,
@@ -491,50 +422,46 @@ def _run_r2lab(
         "ue": args.ue,
         "deployment": dict(manifest),
         "provider": dict(provider),
-        "workload": workload.to_dict(),
         "accepted": True,
-        "released": released,
+        "released": release_payload is not None,
         "release": dict(release_payload) if release_payload is not None else None,
-        "evidence_path": str(workload.workload_result_path),
+        "evidence_path": str(evidence),
         "event_path": str(progress.event_path),
     }
 
 
 def execute_run(args: argparse.Namespace) -> dict[str, object]:
-    """Execute one experiment while leaving network ownership to 5g-Ansible."""
+    """Execute one experiment while leaving all 5G ownership to 5g-Ansible."""
 
     if args.command != "run":
         raise SynthRANError("unsupported lifecycle command")
     progress = RunProgress(enabled=not args.quiet, run_id=args.run_id, radio=args.radio)
     try:
         validate_run_id(args.run_id)
-        _require_owner(args)
+        if not args.owner:
+            raise SynthRANError("run requires --owner or SYNTHRAN_OWNER")
         known_hosts = _known_hosts(args)
         progress.start("provider", "verify SLICES experiment context")
-        provider, _controller = _provider_payload(args)
+        provider = _provider_payload(args)
         progress.done("provider", f"{provider['project']}/{provider['experiment']}")
-        return (
-            _run_r2lab(args, progress=progress, provider=provider, known_hosts=known_hosts)
-            if args.radio == "r2lab"
-            else _run_rfsim(args, progress=progress, provider=provider, known_hosts=known_hosts)
+        if args.radio == "r2lab":
+            return _run_physical(
+                args,
+                progress=progress,
+                provider=provider,
+                known_hosts=known_hosts,
+            )
+        return _run_rfsim(
+            args,
+            progress=progress,
+            provider=provider,
+            known_hosts=known_hosts,
         )
     except (FiveGAdapterError, SynthRANError) as exc:
-        stage = progress.current_stage or "run"
-        terminal_enabled = progress.stream.terminal_enabled
-        progress.stream.terminal_enabled = False
-        try:
-            progress.fail(str(exc))
-        finally:
-            progress.stream.terminal_enabled = terminal_enabled
-        raise SynthRANError(str(exc) if stage == "run" else f"{stage}: {exc}") from exc
+        progress.fail(str(exc))
+        raise SynthRANError(str(exc)) from exc
     except Exception as exc:
-        stage = progress.current_stage or "run"
-        terminal_enabled = progress.stream.terminal_enabled
-        progress.stream.terminal_enabled = False
-        try:
-            progress.fail(str(exc))
-        finally:
-            progress.stream.terminal_enabled = terminal_enabled
-        raise SynthRANError(str(exc) if stage == "run" else f"{stage}: {exc}") from exc
+        progress.fail(str(exc))
+        raise SynthRANError(str(exc)) from exc
     finally:
         progress.close()
