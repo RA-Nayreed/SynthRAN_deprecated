@@ -211,7 +211,7 @@ class ResearchPathTests(unittest.TestCase):
         ready = SimpleNamespace(ready=True, pdu_address="12.1.0.2", checks=())
         with (
             patch("synthran.research.path.verify_network_path", return_value=ready),
-            patch("synthran.research.path.experiment_live._discover_ue_pod", return_value="ue-pod"),
+            patch("synthran.research.path.discover_rfsim_ue_pod", return_value="ue-pod"),
         ):
             report = require_network_ready(
                 inventory=object(),
@@ -226,7 +226,7 @@ class ResearchPathTests(unittest.TestCase):
         ready = SimpleNamespace(ready=True, pdu_address="12.1.0.3", checks=())
         with (
             patch("synthran.research.path.verify_network_path", return_value=ready),
-            patch("synthran.research.path.experiment_live._discover_ue_pod", return_value="ue-pod"),
+            patch("synthran.research.path.discover_rfsim_ue_pod", return_value="ue-pod"),
             self.assertRaisesRegex(ResearchError, "PDU changed"),
         ):
             require_network_ready(
