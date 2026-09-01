@@ -9,9 +9,9 @@
 
 </div>
 
-SynthRAN is an experiment orchestrator, not a 5G deployment framework. It submits a declarative deployment request to the pinned `5g-Ansible` machine API, consumes the resulting manifest and generated inventory, observes the live experiment path, runs deterministic Amber workloads and controlled measurements, and persists scientific evidence.
+SynthRAN is an experiment orchestrator, not a 5G deployment framework. It submits a native `fiveg/deployment/v1` request to the pinned `5g-Ansible` machine API, consumes the resulting manifest and generated inventory, observes the experiment path, runs deterministic Amber workloads and controlled measurements, and persists scientific evidence.
 
-`5g-Ansible` owns reservation, POS preparation, Kubernetes, core, RAN, RU, physical UE setup, deployment state, and teardown. SynthRAN does not keep a second topology support matrix or a second infrastructure controller.
+`5g-Ansible` owns SLICES provider context, reservation, POS, Kubernetes, core, RAN, RU, physical UE setup, deployment state, and teardown. SynthRAN does not keep a second provider controller, topology support matrix, or infrastructure lifecycle.
 
 ## Architecture
 
@@ -23,6 +23,7 @@ SynthRAN orchestration
 FiveGAdapter
         ↓
 5g-Ansible
+  SLICES provider context
   reservation / POS / Kubernetes
   core / RAN / RU / UE / teardown
         ↓
@@ -40,9 +41,9 @@ RFSIM and R2Lab are upstream platform selections. There is no separate `synthran
 ## One command surface
 
 ```text
-run        deploy through 5g-Ansible and execute an experiment, or run a controlled campaign
- doctor    validate a deployment request through 5g-Ansible
-calibrate  measure reference capacity on an already accepted RFSIM path
+run        request an upstream deployment and execute an experiment
+ doctor    validate a native deployment request through 5g-Ansible plan
+calibrate  measure reference capacity on an accepted RFSIM path
 inspect    show upstream capabilities or persisted run state
 analyze    analyze a completed campaign
 release    stop one deployment through 5g-Ansible
@@ -62,17 +63,16 @@ synthran deps sync
 synthran --help
 ```
 
-The provider CLI must already be authenticated. Configure the provider context and strict SSH host-key state:
+Authenticate the provider tools required by the pinned 5g-Ansible checkout and prepare strict SSH host-key state. SynthRAN passes provider intent upstream; it does not select or create SLICES experiments itself.
 
 ```zsh
 export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
-export SYNTHRAN_OWNER='YOUR_SLICES_USERNAME'
 export SYNTHRAN_SLICES_KNOWN_HOSTS="$PWD/.synthran/known_hosts"
 ```
 
 ## Virtual run
 
-A virtual run asks 5g-Ansible to create the requested RFSIM deployment. SynthRAN then consumes `.synthran/runs/<run-id>/manifest.json` and `hosts.ini`, proves the current Amber-over-PDU path, runs Amber, and saves experiment evidence.
+A virtual run asks 5g-Ansible to own the SLICES project/experiment context and create the requested RFSIM deployment. SynthRAN then consumes `.synthran/runs/<run-id>/manifest.json` and `hosts.ini`, proves the current PDU path, runs Amber, and saves experiment evidence.
 
 ```zsh
 export RUN_ID='virtual-001'
@@ -81,6 +81,7 @@ synthran doctor \
   --radio rfsim \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 
 synthran run \
@@ -88,16 +89,15 @@ synthran run \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
   --run-id "$RUN_ID" \
-  --owner "$SYNTHRAN_OWNER" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-The RFSIM deployment is retained after acceptance so controlled measurements can reuse the same upstream deployment. Use `synthran release --run-id "$RUN_ID"` when it should be stopped.
+Unless `--slices-experiment` is supplied, the upstream provider experiment name defaults to the run ID. The RFSIM deployment is retained after acceptance so controlled measurements can reuse the same upstream deployment. Use `synthran release --run-id "$RUN_ID"` when it should be stopped.
 
 ## Controlled run on an accepted RFSIM path
 
-Controlled measurements reuse the upstream deployment and its generated inventory. They may create and remove experiment-local routes, probes, MQTT resources, and bounded load instrumentation, but they do not redeploy or repair the 5G network.
+Controlled measurements reuse the upstream deployment and generated inventory. They may create and remove experiment-local routes, probes, MQTT resources, and bounded load instrumentation, but they do not redeploy or repair the 5G network.
 
 ```zsh
 synthran run \
@@ -133,7 +133,7 @@ synthran run \
   --reference-capacity-bps REFERENCE_CAPACITY
 ```
 
-The persisted campaign schedule is immutable. Analysis consumes the completed run summaries; it does not execute infrastructure operations.
+The persisted campaign schedule is immutable. Analysis consumes completed run summaries and does not execute infrastructure operations.
 
 ## Capacity calibration
 
@@ -145,7 +145,7 @@ synthran calibrate \
   --out .synthran/capacity/virtual-001.json
 ```
 
-Calibration verifies the current accepted path, starts bounded measurement instrumentation, and removes only the route/server state created for that measurement.
+Calibration verifies the accepted path, starts bounded measurement instrumentation, and removes only the route/server state created for that measurement.
 
 ## Analyze
 
@@ -157,7 +157,7 @@ synthran analyze \
 
 ## Physical R2Lab run
 
-For a physical run, the R2Lab lease must already satisfy the selected 5g-Ansible policy. SynthRAN passes the requested RU, UE, R2Lab identity, and strict SSH facts upstream. 5g-Ansible performs the physical deployment and UE setup; SynthRAN then runs the Amber experiment through the selected UE using facts from the generated inventory.
+For a physical run, the R2Lab lease must satisfy the selected upstream policy. SynthRAN passes provider intent, requested RU/UE, R2Lab identity, and strict SSH facts to 5g-Ansible. 5g-Ansible performs provider setup, reservation/POS work, physical deployment, and UE setup; SynthRAN then runs Amber through the selected UE using generated-inventory facts.
 
 ```zsh
 export SYNTHRAN_R2LAB_SLICE='YOUR_R2LAB_SLICE'
@@ -170,6 +170,7 @@ synthran doctor \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
   --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 
 synthran run \
@@ -180,12 +181,11 @@ synthran run \
   --ran-node sopnode-f3 \
   --run-id "$RUN_ID" \
   --slice "$SYNTHRAN_R2LAB_SLICE" \
-  --owner "$SYNTHRAN_OWNER" \
   --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-Unless `--keep-resources` is supplied, a successful physical experiment ends with `5g-Ansible down` for that deployment ID. SynthRAN does not implement radio power-off, UE activation, gNB staging, N2 convergence, or provider cleanup itself.
+Unless `--keep-resources` is supplied, a successful physical experiment ends with `5g-Ansible down` for that deployment ID. SynthRAN does not implement provider selection, reservation, radio power control, UE activation, gNB staging, or N2 convergence.
 
 ## Live progress and logs
 
@@ -198,16 +198,15 @@ Unless `--keep-resources` is supplied, a successful physical experiment ends wit
 Typical stages are:
 
 ```text
-[synthran] → provider
 [synthran] → network
-[synthran]   ✓ 5g-Ansible deployment ready
+[synthran]   ✓ 5g-Ansible provider/deployment ready
 [synthran] → workload
 [synthran]   ✓ Amber transport accepted
 [synthran] → acceptance
 [synthran] → cleanup
 ```
 
-Detailed upstream and experiment artifacts remain under their run directories. `--quiet` suppresses terminal rendering while preserving evidence.
+Detailed upstream deployment artifacts and experiment artifacts remain under their run directories. `--quiet` suppresses terminal rendering while preserving evidence.
 
 ## Inspect and release
 
@@ -238,6 +237,6 @@ For `ambient-v1`, Amber models the Ambient-IoT source side, including energy sta
 
 ## Capability boundary
 
-5g-Ansible defines which cores, RANs, platforms, radios, and UEs it can deploy. SynthRAN does not duplicate that support matrix.
+5g-Ansible defines provider, core, RAN, platform, radio/RU, UE, reservation, and deployment capabilities. SynthRAN does not duplicate those capability tables.
 
 SynthRAN defines experiment acceptance requirements. The current RFSIM Amber experiment requires a proven `tun_srsue1` PDU path. The current physical Amber experiment requires the selected upstream UE to expose the expected user-plane route. Those are experiment requirements, not claims about what 5g-Ansible can deploy.
