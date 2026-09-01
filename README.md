@@ -11,7 +11,7 @@
 
 SynthRAN is an experiment orchestrator, not a 5G deployment framework. It submits a native `fiveg/deployment/v1` request to the pinned `5g-Ansible` machine API, consumes the resulting manifest and generated inventory, observes the experiment path, runs deterministic Amber workloads and controlled measurements, and persists scientific evidence.
 
-`5g-Ansible` owns SLICES provider context, reservation, POS, Kubernetes, core, RAN, RU, physical UE setup, deployment state, and teardown. SynthRAN does not keep a second provider controller, topology support matrix, or infrastructure lifecycle.
+`5g-Ansible` owns SLICES provider context, reservation, POS, Kubernetes, core, RAN, RU, physical UE setup, deployment state, deployment progress, and teardown. SynthRAN does not keep a second provider controller, topology support matrix, infrastructure lifecycle, or Ansible-output interpreter.
 
 ## Architecture
 
@@ -26,6 +26,7 @@ FiveGAdapter
   SLICES provider context
   reservation / POS / Kubernetes
   core / RAN / RU / UE / teardown
+  fiveg/event/v1 deployment progress
         ↓
 upstream manifest + generated inventory
         ↓
@@ -63,10 +64,15 @@ synthran deps sync
 synthran --help
 ```
 
-Authenticate the provider tools required by the pinned 5g-Ansible checkout and prepare strict SSH host-key state. SynthRAN passes provider intent upstream; it does not select or create SLICES experiments itself.
+Authenticate the provider tools required by the pinned 5g-Ansible checkout. SynthRAN passes provider intent upstream; it does not select or create SLICES experiments itself.
 
 ```zsh
 export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
+```
+
+SynthRAN-owned SSH observation uses strict host-key checking. A custom trust-store override is optional; normal OpenSSH user/system known-hosts files are used otherwise.
+
+```zsh
 export SYNTHRAN_SLICES_KNOWN_HOSTS="$PWD/.synthran/known_hosts"
 ```
 
@@ -94,19 +100,17 @@ synthran doctor \
   --radio rfsim \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
-  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
 
 synthran run \
   --radio rfsim \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
   --run-id "$RUN_ID" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-Unless `--slices-experiment` is supplied, the upstream provider experiment name defaults to the run ID. The RFSIM deployment is retained after acceptance so controlled measurements can reuse the same upstream deployment. Use `synthran release --run-id "$RUN_ID"` when it should be stopped.
+Unless `--slices-experiment` is supplied, the upstream provider experiment name defaults to the run ID. A provider experiment can be deliberately reused with a fresh deployment ID by supplying `--slices-experiment`; subnet, LB, and expiration are still discovered dynamically by 5g-Ansible. The RFSIM deployment is retained after acceptance so controlled measurements can reuse the same upstream deployment. Use `synthran release --run-id "$RUN_ID"` when it should be stopped.
 
 ## Controlled run on an accepted RFSIM path
 
@@ -202,24 +206,31 @@ Unless `--keep-resources` is supplied, a successful physical experiment ends wit
 
 ## Live progress and logs
 
-`synthran run` emits one normalized operator stream and persists structured events to:
+`synthran run` persists one canonical experiment event stream to:
 
 ```text
 .synthran/events/<run-id>.jsonl
 ```
 
-Typical stages are:
+5g-Ansible is the deployment narrator. The adapter requests semantic `fiveg/event/v1` JSONL and relays those records; SynthRAN does not parse raw Ansible output. A typical fresh run starts like:
 
 ```text
-[synthran] → network
-[synthran]   ✓ 5g-Ansible provider/deployment ready
-[synthran] → workload
-[synthran]   ✓ Amber transport accepted
-[synthran] → acceptance
-[synthran] → cleanup
+[synthran] → network: 5g-Ansible deployment and experiment path observation
+[synthran]   → SLICES provider
+[synthran]   ✓ SLICES provider
+[synthran]   → SLICES reservation
+[synthran]   ✓ SLICES reservation
+[synthran]   → deployment dependencies
+[synthran]   ✓ deployment dependencies
+[synthran]   → 5G deployment
+[synthran]   ✓ 5G deployment
+[synthran] ✓ network: READY
+[synthran] → workload: deterministic Amber experiment
+[synthran] ✓ workload: accepted
+[synthran] → acceptance: verify experiment evidence
 ```
 
-Detailed upstream deployment artifacts and experiment artifacts remain under their run directories. `--quiet` suppresses terminal rendering while preserving evidence.
+5g-Ansible stdout remains the final machine JSON. Detailed `PLAY`/`TASK`/module output stays in upstream run-owned logs such as `deploy.log`; it is not reinterpreted as SynthRAN progress. `--quiet` suppresses terminal rendering while preserving evidence.
 
 ## Inspect and release
 
@@ -250,6 +261,6 @@ For `ambient-v1`, Amber models the Ambient-IoT source side, including energy sta
 
 ## Capability boundary
 
-5g-Ansible defines provider, core, RAN, platform, radio/RU, UE, reservation, and deployment capabilities. SynthRAN does not duplicate those capability tables.
+5g-Ansible defines provider, core, RAN, platform, radio/RU, UE, reservation, deployment, and deployment-progress capabilities. SynthRAN does not duplicate those capability tables or Ansible task semantics.
 
 SynthRAN defines experiment acceptance requirements. The current RFSIM Amber experiment requires a proven `tun_srsue1` PDU path. The current physical Amber experiment requires the selected upstream UE to expose the expected user-plane route. Those are experiment requirements, not claims about what 5g-Ansible can deploy.
