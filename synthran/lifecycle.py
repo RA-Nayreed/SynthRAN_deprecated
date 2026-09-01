@@ -1,8 +1,9 @@
 """Canonical SynthRAN experiment orchestration.
 
 5g-Ansible owns provider context, reservation, preparation, 5G deployment,
-physical resources, and teardown. SynthRAN submits one upstream deployment
-request, observes its result, runs Amber, and persists experiment evidence.
+physical resources, deployment progress, and teardown. SynthRAN submits one
+upstream request, observes its result, runs Amber, and persists experiment
+evidence.
 """
 
 from __future__ import annotations
@@ -109,30 +110,6 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         type=Path,
         default=DEFAULT_EXPERIMENT_ROOT,
         help=argparse.SUPPRESS,
-    )
-
-
-def _component(
-    progress: RunProgress,
-    stage: str,
-    name: str,
-    detail: str | None = None,
-    *,
-    event: str = "detail",
-) -> None:
-    marker = {
-        "started": "→",
-        "completed": "✓",
-        "resumed": "↻",
-        "skipped": "–",
-        "failed": "✗",
-    }.get(event, "·")
-    suffix = f": {detail}" if detail else ""
-    progress.stream.emit(
-        f"  {marker} {name}{suffix}",
-        stage=stage,
-        component=name,
-        event=event,
     )
 
 
@@ -279,15 +256,15 @@ def _deploy(
         dependency_root=args.deps_root,
         state_root=state_root,
         timeout_seconds=args.timeout,
+        event_sink=progress.relay_fiveg_event,
     )
     directory = state_root / args.run_id
     manifest_path = directory / "manifest.json"
     if manifest_path.is_file():
-        _component(
-            progress,
-            "network",
-            "5G deployment",
-            "upstream deployment retained",
+        progress.stream.emit(
+            "  ↻ 5G deployment: upstream deployment retained",
+            stage="infrastructure",
+            component="5G deployment",
             event="resumed",
         )
         _status_ready(adapter, args.run_id)
@@ -296,24 +273,10 @@ def _deploy(
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SynthRANError("5g-Ansible deployment manifest is unreadable") from exc
     else:
-        _component(
-            progress,
-            "network",
-            "5G deployment",
-            "5g-Ansible provider/plan/up",
-            event="started",
-        )
         adapter.plan(spec_path)
         manifest = adapter.up(
             spec_path,
             resume=(directory / "state.json").is_file(),
-        )
-        _component(
-            progress,
-            "network",
-            "5G deployment",
-            "upstream deployment ready",
-            event="completed",
         )
     if not isinstance(manifest, dict):
         raise SynthRANError("5g-Ansible deployment manifest is malformed")
@@ -344,7 +307,7 @@ def _run_rfsim(
     progress: RunProgress,
     known_hosts: Path | None,
 ) -> dict[str, object]:
-    progress.start("network", "5g-Ansible provider/deployment and path observation")
+    progress.start("network", "5g-Ansible deployment and experiment path observation")
     adapter, manifest, inventory, manifest_path = _deploy(
         args,
         known_hosts=known_hosts,
@@ -419,7 +382,7 @@ def _run_physical(
     progress: RunProgress,
     known_hosts: Path | None,
 ) -> dict[str, object]:
-    progress.start("network", "5g-Ansible provider/physical deployment and status gate")
+    progress.start("network", "5g-Ansible physical deployment and experiment status gate")
     adapter, manifest, inventory, _manifest_path = _deploy(
         args,
         known_hosts=known_hosts,
@@ -464,11 +427,9 @@ def _run_physical(
     if args.keep_resources:
         progress.skipped("cleanup", "upstream deployment retained by --keep-resources")
     else:
-        progress.start("cleanup", "5g-Ansible down")
         release_payload = adapter.down(args.run_id)
         if release_payload.get("state") != "stopped":
             raise SynthRANError("5g-Ansible cleanup did not reach stopped state")
-        progress.done("cleanup", "upstream deployment stopped")
     return {
         "schema": "synthran/run/v2",
         "run_id": args.run_id,
