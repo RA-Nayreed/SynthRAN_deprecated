@@ -24,7 +24,7 @@ class DependencyLockTests(unittest.TestCase):
             next(item.commit for item in lock.git if item.name == "amber"),
         )
         self.assertEqual(
-            "4799f4d93577840a56255fef1a1eb7fb6017b87f",
+            "4e5af7c5cd40a9056f88fc910809d7e96af2556e",
             next(item.commit for item in lock.git if item.name == "fiveg_ansible"),
         )
         self.assertEqual("3.12.13", lock.raw["conda"]["packages"]["python"]["version"])
