@@ -1,175 +1,88 @@
-# Backend contract
+# Platform experiment contract
 
-SynthRAN exposes RFSIM and R2Lab through the same operator lifecycle. This document defines what must remain common and what may legitimately differ.
+SynthRAN does not implement independent deployment backends. `rfsim` and `r2lab` are platform choices passed to 5g-Ansible. 5g-Ansible owns platform-specific infrastructure and exposes the resulting deployment through its manifest and generated inventory.
 
 ## Public contract
-
-A backend is selected only through:
 
 ```text
 synthran run --radio rfsim ...
 synthran run --radio r2lab ...
 ```
 
-Backend-specific lifecycle command groups are not part of the product interface. Readiness, inspection, analysis, and cleanup remain backend-neutral top-level commands. Live progress belongs to `synthran run`; there is no second live-log command.
+The common SynthRAN contract begins **after** upstream deployment:
 
-## Common run semantics
+1. consume the exact upstream manifest and inventory;
+2. observe the required live path;
+3. execute the selected workload/measurement;
+4. persist scientific and transport evidence;
+5. remove only experiment-owned state;
+6. re-observe the upstream deployment.
 
-Every accepted run must have:
+A successful `fiveg up` is deployment evidence, not experiment acceptance. SynthRAN acceptance remains evidence-based.
+
+## Deployment authority
+
+The sole deployment boundary is the pinned 5g-Ansible machine API. SynthRAN must not independently:
+
+- reserve/release provider or R2Lab resources;
+- allocate or prepare POS nodes;
+- install Kubernetes or 5G software;
+- render core/RAN/RU/UE deployment configuration;
+- patch upstream 5G Deployments to make a workload work;
+- start/restart/repair a gNB or UE runtime;
+- maintain a second support matrix.
+
+Topology validation belongs upstream. If 5g-Ansible accepts a native `fiveg/deployment/v1` request and returns a ready deployment, SynthRAN may consume it.
+
+## Common experiment semantics
+
+Every accepted workload run must have:
 
 - one immutable run ID;
-- verified provider context;
-- exact resource authority;
-- verified live 5G session state;
-- workload-specific transport evidence when transport is claimed;
-- the selected deterministic IoT workload;
-- persisted acceptance evidence;
-- a sanitized structured run event stream;
-- bounded, exact cleanup semantics.
+- exact upstream deployment provenance;
+- fresh live path observation;
+- immutable IoT source/profile/seed parameters;
+- deterministic telemetry semantics;
+- workload-specific transport proof;
+- persisted JSONL/Parquet/evidence artifacts;
+- exact experiment-local cleanup;
+- post-cleanup upstream-path reproof.
 
-A backend may not declare acceptance merely because deployment returned zero. Acceptance is evidence-based.
+Network readiness and workload transport are separate claims. SynthRAN never upgrades one into the other implicitly.
 
-Network/session readiness and end-to-end transport proof are distinct claims. A healthy gNB, a live UE PDU session, and a valid UPF route establish network readiness. A transport claim requires traffic or a connection explicitly sourced through the live UE PDU path.
+## Platform-specific observation
 
-## Allowed backend differences
-
-The following are implementation details and may differ:
-
-| Concern | RFSIM | R2Lab |
+| Concern | RFSIM | Physical R2Lab |
 | --- | --- | --- |
-| Radio | virtual RFSIM | N300/N320 |
-| UE | srsUE | selected FR1 Quectel UE |
-| Hardware authority | SLICES compute resources | SLICES compute + active R2Lab lease + exact radio/UE claim |
-| Registration observation | srsUE/Kubernetes state | modem/runtime state |
-| PDU interface | `tun_srsue1` | selected physical data interface, normally `wwan0` |
-| gNB deployment | virtual srsRAN path | pinned N3xx Helm values and singleton hardware radio |
-| Cleanup | transient workload cleanup; accepted network epoch may be reused | run-owned gNB + exact radio/UE resources |
+| Deployment owner | 5g-Ansible | 5g-Ansible |
+| UE facts | generated inventory + live UE pod | generated inventory physical UE entry |
+| Experiment interface | `tun_srsue1` | `wwan0` for current modem experiment |
+| Transport proof | PDU-bound transient UE relay + counters | route through physical UE + counters |
+| Experiment mutation | run-owned processes, optional exact `/32` route, central MQTT | run-owned forwards/ingress, central MQTT |
+| Infrastructure repair | forbidden | forbidden |
 
-These differences must stay below the experiment data contract.
+These are experiment acceptance differences, not separate deployment frameworks.
 
-## Experiment semantics that must not differ
+## RFSIM rules
 
-The following meanings are backend-independent:
+The current Amber RFSIM experiment requires the persisted and live PDU identity to agree. The experiment may add an exact `/32` route only when needed and only with `ip route add`; it must never replace an existing route. It launches a transient relay inside the existing UE container and removes it after the run. No Deployment rollout is permitted.
 
-- run identity;
-- selected IoT source/profile/seed and source parameters;
-- telemetry schema and sequence semantics;
-- collection-window definition;
-- minimum evidence gates;
-- artifact hashing and provenance;
-- accepted/failed status meaning;
-- immutable failure evidence;
-- cleanup evidence.
+## Physical rules
 
-A physical interface name or radio identifier must not appear as a new scientific telemetry field unless the field is genuinely part of the experimental variable being studied.
+Physical UE identity and SSH parameters come only from the generated upstream inventory. The current physical experiment proves the destination route through `wwan0`, sends the Amber stream through that UE, and requires the physical interface TX counter to increase. It does not configure the modem, radio, gNB, lease, or allocation.
 
-## Authority rules
+## Authority and resume
 
-Current live control uses fresh provider/runtime observation. The ordering is:
+For an experiment, current live observation outranks persisted SynthRAN evidence. Persisted evidence establishes provenance but never authorizes a new infrastructure mutation.
 
-```text
-current provider state
-> current direct runtime observation
-> persisted acceptance evidence
-> manifests
-> cached information
-```
+A resumed experiment must verify that the supplied upstream deployment identity and current observed path still match the persisted scientific intent. Unknown or ambiguous path state fails closed.
 
-Persisted evidence can justify resuming a run only when the current authority and current target state are reverified.
+## Research measurements
 
-Unknown, stale, foreign, expired, malformed, or ambiguous ownership fails closed.
+Controlled RFSIM research measurements may create bounded measurement state such as an exact target route and a run-owned iperf3 server. They must clean that state and re-prove the same UE/PDU identity. Calibration follows the same contract.
 
-## Provider rules
+Physical controlled-load campaign parity is not claimed merely because physical Amber delivery works. It requires separate accepted measurement evidence.
 
-A SLICES project must already exist. The operator must already be authenticated. A run may:
+## Adding another platform or topology
 
-- select the configured project;
-- create or reuse the provider experiment associated with the run;
-- acquire the Post5G prefix;
-- verify the active provider network.
-
-A run must not create projects, bypass authentication, or manufacture authority identifiers.
-
-## Physical resource rules
-
-R2Lab adds these requirements:
-
-- an active lease must be proven before hardware mutation;
-- the exact selected radio and UE are bound to the run;
-- selected compute-node allocation authority is verified;
-- a physical gNB is staged at zero replicas before singleton start;
-- only one run-owned physical gNB may be active for the selected radio;
-- UE setup/connect/stop mechanics come from the pinned `fiveg_ansible` roles;
-- user-plane proof must bind traffic to the selected physical data interface;
-- cleanup must prove the selected resources are off/clean before the claim is released.
-
-Global radio/UE cleanup and guessed ownership are prohibited.
-
-## Ansible rules
-
-All long Ansible work must use the shared sanitized streaming implementation. This applies equally to:
-
-- RFSIM resource/network Ansible;
-- R2Lab Open5GS Ansible;
-- R2Lab UE setup/connect/stop roles.
-
-A PLAY/TASK header is not evidence that work executed. The adapter must suppress tasks that are subsequently skipped. Routine implementation chatter remains in forensic logs; long meaningful operations may produce heartbeats; failures preserve bounded sanitized context. Adding a backend-specific Ansible output parser would violate the contract.
-
-## Run event contract
-
-Every run writes:
-
-```text
-.synthran/events/<run-id>.jsonl
-```
-
-The event stream is structured evidence produced by the same renderer used for live `[synthran]` progress. It is not a separate operator logging workflow. `--quiet` affects terminal rendering, not persistence.
-
-Backend-specific raw logs may be retained internally when required for diagnosis, but they do not replace or redefine the common event stream.
-
-## Acceptance boundaries
-
-The public lifecycle is:
-
-```text
-provider
--> infrastructure
--> network
--> workload
--> acceptance
--> cleanup (when applicable)
-```
-
-`network` remains open until the backend-specific gNB/UE/PDU/routing readiness gates pass. Workload setup then proves any stronger transport property required by the experiment.
-
-For R2Lab the evidence record is more granular because hardware safety requires explicit N2, management, acquisition, registration, PDU, and user-plane boundaries. That extra granularity is an implementation safety requirement; it does not create a different public lifecycle.
-
-## Resume behavior
-
-A run may resume when persisted evidence exists, but it must:
-
-1. validate the requested topology against persisted topology;
-2. refresh current authority;
-3. re-observe any live state needed to authorize the next mutation;
-4. continue only from a boundary consistent with current evidence;
-5. preserve previous failure evidence instead of silently rewriting history.
-
-Run IDs are never recycled for a different topology or experimental intent.
-
-## Research parity
-
-The deterministic workload is implemented on both backends. Controlled-load research campaigns are a separate scientific capability. The current campaign runtime is accepted on RFSIM; R2Lab campaign parity is not claimed until physical load generation, measurement peer selection, timing validity, and cleanup have current accepted evidence.
-
-This is the required distinction between architectural parity and scientifically demonstrated parity.
-
-## Adding a backend or hardware profile
-
-A new backend or physical profile should not add a new command family. It must instead:
-
-- extend the backend selection/capability model;
-- implement the required run boundaries;
-- use the common run-event stream;
-- use shared Ansible streaming where Ansible is involved;
-- produce experiment evidence compatible with the common semantics;
-- document unsupported scientific capability explicitly;
-- add tests that prove the public command surface did not expand unnecessarily.
+A new 5G topology belongs in 5g-Ansible. SynthRAN should need changes only when a new experiment requires different observation, transport, measurement, or acceptance semantics. It must not gain another deployment command family or infrastructure support matrix.
