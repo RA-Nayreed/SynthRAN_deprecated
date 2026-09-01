@@ -1,10 +1,10 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-09-01T07:14:57Z",
+  "resolved_at_utc": "2026-09-01T07:34:43Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
-      "commit": "627b190e66aafadf618b0fb9ab2511a07ada535e",
+      "commit": "4799f4d93577840a56255fef1a1eb7fb6017b87f",
       "checkout": "5g_ansible-r2lab",
       "sync": true,
       "role": "network and provider deployment authority",
