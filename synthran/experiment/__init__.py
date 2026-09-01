@@ -13,6 +13,7 @@ import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
 
+DEPLOYMENT_SCHEMA = "fiveg/deployment-manifest/v1"
 EXPERIMENT_SCHEMA = "synthran/iot-experiment/v2alpha1"
 EXPERIMENT_EVIDENCE_SCHEMA = "synthran/iot-evidence/v2alpha1"
 TELEMETRY_SCHEMA = "synthran/telemetry/v1alpha1"
@@ -69,7 +70,7 @@ def load_path_proven_network(
     manifest_path: Path,
     evidence_path: Path,
 ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    """Load the persisted network/session readiness evidence used by a workload."""
+    """Load an upstream-ready deployment and SynthRAN path evidence."""
 
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -79,20 +80,21 @@ def load_path_proven_network(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ExperimentError("network acceptance evidence must be readable JSON") from exc
 
-    # The persisted network schema still uses the historical status token.  It is
-    # treated here as session-readiness evidence, not as an end-to-end traffic proof.
-    if not isinstance(manifest, dict) or manifest.get("status") != "path-proven":
-        raise ExperimentError("experiment requires an accepted network manifest")
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != DEPLOYMENT_SCHEMA
+        or manifest.get("state") != "ready"
+        or not isinstance(manifest.get("id"), str)
+    ):
+        raise ExperimentError("experiment requires a ready 5g-Ansible deployment manifest")
     if (
         not isinstance(evidence, dict)
         or evidence.get("schema") != "synthran/network-evidence/v1alpha1"
         or evidence.get("ready") is not True
     ):
         raise ExperimentError("experiment requires ready network acceptance evidence")
-    if manifest.get("network_evidence") != evidence_path.name:
-        raise ExperimentError("network manifest does not reference the supplied evidence")
-    if manifest.get("run_id") != evidence.get("run_id"):
-        raise ExperimentError("network manifest/evidence run IDs do not match")
+    if manifest.get("id") != evidence.get("run_id"):
+        raise ExperimentError("deployment manifest and path evidence run IDs do not match")
 
     path = evidence.get("path")
     if not isinstance(path, dict):
@@ -107,15 +109,9 @@ def load_path_proven_network(
     except ValueError as exc:
         raise ExperimentError("network PDU evidence contains invalid IP data") from exc
     if observed_network != EXPECTED_PDU_NETWORK or observed_address not in observed_network:
-        raise ExperimentError("PDU session does not match the accepted golden path")
+        raise ExperimentError("PDU session does not match the RFSIM experiment requirement")
     if path.get("ue_interface") != "tun_srsue1":
         raise ExperimentError("accepted UE interface is not tun_srsue1")
-    if (
-        path.get("slice") != "slice1"
-        or path.get("sst") != 1
-        or path.get("dnn") != "internet"
-    ):
-        raise ExperimentError("slice evidence does not match the accepted golden path")
     return manifest, evidence
 
 
@@ -179,7 +175,7 @@ def build_scenario(
     path = evidence["path"]
     return ExperimentScenario(
         run_id=validate_run_id(run_id),
-        network_run_id=str(manifest["run_id"]),
+        network_run_id=validate_run_id(str(manifest["id"])),
         pdu_address=str(path["pdu_address"]),
         sensor_period_seconds=sensor_period_seconds,
     )
