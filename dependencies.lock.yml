@@ -1,13 +1,13 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-09-01T03:55:00Z",
+  "resolved_at_utc": "2026-09-01T05:35:00Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
-      "commit": "b207228ba02ae30cb1155d1d2e06ae235d61a37c",
+      "commit": "71025e88326732dcf592e99a8c07c700704650ac",
       "checkout": "5g_ansible-r2lab",
       "sync": true,
-      "role": "network deployment authority",
+      "role": "network and provider deployment authority",
       "license": "NOASSERTION"
     },
     "amber": {
@@ -79,7 +79,7 @@
       },
       "ansible-core": {
         "version": "2.20.5",
-        "role": "5g-Ansible controller runtime",
+        "role": "5g-Ansible machine runtime invoked by SynthRAN",
         "license": "GPL-3.0-or-later"
       },
       "simpy": {
