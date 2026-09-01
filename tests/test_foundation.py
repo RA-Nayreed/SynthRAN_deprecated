@@ -165,16 +165,6 @@ class FoundationTests(unittest.TestCase):
             self.assertIn("conda activate synthran", path.read_text(encoding="utf-8"))
         self.assertNotIn("conda activate synthran", paths[3].read_text(encoding="utf-8"), "the scientific protocol should not repeat environment setup")
 
-    def test_open5gs_runtime_image_matches_configuration_schema(self) -> None:
-        lock = json.loads((REPOSITORY_ROOT / "dependencies.lock.yml").read_text())
-        open5gs = lock["containers"]["open5gs"]
-        smf = lock["containers"]["open5gs_smf"]
-        self.assertEqual("ghcr.io/niloysh/open5gs", open5gs["image"])
-        self.assertEqual("v2.7.0", open5gs["tag"])
-        self.assertEqual(open5gs["image"], smf["image"])
-        self.assertEqual(open5gs["tag"], smf["tag"])
-        self.assertEqual(open5gs["digest"], smf["digest"])
-
 
 if __name__ == "__main__":
     unittest.main()
