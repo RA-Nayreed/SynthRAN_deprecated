@@ -4,95 +4,59 @@ from pathlib import Path
 import unittest
 
 from synthran.dependencies import load_lock
-from synthran.experiment import ExperimentScenario
 from synthran.experiment.resources import (
-    DEFAULT_CONTAINER_ANNOTATION,
-    EDGE_CONTAINER,
-    EDGE_RUNTIME_VOLUME,
-    EDGE_VOLUME,
+    CENTRAL_PORT,
     RUN_LABEL,
-    render_edge_cleanup_patch,
-    render_edge_patch,
-    render_experiment_objects,
+    ROLE_LABEL,
+    central_names,
+    render_central_objects,
 )
 
 
 class ExperimentResourceTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.scenario = ExperimentScenario(
-            "experiment-01",
-            "network-accepted-01",
-            "12.1.0.1",
-        )
         self.lock = load_lock(Path("dependencies.lock.yml"))
 
-    def test_edge_sidecar_is_digest_locked_run_owned_and_refreshable(self) -> None:
-        patch = render_edge_patch(
-            self.scenario,
-            lock=self.lock,
-            core_address="192.0.2.10",
-        )
-        template = patch["spec"]["template"]
-        self.assertEqual(
-            template["metadata"]["labels"]["synthran.run/id"],
-            "network-accepted-01",
-        )
-        self.assertEqual(template["metadata"]["annotations"][RUN_LABEL], "experiment-01")
-        self.assertEqual(
-            template["metadata"]["annotations"][DEFAULT_CONTAINER_ANNOTATION],
-            "ue",
-        )
-        container = template["spec"]["containers"][0]
-        self.assertEqual(container["name"], EDGE_CONTAINER)
-        self.assertIn("@sha256:", container["image"])
-        self.assertEqual(container["command"], ["/bin/sh", "-c"])
-        self.assertIn("/synthran-source/mosquitto.conf", container["args"][0])
-        self.assertIn("/synthran/mosquitto.conf", container["args"][0])
+    def test_central_names_are_run_scoped_and_deterministic(self) -> None:
+        first = central_names("experiment-01")
+        second = central_names("experiment-01")
+        other = central_names("experiment-02")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, other)
+        self.assertTrue(first["central_config"].startswith("synthran-exp-central-"))
+        self.assertEqual(first["central_config"], first["central_deployment"])
 
-        volumes = {item["name"]: item for item in template["spec"]["volumes"]}
-        self.assertIn(EDGE_VOLUME, volumes)
-        self.assertIn(EDGE_RUNTIME_VOLUME, volumes)
-        self.assertEqual(volumes[EDGE_RUNTIME_VOLUME]["emptyDir"], {})
-
-        mounts = {item["name"]: item for item in container["volumeMounts"]}
-        self.assertEqual(mounts[EDGE_VOLUME]["mountPath"], "/synthran-source")
-        self.assertTrue(mounts[EDGE_VOLUME]["readOnly"])
-        self.assertEqual(mounts[EDGE_RUNTIME_VOLUME]["mountPath"], "/synthran")
-
-    def test_cleanup_deletes_only_injected_sidecar_volumes_and_annotations(self) -> None:
-        patch = render_edge_cleanup_patch()
-        template = patch["spec"]["template"]
-        self.assertEqual(
-            template["metadata"],
-            {
-                "annotations": {
-                    RUN_LABEL: None,
-                    DEFAULT_CONTAINER_ANNOTATION: None,
-                }
-            },
-        )
-        self.assertNotIn("labels", template["metadata"])
-        spec = template["spec"]
-        self.assertEqual(spec["containers"][0]["$patch"], "delete")
-        deleted_volumes = {
-            item["name"] for item in spec["volumes"] if item["$patch"] == "delete"
-        }
-        self.assertEqual(deleted_volumes, {EDGE_VOLUME, EDGE_RUNTIME_VOLUME})
-
-    def test_central_resources_use_experiment_labels(self) -> None:
-        objects = render_experiment_objects(
-            self.scenario,
+    def test_central_resources_are_exact_run_owned_and_digest_locked(self) -> None:
+        config, deployment = render_central_objects(
+            run_id="experiment-01",
             lock=self.lock,
             core_node="lab-core",
-            core_address="192.0.2.10",
         )
-        self.assertEqual(len(objects), 3)
-        for value in objects:
-            self.assertEqual(
-                value["metadata"]["labels"][RUN_LABEL],
-                "experiment-01",
-            )
-        self.assertEqual(RUN_LABEL, "synthran.experiment/run")
+        for value in (config, deployment):
+            self.assertEqual(value["metadata"]["namespace"], "open5gs")
+            self.assertEqual(value["metadata"]["labels"][RUN_LABEL], "experiment-01")
+
+        pod = deployment["spec"]["template"]
+        self.assertEqual(pod["metadata"]["labels"][RUN_LABEL], "experiment-01")
+        self.assertEqual(pod["metadata"]["labels"][ROLE_LABEL], "central-mqtt")
+        self.assertEqual(pod["spec"]["nodeSelector"]["kubernetes.io/hostname"], "lab-core")
+        self.assertTrue(pod["spec"]["hostNetwork"])
+        container = pod["spec"]["containers"][0]
+        self.assertIn("@sha256:", container["image"])
+        self.assertEqual(container["ports"][0]["hostPort"], CENTRAL_PORT)
+        self.assertIn(f"listener {CENTRAL_PORT} 0.0.0.0", config["data"]["mosquitto.conf"])
+
+    def test_resources_never_describe_or_patch_the_upstream_ue(self) -> None:
+        config, deployment = render_central_objects(
+            run_id="experiment-01",
+            lock=self.lock,
+            core_node="lab-core",
+        )
+        rendered = repr((config, deployment)).lower()
+        self.assertNotIn("srsran-ue", rendered)
+        self.assertNotIn("sidecar", rendered)
+        self.assertNotIn("strategic", rendered)
+        self.assertNotIn("synthran-edge", rendered)
 
 
 if __name__ == "__main__":
