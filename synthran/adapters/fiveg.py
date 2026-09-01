@@ -1,8 +1,8 @@
 """Thin process boundary around the pinned 5g-Ansible machine interface.
 
-SynthRAN does not implement 5G deployment mechanics here.  It validates the
-locked checkout, invokes ``bin/fiveg`` with declarative input, and records the
-machine-readable result for experiment provenance.
+SynthRAN does not implement or interpret 5G deployment mechanics here. It
+validates the locked checkout, invokes ``bin/fiveg`` with declarative input,
+relays versioned upstream progress events, and consumes the final machine JSON.
 """
 
 from __future__ import annotations
@@ -12,12 +12,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import threading
 from typing import Any, Callable, Mapping, Sequence
 
 from synthran.dependencies import DependencyLock
 
 
 FIVEG_SPEC_SCHEMA = "fiveg/deployment/v1"
+FIVEG_EVENT_SCHEMA = "fiveg/event/v1"
 
 
 class FiveGAdapterError(RuntimeError):
@@ -31,10 +33,21 @@ class CommandResult:
     stderr: str = ""
 
 
+EventSink = Callable[[Mapping[str, Any]], None]
 Runner = Callable[
-    [Sequence[str], Path, Mapping[str, str] | None, int],
+    [Sequence[str], Path, Mapping[str, str] | None, int, EventSink | None],
     CommandResult,
 ]
+
+
+def _decode_event_line(line: str) -> Mapping[str, Any] | None:
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict) or value.get("schema") != FIVEG_EVENT_SCHEMA:
+        return None
+    return value
 
 
 def subprocess_runner(
@@ -42,27 +55,67 @@ def subprocess_runner(
     cwd: Path,
     environment: Mapping[str, str] | None,
     timeout_seconds: int,
+    event_sink: EventSink | None,
 ) -> CommandResult:
+    """Run one machine verb while relaying its JSONL event channel live."""
+
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             list(command),
             cwd=cwd,
             env=dict(environment) if environment is not None else None,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=timeout_seconds,
-            check=False,
         )
     except FileNotFoundError as exc:
         raise FiveGAdapterError("required 5g-Ansible executable was not found") from exc
+
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        raise FiveGAdapterError("5g-Ansible machine pipes could not be opened")
+
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    reader_errors: list[BaseException] = []
+
+    def read_stdout() -> None:
+        try:
+            stdout_parts.extend(process.stdout.readlines())
+        except BaseException as exc:  # pragma: no cover - OS pipe failure
+            reader_errors.append(exc)
+
+    def read_stderr() -> None:
+        try:
+            for line in process.stderr:
+                event = _decode_event_line(line.strip())
+                if event is not None:
+                    if event_sink is not None:
+                        event_sink(event)
+                    continue
+                stderr_parts.append(line)
+        except BaseException as exc:  # includes event-sink contract failures
+            reader_errors.append(exc)
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    try:
+        returncode = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
         raise FiveGAdapterError("5g-Ansible machine operation exceeded its timeout") from exc
-    return CommandResult(
-        completed.returncode,
-        completed.stdout or "",
-        completed.stderr or "",
-    )
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
+    if stdout_thread.is_alive() or stderr_thread.is_alive():
+        raise FiveGAdapterError("5g-Ansible machine output stream did not close")
+    if reader_errors:
+        raise FiveGAdapterError("5g-Ansible progress event stream could not be consumed") from reader_errors[0]
+    return CommandResult(returncode, "".join(stdout_parts), "".join(stderr_parts))
 
 
 def _locked_dependency(lock: DependencyLock):
@@ -109,7 +162,7 @@ def validate_checkout(lock: DependencyLock, dependency_root: Path) -> Path:
         != dependency.url.rstrip("/")
     ):
         raise FiveGAdapterError("fiveg_ansible checkout origin does not match the lock")
-    for relative in ("bin/fiveg", "tools/fiveg_machine.py"):
+    for relative in ("bin/fiveg", "tools/fiveg_machine.py", "tools/fiveg_events.py"):
         if not (checkout / relative).is_file():
             raise FiveGAdapterError(
                 f"locked fiveg_ansible checkout is missing machine interface: {relative}"
@@ -148,13 +201,15 @@ def load_spec(path: Path) -> Mapping[str, Any]:
 
 
 def _failure_detail(result: CommandResult) -> str:
-    """Return one concise upstream diagnostic without replaying a full subprocess log."""
+    """Return one concise upstream diagnostic without replaying progress JSONL."""
 
-    text = result.stderr.strip() or result.stdout.strip()
-    if not text:
-        return ""
-    line = next((item.strip() for item in reversed(text.splitlines()) if item.strip()), "")
-    return line[-1000:]
+    lines = [*result.stderr.splitlines(), *result.stdout.splitlines()]
+    for item in reversed(lines):
+        line = item.strip()
+        if not line or _decode_event_line(line) is not None:
+            continue
+        return line[-1000:]
+    return ""
 
 
 @dataclass(frozen=True)
@@ -166,6 +221,7 @@ class FiveGAdapter:
     timeout_seconds: int = 3600
     runner: Runner = subprocess_runner
     environment: Mapping[str, str] | None = None
+    event_sink: EventSink | None = None
 
     @classmethod
     def from_lock(
@@ -177,6 +233,7 @@ class FiveGAdapter:
         timeout_seconds: int = 3600,
         runner: Runner = subprocess_runner,
         environment: Mapping[str, str] | None = None,
+        event_sink: EventSink | None = None,
     ) -> "FiveGAdapter":
         if timeout_seconds < 1 or timeout_seconds > 14400:
             raise FiveGAdapterError("5g-Ansible timeout must be between 1 and 14400 seconds")
@@ -186,6 +243,7 @@ class FiveGAdapter:
             timeout_seconds=timeout_seconds,
             runner=runner,
             environment=environment,
+            event_sink=event_sink,
         )
 
     def _environment(self) -> dict[str, str]:
@@ -199,16 +257,19 @@ class FiveGAdapter:
         *arguments: str,
         expected_schema: str,
     ) -> Mapping[str, Any]:
-        command = (
+        command = [
             str(self.checkout / "bin" / "fiveg"),
             *arguments,
             "--json",
-        )
+        ]
+        if self.event_sink is not None:
+            command.append("--events")
         result = self.runner(
             command,
             self.checkout,
             self._environment(),
             self.timeout_seconds,
+            self.event_sink,
         )
         if result.returncode != 0:
             operation = arguments[0] if arguments else "operation"
