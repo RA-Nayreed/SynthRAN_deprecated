@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 import tempfile
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from synthran.dependencies import DependencyLock
 from synthran.fiveg_ansible import NetworkInventory
@@ -25,6 +25,13 @@ DEPLOYMENT_SCHEMA = "fiveg/deployment-manifest/v1"
 NETWORK_EVIDENCE_SCHEMA = "synthran/network-evidence/v1alpha1"
 RUN_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 KUBERNETES_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+HEX_SECRET_RE = re.compile(r"(?i)\b[0-9a-f]{32}\b")
+SUBSCRIBER_RE = re.compile(r"\b[0-9]{14,16}\b")
+PRIVATE_IPV4_RE = re.compile(
+    r"(?<![0-9])(?:10(?:\.[0-9]{1,3}){3}|"
+    r"192\.168(?:\.[0-9]{1,3}){2}|"
+    r"172\.(?:1[6-9]|2[0-9]|3[01])(?:\.[0-9]{1,3}){2})(?![0-9])"
+)
 RFSIM_NAMESPACE = "open5gs"
 RFSIM_INTERFACE = "tun_srsue1"
 RFSIM_PDU_NETWORK = ipaddress.ip_network("12.1.0.0/16")
@@ -55,6 +62,24 @@ def atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
         temporary.write(content)
         temporary_path = Path(temporary.name)
     temporary_path.replace(path)
+
+
+def sanitize_deployment_text(text: str, private_paths: Sequence[Path]) -> str:
+    """Sanitize experiment diagnostics without owning deployment behavior."""
+
+    sanitized = text
+    for path in sorted(
+        {str(item.resolve(strict=False)) for item in private_paths},
+        key=len,
+        reverse=True,
+    ):
+        if path:
+            sanitized = sanitized.replace(path, "<local-path>")
+            sanitized = sanitized.replace(path.replace("\\", "/"), "<local-path>")
+    sanitized = HEX_SECRET_RE.sub("<secret>", sanitized)
+    sanitized = SUBSCRIBER_RE.sub("<subscriber-id>", sanitized)
+    sanitized = PRIVATE_IPV4_RE.sub("<private-ip>", sanitized)
+    return sanitized
 
 
 def _locked_fiveg_commit(lock: DependencyLock) -> str:
