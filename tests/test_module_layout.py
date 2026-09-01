@@ -21,13 +21,16 @@ def _tracked(path: str) -> bool:
     return bool(result.stdout.strip())
 
 
+def _source(relative: str) -> str:
+    return (SOURCE / relative).read_text(encoding="utf-8")
+
+
 class ModuleLayoutTests(unittest.TestCase):
     def test_active_runtime_code_is_grouped_by_domain(self) -> None:
         required = (
             "cli.py",
             "errors.py",
             "lifecycle.py",
-            "provider.py",
             "run_events.py",
             "adapters/fiveg.py",
             "experiment/__init__.py",
@@ -61,13 +64,50 @@ class ModuleLayoutTests(unittest.TestCase):
         ):
             self.assertFalse((SOURCE / relative).exists(), relative)
 
-    def test_retired_deployment_layers_do_not_return(self) -> None:
+    def test_retired_provider_and_deployment_layers_do_not_return(self) -> None:
         for relative in (
+            "provider.py",
+            "slices_controller.py",
             "network/resources.py",
             "upstream_overlay.py",
         ):
             self.assertFalse((SOURCE / relative).exists(), relative)
         self.assertFalse((REPOSITORY_ROOT / "deploy" / "ansible").exists())
+
+    def test_lifecycle_and_cli_delegate_infrastructure_to_fiveg(self) -> None:
+        lifecycle = _source("lifecycle.py")
+        cli = _source("cli.py")
+        combined = lifecycle + "\n" + cli
+        self.assertIn("FiveGAdapter", lifecycle)
+        for forbidden in (
+            "ansible-playbook",
+            "worktree add",
+            "apply_network_overlay",
+            "copytree",
+            "execute_resource_preparation",
+            "prepare_physical_resources",
+            "stage_n3xx_gnb",
+            "start_n3xx_gnb",
+            "activate_physical_ue",
+            "slices project use",
+            "slices experiment create",
+            "post5g experiment prefix",
+        ):
+            self.assertNotIn(forbidden, combined)
+        for forbidden in ("SUPPORTED_CORE", "SUPPORTED_RAN", "SUPPORTED_RADIO"):
+            self.assertNotIn(forbidden, combined)
+
+    def test_observation_layer_cannot_deploy_or_teardown(self) -> None:
+        runtime = _source("network/runtime.py")
+        for forbidden in (
+            "ansible-playbook",
+            "worktree add",
+            "apply_network_overlay",
+            "copytree",
+            "FiveGAdapter.up",
+            "FiveGAdapter.down",
+        ):
+            self.assertNotIn(forbidden, runtime)
 
     def test_flat_duplicate_modules_do_not_return(self) -> None:
         removed = {
