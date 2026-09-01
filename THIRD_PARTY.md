@@ -13,7 +13,7 @@ SynthRAN original code is licensed under Apache-2.0. External projects remain se
 | Miniforge3 | Conda distribution used by CI and recommended locally | `26.3.2-2`, Linux x86-64 installer `sha256:42260ffe3830fb953d5eee1bbb32229ff06aa7c3833c1ed7a9a0420a95685d94` | External environment bootstrap | BSD-3-Clause for installer code; installed packages retain their own licenses |
 | Python | SynthRAN runtime | `3.12.13` | Conda package from `conda-forge` | PSF-2.0 |
 | Git | Immutable dependency synchronization and repository hooks | `2.51.0` | Conda package from `conda-forge` | GPL-2.0-only |
-| Setuptools | Python build backend | `83.0.0` | Python build backend | MIT |
+| Setuptools | Python build backend | `83.0.0` | Conda package from `conda-forge` | MIT |
 | Eclipse Paho MQTT Python | MQTT collector/publisher client | `2.1.0` | Conda package from `conda-forge` | EPL-2.0 OR EDL-1.0 |
 | Apache PyArrow | Deterministic Parquet conversion | `21.0.0` | Conda package from `conda-forge` | Apache-2.0 |
 | Ansible Core | Runtime required by the pinned 5g-Ansible machine checkout | `2.20.5` | Conda package from `conda-forge`; SynthRAN does not own upstream playbooks/collections | GPL-3.0-or-later |
