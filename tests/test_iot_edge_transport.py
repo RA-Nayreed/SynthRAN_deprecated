@@ -108,7 +108,8 @@ class RfsimEdgeTransportTests(unittest.TestCase):
         remote_args = mocked_ssh.call_args.args[1:]
         rendered = " ".join(str(value) for value in remote_args)
         self.assertIn("/proc/net/tcp", rendered)
-        self.assertIn("49C6", rendered)
+        self.assertIn("04X", rendered)
+        self.assertIn("18886", rendered)
         self.assertNotIn("socket.connect", rendered)
         self.assertNotIn("connect((", rendered)
 
