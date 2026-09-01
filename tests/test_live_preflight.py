@@ -19,10 +19,11 @@ class StrictSshBoundaryTests(unittest.TestCase):
         }
         return InventoryHost("core", values)
 
-    def test_known_hosts_is_required(self) -> None:
+    def test_default_openssh_trust_store_remains_strict(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(LivePreflightError, "SYNTHRAN_KNOWN_HOSTS"):
-                ssh_command(self._host(), "hostname")
+            command = ssh_command(self._host(), "hostname")
+        self.assertIn("StrictHostKeyChecking=yes", command)
+        self.assertFalse(any(item.startswith("UserKnownHostsFile=") for item in command))
 
     def test_command_enforces_strict_host_key_checking(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -36,6 +37,11 @@ class StrictSshBoundaryTests(unittest.TestCase):
         self.assertTrue(any(item.startswith("UserKnownHostsFile=") for item in command))
         self.assertEqual(command[-2], "root@core.example")
         self.assertIn("printf", command[-1])
+
+    def test_missing_explicit_known_hosts_override_fails_closed(self) -> None:
+        with patch.dict(os.environ, {"SYNTHRAN_KNOWN_HOSTS": "/definitely/missing/known_hosts"}):
+            with self.assertRaisesRegex(LivePreflightError, "does not name an existing file"):
+                ssh_command(self._host(), "hostname")
 
     def test_inventory_port_is_validated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
