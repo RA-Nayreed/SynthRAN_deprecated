@@ -1,6 +1,6 @@
 # Architecture
 
-SynthRAN is an experiment-orchestration, measurement, and evidence layer. It does **not** own provider selection or deploy/repair 5G infrastructure. The pinned `5g-Ansible` machine API is the sole authority for SLICES provider context, reservation, POS, Kubernetes, core, RAN, radio/RU, UE activation, and deployment teardown.
+SynthRAN is an experiment-orchestration, measurement, and evidence layer. It does **not** own provider selection or deploy/repair 5G infrastructure. The pinned `5g-Ansible` machine API is the sole authority for SLICES provider context, reservation, POS, Kubernetes, core, RAN, radio/RU, UE activation, deployment progress, and deployment teardown.
 
 ## System boundary
 
@@ -19,6 +19,7 @@ experiment request
  SLICES provider context
  reservation / POS / Kubernetes
  core / RAN / RU / UE / teardown
+ semantic deployment progress
         |
         +-------------------------+
         |                         |
@@ -80,6 +81,28 @@ Provider intent is part of the native request. With provider management enabled,
 
 SynthRAN deliberately has no second support matrix for cores, RANs, radios, or physical UEs. Topology validation belongs to 5g-Ansible. SynthRAN may impose experiment-specific acceptance requirements after deployment—for example, the current RFSIM Amber experiment requires a live `tun_srsue1` PDU path—but that is not a deployment-support restriction.
 
+## Deployment progress boundary
+
+5g-Ansible is also the sole source of deployment progress semantics. A caller may request the upstream event channel, which emits versioned JSONL records using:
+
+```text
+fiveg/event/v1
+```
+
+The machine-process streams have distinct purposes:
+
+```text
+stdout  -> one final versioned machine result
+stderr  -> optional fiveg/event/v1 progress + non-event failure diagnostics
+logs    -> detailed Ansible/provider deployment evidence owned by 5g-Ansible
+```
+
+The thin `FiveGAdapter` relays recognized `fiveg/event/v1` records into the SynthRAN run event stream. SynthRAN does **not** parse Ansible `PLAY`, `TASK`, handler, host-change, or module-result text and does not maintain a parallel dictionary of Ansible task labels.
+
+The upstream progress channel describes only upstream-owned work such as provider context, SLICES reservation, dependency preparation, physical preparation, 5G deployment, scenarios, and cleanup. Amber source generation, experiment transport, measurements, and scientific acceptance remain SynthRAN events.
+
+Provider-assigned subnet/LB/expiration values are deployment evidence, not progress constants. They remain dynamically supplied in upstream state/manifest and are never hard-coded into the event renderer.
+
 ## RFSIM experiment path
 
 After 5g-Ansible reports the deployment ready, SynthRAN observes exactly one current UE pod and its accepted PDU identity. It does not patch the UE Deployment, restart the gNB/UE, or reconcile radio processes.
@@ -136,6 +159,8 @@ Capacity calibration follows the same rule: verify the existing path, measure, a
   deployment manifest
   generated inventory
   upstream state directory
+  fiveg/event/v1 progress
+  detailed deployment logs
 
 SynthRAN
   network-evidence.json
@@ -151,8 +176,9 @@ Upstream artifacts establish provider and deployment provenance. SynthRAN eviden
 ## Source layout
 
 ```text
-synthran/adapters/fiveg.py             thin 5g-Ansible machine adapter
+synthran/adapters/fiveg.py             thin 5g-Ansible machine/event adapter
 synthran/lifecycle.py                  experiment orchestration
+synthran/run_events.py                 experiment events + upstream event relay
 synthran/network/runtime.py            read-only network verification/evidence
 synthran/experiment/observe.py         read-only UE/PDU observation
 synthran/experiment/rfsim.py           RFSIM Amber experiment
@@ -167,9 +193,9 @@ There is no SynthRAN provider controller, no `synthran/r2lab/` controller, no `d
 
 ## Design rules
 
-- 5g-Ansible is the sole provider and 5G deployment authority.
+- 5g-Ansible is the sole provider, 5G deployment, and deployment-progress authority.
 - SynthRAN passes native provider/topology requests instead of maintaining parallel controller logic.
-- Deployment artifacts are consumed, not rewritten.
+- Deployment artifacts and semantic progress are consumed, not reconstructed from Ansible text.
 - Live infrastructure control is never inferred from historical evidence.
 - Experiment mutation is bounded to run-owned workload/measurement state.
 - Existing upstream Deployments are not patched to make an experiment work.
