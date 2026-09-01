@@ -1,8 +1,8 @@
-"""Experiment-side transports for Amber publishers over upstream 5G deployments.
+"""Experiment-local Amber transports over upstream-provisioned 5G paths.
 
-5g-Ansible owns deployment and UE setup.  This module only exposes an already
-provisioned UE path to the Amber publishers, counts ingress, and proves exact
-experiment-local cleanup.
+5g-Ansible owns deployment and UE setup. This module only creates bounded
+transport processes and routes for one experiment, records their ownership, and
+removes exactly what it created.
 """
 
 from __future__ import annotations
@@ -26,14 +26,12 @@ from synthran.live_preflight import LivePreflightError, ssh_command
 RFSIM_EDGE_FORWARD_PORT = 18883
 RFSIM_AMBER_INGRESS_PORT = 18886
 RFSIM_AMBER_LOCAL_PORT = 18886
+RFSIM_UE_RELAY_PORT = 1883
+RFSIM_UE_INTERFACE = "tun_srsue1"
 PHYSICAL_AMBER_INGRESS_PORT = 18886
 PHYSICAL_AMBER_LOCAL_PORT = 18886
 PHYSICAL_UE_INTERFACE = "wwan0"
 KUBERNETES_NAMESPACE = "open5gs"
-
-# Temporary source compatibility while the last r2lab callers are deleted in
-# this PR.  No separate process implementation exists here.
-OwnedProcess = ManagedProcess
 
 
 class EdgeTransportAdapter(Protocol):
@@ -145,15 +143,17 @@ def _wait_remote_tcp(
     *,
     port: int,
     process: ManagedProcess,
+    dependency: ManagedProcess | None = None,
     timeout_seconds: int = 30,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     command = _remote_tcp_probe_command(inventory, port=port)
     while time.monotonic() < deadline:
-        if process.process.poll() is not None:
-            raise ExperimentError(
-                f"{process.name} exited before remote TCP endpoint became ready"
-            )
+        for candidate in (process, dependency):
+            if candidate is not None and candidate.process.poll() is not None:
+                raise ExperimentError(
+                    f"{candidate.name} exited before remote TCP endpoint became ready"
+                )
         if _run(command, timeout_seconds=5).returncode == 0:
             return
         time.sleep(0.25)
@@ -371,19 +371,260 @@ def _reap_owned_remote_listeners(
     return tuple(errors)
 
 
+def _require_remote_owner(
+    inventory: NetworkInventory,
+    port: int,
+    label: str,
+) -> tuple[int, ...]:
+    owners = _remote_listener_pids(inventory, (port,)).get(port, ())
+    if not owners:
+        raise ExperimentError(f"{label} ownership could not be proven")
+    return owners
+
+
+def _start_core_ingress(
+    inventory: NetworkInventory,
+    *,
+    repository_root: Path,
+    remote_workspace: str,
+    listen_port: int,
+    target_host: str,
+    target_port: int,
+    snapshot_path: str,
+    log_path: Path,
+) -> ManagedProcess:
+    ingress_helper = f"{remote_workspace}/ingress.py"
+    command = (
+        f"exec python3 {shlex.quote(ingress_helper)} "
+        "--listen-host 127.0.0.1 "
+        f"--listen-port {listen_port} "
+        f"--target-host {shlex.quote(target_host)} "
+        f"--target-port {target_port} "
+        f"--snapshot-path {shlex.quote(snapshot_path)}"
+    )
+    try:
+        transport = ssh_command(inventory.core_node, "sh", "-c", command)
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    return _start_process(
+        "Amber counted ingress",
+        transport,
+        cwd=repository_root,
+        log_path=log_path,
+    )
+
+
+def _kubectl_exec_command(
+    inventory: NetworkInventory,
+    pod: str,
+    *argv: str,
+) -> tuple[str, ...]:
+    try:
+        return ssh_command(
+            inventory.core_node,
+            "sh",
+            "-c",
+            "exec env KUBECONFIG=/etc/kubernetes/admin.conf kubectl exec "
+            f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -c ue -- "
+            + shlex.join(argv),
+        )
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+
+
+def _rfsim_route(
+    inventory: NetworkInventory,
+    pod: str,
+    destination: str,
+) -> list[Mapping[str, Any]]:
+    result = _run(
+        _kubectl_exec_command(inventory, pod, "ip", "-j", "route", "get", destination),
+        timeout_seconds=15,
+    )
+    if result.returncode != 0:
+        raise ExperimentError("RFSIM UE route probe failed")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ExperimentError("RFSIM UE route probe returned invalid JSON") from exc
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        raise ExperimentError("RFSIM UE route probe returned malformed data")
+    return payload
+
+
+def _install_rfsim_route(
+    inventory: NetworkInventory,
+    pod: str,
+    *,
+    destination: str,
+) -> bool:
+    current = _rfsim_route(inventory, pod, destination)
+    if any(item.get("dev") == RFSIM_UE_INTERFACE for item in current):
+        return False
+    prefix = f"{destination}/32"
+    result = _run(
+        _kubectl_exec_command(
+            inventory,
+            pod,
+            "ip",
+            "route",
+            "add",
+            prefix,
+            "dev",
+            RFSIM_UE_INTERFACE,
+        ),
+        timeout_seconds=15,
+    )
+    if result.returncode != 0:
+        raise ExperimentError(
+            "RFSIM experiment route could not be added without replacing existing state"
+        )
+    proven = _rfsim_route(inventory, pod, destination)
+    if not any(item.get("dev") == RFSIM_UE_INTERFACE for item in proven):
+        raise ExperimentError("RFSIM experiment route did not bind to tun_srsue1")
+    return True
+
+
+def _remove_rfsim_route(
+    inventory: NetworkInventory,
+    pod: str,
+    *,
+    destination: str,
+) -> None:
+    prefix = f"{destination}/32"
+    result = _run(
+        _kubectl_exec_command(
+            inventory,
+            pod,
+            "ip",
+            "route",
+            "del",
+            prefix,
+            "dev",
+            RFSIM_UE_INTERFACE,
+        ),
+        timeout_seconds=15,
+    )
+    if result.returncode != 0:
+        raise ExperimentError("RFSIM experiment route cleanup failed")
+
+
+def _ue_relay_command(
+    inventory: NetworkInventory,
+    *,
+    pod: str,
+    pdu_address: str,
+    target_host: str,
+    target_port: int,
+    marker: str,
+) -> tuple[str, ...]:
+    script = r'''
+import socket, sys, threading
+listen_port = int(sys.argv[1])
+source_ip = sys.argv[2]
+target_host = sys.argv[3]
+target_port = int(sys.argv[4])
+marker = sys.argv[5]
+
+def pump(src, dst):
+    try:
+        while True:
+            data = src.recv(65536)
+            if not data:
+                break
+            dst.sendall(data)
+    except OSError:
+        pass
+    finally:
+        try: dst.shutdown(socket.SHUT_WR)
+        except OSError: pass
+
+def handle(client):
+    upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        upstream.setsockopt(socket.SOL_SOCKET, 25, b'tun_srsue1\0')
+        upstream.bind((source_ip, 0))
+        upstream.settimeout(10)
+        upstream.connect((target_host, target_port))
+        upstream.settimeout(None)
+        a = threading.Thread(target=pump, args=(client, upstream), daemon=True)
+        b = threading.Thread(target=pump, args=(upstream, client), daemon=True)
+        a.start(); b.start(); a.join(); b.join()
+    finally:
+        try: client.close()
+        except OSError: pass
+        try: upstream.close()
+        except OSError: pass
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(('127.0.0.1', listen_port))
+server.listen(32)
+while True:
+    client, _ = server.accept()
+    threading.Thread(target=handle, args=(client,), daemon=True).start()
+'''.strip()
+    return _kubectl_exec_command(
+        inventory,
+        pod,
+        "python3",
+        "-u",
+        "-c",
+        script,
+        str(RFSIM_UE_RELAY_PORT),
+        pdu_address,
+        target_host,
+        str(target_port),
+        marker,
+    )
+
+
+def _cleanup_ue_relay(
+    inventory: NetworkInventory,
+    *,
+    pod: str,
+    marker: str,
+) -> None:
+    script = r'''
+import os, signal, sys
+marker = sys.argv[1].encode()
+for value in os.listdir('/proc'):
+    if not value.isdigit() or int(value) <= 1:
+        continue
+    try:
+        command = open(f'/proc/{value}/cmdline', 'rb').read()
+    except OSError:
+        continue
+    if marker in command:
+        try: os.kill(int(value), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError): pass
+'''.strip()
+    result = _run(
+        _kubectl_exec_command(inventory, pod, "python3", "-c", script, marker),
+        timeout_seconds=15,
+    )
+    if result.returncode != 0:
+        raise ExperimentError("RFSIM UE relay cleanup failed")
+
+
 class RfsimEdgeTransportSession:
     def __init__(
         self,
         *,
         inventory: NetworkInventory,
+        ue_pod: str,
         endpoint: MQTTEndpoint,
         edge_forward_port: int,
         remote_ingress_port: int,
         snapshot_remote_path: str,
         processes: list[ManagedProcess],
         owned_remote_pids: Mapping[int, Sequence[int]],
+        relay_marker: str,
+        route_destination: str,
+        route_installed: bool,
     ) -> None:
         self.inventory = inventory
+        self.ue_pod = ue_pod
         self._endpoint = endpoint
         self.edge_forward_port = edge_forward_port
         self.remote_ingress_port = remote_ingress_port
@@ -393,6 +634,10 @@ class RfsimEdgeTransportSession:
             int(port): tuple(sorted({int(pid) for pid in pids}))
             for port, pids in owned_remote_pids.items()
         }
+        self.relay_marker = relay_marker
+        self.route_destination = route_destination
+        self.route_installed = route_installed
+        self._last_snapshot: IngressSnapshot | None = None
         self._cleanup_errors: list[str] = []
         self._stopped = False
 
@@ -414,25 +659,38 @@ class RfsimEdgeTransportSession:
             raise ExperimentError("RFSIM Amber ingress snapshot is invalid JSON") from exc
         if not isinstance(value, dict):
             raise ExperimentError("RFSIM Amber ingress snapshot must be a JSON object")
-        return IngressSnapshot.from_dict(value)
+        self._last_snapshot = IngressSnapshot.from_dict(value)
+        return self._last_snapshot
 
     def stop(self) -> None:
         if self._stopped:
             return
+        try:
+            self.snapshot()
+        except Exception:
+            pass
         for process in reversed(self.processes):
             try:
                 process.stop()
             except Exception as exc:
                 self._cleanup_errors.append(f"{process.name}: {exc}")
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            if (
-                _local_port_is_closed(self._endpoint.port)
-                and _remote_port_is_closed(self.inventory, self.remote_ingress_port)
-                and _remote_port_is_closed(self.inventory, self.edge_forward_port)
-            ):
-                break
-            time.sleep(0.25)
+        try:
+            _cleanup_ue_relay(
+                self.inventory,
+                pod=self.ue_pod,
+                marker=self.relay_marker,
+            )
+        except Exception as exc:
+            self._cleanup_errors.append(f"UE relay cleanup: {exc}")
+        if self.route_installed:
+            try:
+                _remove_rfsim_route(
+                    self.inventory,
+                    self.ue_pod,
+                    destination=self.route_destination,
+                )
+            except Exception as exc:
+                self._cleanup_errors.append(f"UE route cleanup: {exc}")
         if not (
             _remote_port_is_closed(self.inventory, self.remote_ingress_port)
             and _remote_port_is_closed(self.inventory, self.edge_forward_port)
@@ -445,18 +703,19 @@ class RfsimEdgeTransportSession:
         if not _remote_port_is_closed(self.inventory, self.remote_ingress_port):
             self._cleanup_errors.append("remote counted ingress still listens")
         if not _remote_port_is_closed(self.inventory, self.edge_forward_port):
-            self._cleanup_errors.append("remote edge MQTT forward still listens")
+            self._cleanup_errors.append("remote UE port-forward still listens")
         self._stopped = True
 
     def evidence(self) -> Mapping[str, Any]:
-        snapshot = None
-        if not self._stopped:
+        snapshot = self._last_snapshot
+        if snapshot is None and not self._stopped:
             try:
-                snapshot = self.snapshot().to_dict()
+                snapshot = self.snapshot()
             except Exception:
                 snapshot = None
         return {
             "backend": "rfsim",
+            "ue_interface": RFSIM_UE_INTERFACE,
             "publisher_endpoint": {
                 "host": self._endpoint.host,
                 "port": self._endpoint.port,
@@ -464,12 +723,10 @@ class RfsimEdgeTransportSession:
             "remote_ingress": {
                 "host": "127.0.0.1",
                 "port": self.remote_ingress_port,
-                "snapshot": snapshot,
+                "snapshot": snapshot.to_dict() if snapshot is not None else None,
             },
-            "remote_edge_forward": {
-                "host": "127.0.0.1",
-                "port": self.edge_forward_port,
-            },
+            "ue_relay": {"pod": self.ue_pod, "port": RFSIM_UE_RELAY_PORT},
+            "route_created": self.route_installed,
             "stopped": self._stopped,
             "cleanup_errors": list(self._cleanup_errors),
             "cleanup_valid": self._stopped and not self._cleanup_errors,
@@ -477,7 +734,7 @@ class RfsimEdgeTransportSession:
 
 
 class RfsimEdgeTransportAdapter:
-    """Expose the upstream-provisioned RFSIM UE edge broker to Amber."""
+    """Expose an already-ready RFSIM UE without modifying its Deployment."""
 
     def __init__(
         self,
@@ -499,12 +756,15 @@ class RfsimEdgeTransportAdapter:
         *,
         run_id: str,
         ue_pod: str,
+        pdu_address: str,
+        core_address: str,
+        central_port: int,
         remote_workspace: str,
         run_directory: Path,
     ) -> RfsimEdgeTransportSession:
-        validate_run_id(run_id)
+        run_id = validate_run_id(run_id)
         if not ue_pod.strip():
-            raise ExperimentError("RFSIM edge transport requires the live UE pod")
+            raise ExperimentError("RFSIM transport requires the live UE pod")
         if not remote_workspace.startswith("/tmp/synthran/"):
             raise ExperimentError("RFSIM edge workspace is outside the run-owned root")
         for port in (self.remote_ingress_port, self.edge_forward_port):
@@ -513,40 +773,24 @@ class RfsimEdgeTransportAdapter:
         if not _local_port_is_closed(self.local_port):
             raise ExperimentError("RFSIM Amber local publisher port is already in use")
 
+        route_installed = _install_rfsim_route(
+            self.inventory,
+            ue_pod,
+            destination=core_address,
+        )
         snapshot_remote = f"{remote_workspace}/amber-ingress-snapshot.json"
         logs = run_directory / "logs"
         processes: list[ManagedProcess] = []
         owned: dict[int, tuple[int, ...]] = {}
-        edge_forward = _start_process(
-            "RFSIM edge MQTT port-forward",
-            ssh_command(
-                self.inventory.core_node,
-                "sh",
-                "-c",
-                "KUBECONFIG=/etc/kubernetes/admin.conf kubectl port-forward "
-                f"-n {KUBERNETES_NAMESPACE} pod/{shlex.quote(ue_pod)} "
-                f"{self.edge_forward_port}:1883 --address 127.0.0.1",
-            ),
-            cwd=self.repository_root,
-            log_path=logs / "amber-edge-port-forward.log",
-        )
-        processes.append(edge_forward)
+        marker = f"synthran-relay-{run_id}"
         try:
-            _wait_remote_tcp(
-                self.inventory,
-                port=self.edge_forward_port,
-                process=edge_forward,
-            )
-            owned[self.edge_forward_port] = _require_remote_owner(
-                self.inventory, self.edge_forward_port, "RFSIM edge MQTT forward"
-            )
             ingress = _start_core_ingress(
                 self.inventory,
                 repository_root=self.repository_root,
                 remote_workspace=remote_workspace,
                 listen_port=self.remote_ingress_port,
                 target_host="127.0.0.1",
-                target_port=self.edge_forward_port,
+                target_port=central_port,
                 snapshot_path=snapshot_remote,
                 log_path=logs / "amber-ingress.log",
             )
@@ -559,12 +803,52 @@ class RfsimEdgeTransportAdapter:
             owned[self.remote_ingress_port] = _require_remote_owner(
                 self.inventory, self.remote_ingress_port, "RFSIM counted ingress"
             )
+
+            relay = _start_process(
+                "RFSIM UE PDU relay",
+                _ue_relay_command(
+                    self.inventory,
+                    pod=ue_pod,
+                    pdu_address=pdu_address,
+                    target_host=core_address,
+                    target_port=self.remote_ingress_port,
+                    marker=marker,
+                ),
+                cwd=self.repository_root,
+                log_path=logs / "amber-ue-relay.log",
+            )
+            processes.append(relay)
+
+            edge_forward = _start_process(
+                "RFSIM UE port-forward",
+                ssh_command(
+                    self.inventory.core_node,
+                    "sh",
+                    "-c",
+                    "exec env KUBECONFIG=/etc/kubernetes/admin.conf kubectl port-forward "
+                    f"-n {KUBERNETES_NAMESPACE} pod/{shlex.quote(ue_pod)} "
+                    f"{self.edge_forward_port}:{RFSIM_UE_RELAY_PORT} --address 127.0.0.1",
+                ),
+                cwd=self.repository_root,
+                log_path=logs / "amber-ue-port-forward.log",
+            )
+            processes.append(edge_forward)
+            _wait_remote_tcp(
+                self.inventory,
+                port=self.edge_forward_port,
+                process=edge_forward,
+                dependency=relay,
+            )
+            owned[self.edge_forward_port] = _require_remote_owner(
+                self.inventory, self.edge_forward_port, "RFSIM UE port-forward"
+            )
+
             local_forward = _start_process(
                 "RFSIM Amber publisher SSH forward",
                 _local_forward_command(
                     self.inventory,
                     local_port=self.local_port,
-                    remote_port=self.remote_ingress_port,
+                    remote_port=self.edge_forward_port,
                 ),
                 cwd=self.repository_root,
                 log_path=logs / "amber-publisher-forward.log",
@@ -573,18 +857,39 @@ class RfsimEdgeTransportAdapter:
             _wait_local_tcp(self.local_port, process=local_forward)
         except Exception:
             for process in reversed(processes):
-                process.stop()
+                try:
+                    process.stop()
+                except Exception:
+                    pass
+            try:
+                _cleanup_ue_relay(self.inventory, pod=ue_pod, marker=marker)
+            except Exception:
+                pass
+            if route_installed:
+                try:
+                    _remove_rfsim_route(
+                        self.inventory,
+                        ue_pod,
+                        destination=core_address,
+                    )
+                except Exception:
+                    pass
             if owned:
                 _reap_owned_remote_listeners(self.inventory, owned)
             raise
+
         return RfsimEdgeTransportSession(
             inventory=self.inventory,
+            ue_pod=ue_pod,
             endpoint=MQTTEndpoint("127.0.0.1", self.local_port),
             edge_forward_port=self.edge_forward_port,
             remote_ingress_port=self.remote_ingress_port,
             snapshot_remote_path=snapshot_remote,
             processes=processes,
             owned_remote_pids=owned,
+            relay_marker=marker,
+            route_destination=core_address,
+            route_installed=route_installed,
         )
 
 
@@ -699,45 +1004,6 @@ def _physical_local_forward_command(
         "-L",
         f"127.0.0.1:{local_port}:{target_host}:{target_port}",
         f"{endpoint.user}@{endpoint.host}",
-    )
-
-
-def _require_remote_owner(
-    inventory: NetworkInventory,
-    port: int,
-    label: str,
-) -> tuple[int, ...]:
-    owners = _remote_listener_pids(inventory, (port,)).get(port, ())
-    if not owners:
-        raise ExperimentError(f"{label} ownership could not be proven")
-    return owners
-
-
-def _start_core_ingress(
-    inventory: NetworkInventory,
-    *,
-    repository_root: Path,
-    remote_workspace: str,
-    listen_port: int,
-    target_host: str,
-    target_port: int,
-    snapshot_path: str,
-    log_path: Path,
-) -> ManagedProcess:
-    ingress_helper = f"{remote_workspace}/ingress.py"
-    command = (
-        f"exec python3 {shlex.quote(ingress_helper)} "
-        "--listen-host 127.0.0.1 "
-        f"--listen-port {listen_port} "
-        f"--target-host {shlex.quote(target_host)} "
-        f"--target-port {target_port} "
-        f"--snapshot-path {shlex.quote(snapshot_path)}"
-    )
-    return _start_process(
-        "Amber counted ingress",
-        ssh_command(inventory.core_node, "sh", "-c", command),
-        cwd=repository_root,
-        log_path=log_path,
     )
 
 
@@ -884,26 +1150,23 @@ class PhysicalEdgeTransportAdapter:
 
         remote_workspace = f"/tmp/synthran/{run_id}"
         logs = run_directory / "logs"
-        try:
-            result = _run(
-                ssh_command(
-                    self.inventory.core_node,
-                    "mkdir",
-                    "-p",
-                    remote_workspace,
-                ),
-                timeout_seconds=10,
-            )
-            if result.returncode != 0:
-                raise ExperimentError("physical Amber workspace creation failed")
-            _transfer_file(
-                self.inventory,
-                self.repository_root / "synthran" / "ingress.py",
-                f"{remote_workspace}/ingress.py",
-                label="physical counted-ingress helper transfer",
-            )
-        except Exception:
-            raise
+        result = _run(
+            ssh_command(
+                self.inventory.core_node,
+                "mkdir",
+                "-p",
+                remote_workspace,
+            ),
+            timeout_seconds=10,
+        )
+        if result.returncode != 0:
+            raise ExperimentError("physical Amber workspace creation failed")
+        _transfer_file(
+            self.inventory,
+            self.repository_root / "synthran" / "ingress.py",
+            f"{remote_workspace}/ingress.py",
+            label="physical counted-ingress helper transfer",
+        )
 
         snapshot_remote = f"{remote_workspace}/amber-ingress-snapshot.json"
         processes: list[ManagedProcess] = []
@@ -943,7 +1206,10 @@ class PhysicalEdgeTransportAdapter:
             _wait_local_tcp(self.local_port, process=publisher_forward)
         except Exception:
             for process in reversed(processes):
-                process.stop()
+                try:
+                    process.stop()
+                except Exception:
+                    pass
             if owned:
                 _reap_owned_remote_listeners(self.inventory, owned)
             raise
