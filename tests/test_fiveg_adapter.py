@@ -7,6 +7,7 @@ import unittest
 
 from synthran.adapters.fiveg import (
     CommandResult,
+    FIVEG_EVENT_SCHEMA,
     FIVEG_SPEC_SCHEMA,
     FiveGAdapter,
     FiveGAdapterError,
@@ -20,11 +21,21 @@ class RecordingRunner:
         self.responses = responses
         self.commands: list[tuple[str, ...]] = []
 
-    def __call__(self, command, cwd, environment, timeout_seconds):
+    def __call__(self, command, cwd, environment, timeout_seconds, event_sink):
         del cwd, environment, timeout_seconds
         command = tuple(command)
         self.commands.append(command)
         verb = command[1]
+        if event_sink is not None and verb == "up":
+            event_sink(
+                {
+                    "schema": FIVEG_EVENT_SCHEMA,
+                    "deployment_id": "deployment-001",
+                    "phase": "deployment",
+                    "event": "started",
+                    "component": "5g-stack",
+                }
+            )
         payload = self.responses[verb]
         return CommandResult(0, json.dumps(payload), "")
 
@@ -104,8 +115,25 @@ class AdapterInvocationTests(unittest.TestCase):
         )
         for command in self.runner.commands:
             self.assertEqual("--json", command[-1])
+            self.assertNotIn("--events", command)
         self.assertIn("--resume", self.runner.commands[2])
         self.assertIn("--no-setup", self.runner.commands[5])
+
+    def test_event_sink_requests_and_relays_versioned_upstream_events(self) -> None:
+        events = []
+        adapter = FiveGAdapter(
+            checkout=self.adapter.checkout,
+            state_root=self.adapter.state_root,
+            runner=self.runner,
+            event_sink=events.append,
+        )
+        adapter.up(self.spec)
+        self.assertIn("--json", self.runner.commands[-1])
+        self.assertEqual("--events", self.runner.commands[-1][-1])
+        self.assertEqual(1, len(events))
+        self.assertEqual(FIVEG_EVENT_SCHEMA, events[0]["schema"])
+        self.assertEqual("deployment", events[0]["phase"])
+        self.assertEqual("started", events[0]["event"])
 
     def test_rejects_wrong_machine_schema(self) -> None:
         self.runner.responses["status"] = {"schema": "unexpected"}
@@ -113,8 +141,8 @@ class AdapterInvocationTests(unittest.TestCase):
             self.adapter.status("deployment-001")
 
     def test_nonzero_upstream_exit_surfaces_last_stderr_line(self) -> None:
-        def failed(command, cwd, environment, timeout_seconds):
-            del command, cwd, environment, timeout_seconds
+        def failed(command, cwd, environment, timeout_seconds, event_sink):
+            del command, cwd, environment, timeout_seconds, event_sink
             return CommandResult(
                 7,
                 "",
@@ -132,9 +160,31 @@ class AdapterInvocationTests(unittest.TestCase):
         ):
             adapter.down("deployment-001")
 
+    def test_failure_detail_ignores_structured_progress_json(self) -> None:
+        event = json.dumps(
+            {
+                "schema": FIVEG_EVENT_SCHEMA,
+                "deployment_id": "deployment-001",
+                "phase": "deployment",
+                "event": "failed",
+            }
+        )
+
+        def failed(command, cwd, environment, timeout_seconds, event_sink):
+            del command, cwd, environment, timeout_seconds, event_sink
+            return CommandResult(2, "", event + "\nfiveg: deployment command failed\n")
+
+        adapter = FiveGAdapter(
+            checkout=self.adapter.checkout,
+            state_root=self.adapter.state_root,
+            runner=failed,
+        )
+        with self.assertRaisesRegex(FiveGAdapterError, "deployment command failed"):
+            adapter.up(self.spec)
+
     def test_nonzero_upstream_exit_uses_stdout_when_stderr_is_empty(self) -> None:
-        def failed(command, cwd, environment, timeout_seconds):
-            del command, cwd, environment, timeout_seconds
+        def failed(command, cwd, environment, timeout_seconds, event_sink):
+            del command, cwd, environment, timeout_seconds, event_sink
             return CommandResult(2, "provider network acquisition failed\n", "")
 
         adapter = FiveGAdapter(
