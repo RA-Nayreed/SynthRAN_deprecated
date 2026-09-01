@@ -91,7 +91,7 @@ def configure_run_parser(parser: argparse.ArgumentParser) -> None:
         "--known-hosts",
         type=Path,
         default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
-        help="strict SSH known-hosts file",
+        help="optional strict SSH known-hosts override; OpenSSH defaults are used otherwise",
     )
     run.add_argument(
         "--keep-resources",
@@ -136,15 +136,17 @@ def _component(
     )
 
 
-def _known_hosts(args: argparse.Namespace) -> Path:
+def _known_hosts(args: argparse.Namespace) -> Path | None:
     if args.known_hosts is None:
-        raise SynthRANError(
-            "run requires --known-hosts or SYNTHRAN_SLICES_KNOWN_HOSTS"
-        )
+        return None
     path = Path(args.known_hosts).expanduser().resolve()
     if not path.is_file():
-        raise SynthRANError("strict SSH known-hosts file is missing")
+        raise SynthRANError("strict SSH known-hosts override is missing")
     return path
+
+
+def _ssh_environment(known_hosts: Path | None) -> dict[str, str]:
+    return {"SYNTHRAN_KNOWN_HOSTS": str(known_hosts)} if known_hosts is not None else {}
 
 
 def _ue_selection(ue: str | None) -> dict[str, list[str]]:
@@ -173,7 +175,7 @@ def _provider_request(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _deployment_spec(args: argparse.Namespace, *, known_hosts: Path) -> dict[str, Any]:
+def _deployment_spec(args: argparse.Namespace, *, known_hosts: Path | None) -> dict[str, Any]:
     physical = args.radio == "r2lab"
     if physical and (not args.device or not args.ue or not args.r2lab_slice):
         raise SynthRANError("physical run requires --device, --ue, and --slice")
@@ -205,7 +207,7 @@ def _deployment_spec(args: argparse.Namespace, *, known_hosts: Path) -> dict[str
         "scenario": {"type": "none"},
         "r2lab": {
             "username": str(args.r2lab_slice or ""),
-            "known_hosts_file": str(known_hosts) if physical else "",
+            "known_hosts_file": str(known_hosts) if physical and known_hosts is not None else "",
             "strict_host_key_checking": True,
         },
     }
@@ -262,7 +264,7 @@ def _status_ready(adapter: FiveGAdapter, run_id: str) -> Mapping[str, Any]:
 def _deploy(
     args: argparse.Namespace,
     *,
-    known_hosts: Path,
+    known_hosts: Path | None,
     progress: RunProgress,
 ) -> tuple[FiveGAdapter, Mapping[str, Any], NetworkInventory, Path]:
     lock = load_lock(args.lock)
@@ -340,7 +342,7 @@ def _run_rfsim(
     args: argparse.Namespace,
     *,
     progress: RunProgress,
-    known_hosts: Path,
+    known_hosts: Path | None,
 ) -> dict[str, object]:
     progress.start("network", "5g-Ansible provider/deployment and path observation")
     adapter, manifest, inventory, manifest_path = _deploy(
@@ -353,7 +355,7 @@ def _run_rfsim(
     lock = load_lock(args.lock)
     network_directory = args.network_run_root.expanduser().resolve() / args.run_id
     network_evidence = network_directory / "network-evidence.json"
-    with scoped_environment({"SYNTHRAN_KNOWN_HOSTS": str(known_hosts)}):
+    with scoped_environment(_ssh_environment(known_hosts)):
         verification = verify_network_path(
             inventory=inventory,
             lock=lock,
@@ -369,7 +371,7 @@ def _run_rfsim(
     evidence = experiment_directory / "experiment-evidence.json"
     progress.start("workload", "deterministic Amber experiment")
     if not evidence.is_file():
-        with scoped_environment({"SYNTHRAN_KNOWN_HOSTS": str(known_hosts)}):
+        with scoped_environment(_ssh_environment(known_hosts)):
             result = execute_amber_experiment(
                 inventory=inventory,
                 lock=lock,
@@ -415,7 +417,7 @@ def _run_physical(
     args: argparse.Namespace,
     *,
     progress: RunProgress,
-    known_hosts: Path,
+    known_hosts: Path | None,
 ) -> dict[str, object]:
     progress.start("network", "5g-Ansible provider/physical deployment and status gate")
     adapter, manifest, inventory, _manifest_path = _deploy(
@@ -431,21 +433,22 @@ def _run_physical(
     evidence = experiment_directory / "experiment-evidence.json"
     progress.start("workload", "deterministic Amber experiment through physical UE")
     if not evidence.is_file():
-        result = execute_physical_amber_experiment(
-            inventory=inventory,
-            lock=load_lock(args.lock),
-            dependency_root=args.deps_root,
-            run_id=args.run_id,
-            ue=str(args.ue),
-            repository_root=repository_root(),
-            run_root=args.experiment_root,
-            collection_seconds=args.collection_seconds,
-            minimum_per_sensor=args.minimum_per_sensor,
-            iot_profile=args.iot_profile,
-            iot_seed=args.iot_seed,
-            sensor_period_seconds=args.sensor_period,
-            progress=progress.child_stream,
-        )
+        with scoped_environment(_ssh_environment(known_hosts)):
+            result = execute_physical_amber_experiment(
+                inventory=inventory,
+                lock=load_lock(args.lock),
+                dependency_root=args.deps_root,
+                run_id=args.run_id,
+                ue=str(args.ue),
+                repository_root=repository_root(),
+                run_root=args.experiment_root,
+                collection_seconds=args.collection_seconds,
+                minimum_per_sensor=args.minimum_per_sensor,
+                iot_profile=args.iot_profile,
+                iot_seed=args.iot_seed,
+                sensor_period_seconds=args.sensor_period,
+                progress=progress.child_stream,
+            )
         if not result.ready:
             raise SynthRANError("physical Amber experiment was not accepted")
         progress.done("workload", "accepted")
