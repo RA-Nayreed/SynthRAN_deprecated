@@ -48,7 +48,6 @@ from synthran.research.amber_runtime import execute_amber_research_experiment
 from synthran.research.calibration import calibrate_capacity
 from synthran.research.v2 import AmberResearchSpec
 from synthran.run_events import RunEventStream
-from synthran.slices_controller import SlicesControllerError, verify_slices_controller
 
 
 PUBLIC_COMMANDS = (
@@ -81,13 +80,14 @@ def _add_provider_context(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--slices-project",
         default=os.environ.get("SYNTHRAN_SLICES_PROJECT"),
-        help="SLICES project (or SYNTHRAN_SLICES_PROJECT)",
+        help="SLICES project delegated to 5g-Ansible",
     )
     parser.add_argument(
         "--slices-experiment",
         default=os.environ.get("SYNTHRAN_SLICES_EXPERIMENT"),
-        help="existing provider experiment to verify",
+        help="SLICES experiment delegated to 5g-Ansible",
     )
+    parser.add_argument("--slices-duration", default="4h")
 
 
 def _add_operator_commands(root: argparse._SubParsersAction) -> None:
@@ -227,7 +227,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="synthran",
         description=(
-            "Run reproducible AMBER experiments while 5g-Ansible owns the 5G infrastructure."
+            "Run reproducible AMBER experiments while 5g-Ansible owns provider and 5G infrastructure."
         ),
     )
     parser.add_subparsers(dest="command", required=True)
@@ -578,33 +578,29 @@ def _adapter(args: argparse.Namespace) -> FiveGAdapter:
 def _doctor(args: argparse.Namespace) -> int:
     adapter = _adapter(args)
     capabilities = adapter.capabilities()
-    checks: list[dict[str, object]] = [
-        {"name": "fiveg-ansible", "passed": True, "detail": "machine API available"}
-    ]
     known_hosts = Path(args.known_hosts).expanduser().resolve() if args.known_hosts else Path(".")
     if args.radio == "r2lab" and not known_hosts.is_file():
         raise SynthRANError("doctor --radio r2lab requires an existing --known-hosts file")
     probe = argparse.Namespace(**vars(args))
     probe.run_id = "doctor-probe"
     with tempfile.TemporaryDirectory(prefix="synthran-doctor-") as directory:
-        path = write_spec(Path(directory) / "request.json", _deployment_spec(probe, known_hosts=known_hosts))
-        plan = adapter.plan(path)
-    checks.append({"name": "deployment-request", "passed": True, "detail": plan.get("spec", {})})
-    if args.slices_experiment:
-        if not args.slices_project:
-            raise SynthRANError("provider verification requires --slices-project or SYNTHRAN_SLICES_PROJECT")
-        provider = verify_slices_controller(
-            lock=load_lock(args.lock),
-            project=args.slices_project,
-            experiment=args.slices_experiment,
-            timeout_seconds=args.timeout,
+        path = write_spec(
+            Path(directory) / "request.json",
+            _deployment_spec(probe, known_hosts=known_hosts),
         )
-        checks.append({"name": "provider", "passed": provider.ready, "detail": f"{args.slices_project}/{args.slices_experiment}"})
-    ready = all(check["passed"] is True for check in checks)
+        plan = adapter.plan(path)
+    checks = [
+        {"name": "fiveg-ansible", "passed": True, "detail": "machine API available"},
+        {
+            "name": "deployment-request",
+            "passed": True,
+            "detail": plan.get("spec", {}),
+        },
+    ]
     payload = {
         "schema": "synthran/doctor/v2",
         "radio": args.radio,
-        "ready": ready,
+        "ready": True,
         "checks": checks,
         "capabilities": capabilities,
     }
@@ -613,9 +609,9 @@ def _doctor(args: argparse.Namespace) -> int:
     else:
         print(f"SynthRAN doctor ({args.radio})")
         for check in checks:
-            print(f"[{'PASS' if check['passed'] else 'FAIL'}] {check['name']}: {check['detail']}")
-        print(f"Result: {'READY' if ready else 'NOT READY'}")
-    return 0 if ready else 2
+            print(f"[PASS] {check['name']}: {check['detail']}")
+        print("Result: READY")
+    return 0
 
 
 def _candidate_evidence(args: argparse.Namespace) -> tuple[Path, ...]:
@@ -728,6 +724,7 @@ def _validate_lifecycle_run(args: argparse.Namespace) -> None:
         "--run-id": args.run_id,
         "--core-node": args.core_node,
         "--ran-node": args.ran_node,
+        "--slices-project": args.slices_project,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -784,7 +781,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         FiveGAdapterError,
         FiveGAnsibleError,
         PrivacyError,
-        SlicesControllerError,
         OSError,
         ValueError,
     ) as exc:
