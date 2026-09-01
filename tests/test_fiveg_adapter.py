@@ -112,18 +112,41 @@ class AdapterInvocationTests(unittest.TestCase):
         with self.assertRaisesRegex(FiveGAdapterError, "unexpected schema"):
             self.adapter.status("deployment-001")
 
-    def test_rejects_nonzero_upstream_exit(self) -> None:
+    def test_nonzero_upstream_exit_surfaces_last_stderr_line(self) -> None:
         def failed(command, cwd, environment, timeout_seconds):
             del command, cwd, environment, timeout_seconds
-            return CommandResult(7, "", "failed")
+            return CommandResult(
+                7,
+                "",
+                "Traceback omitted\nFiveGError: command failed; see deploy.log\n",
+            )
 
         adapter = FiveGAdapter(
             checkout=self.adapter.checkout,
             state_root=self.adapter.state_root,
             runner=failed,
         )
-        with self.assertRaisesRegex(FiveGAdapterError, "failed"):
+        with self.assertRaisesRegex(
+            FiveGAdapterError,
+            "5g-Ansible down failed: FiveGError: command failed; see deploy.log",
+        ):
             adapter.down("deployment-001")
+
+    def test_nonzero_upstream_exit_uses_stdout_when_stderr_is_empty(self) -> None:
+        def failed(command, cwd, environment, timeout_seconds):
+            del command, cwd, environment, timeout_seconds
+            return CommandResult(2, "provider network acquisition failed\n", "")
+
+        adapter = FiveGAdapter(
+            checkout=self.adapter.checkout,
+            state_root=self.adapter.state_root,
+            runner=failed,
+        )
+        with self.assertRaisesRegex(
+            FiveGAdapterError,
+            "provider network acquisition failed",
+        ):
+            adapter.up(self.spec)
 
 
 if __name__ == "__main__":
