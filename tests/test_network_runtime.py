@@ -49,7 +49,9 @@ class VerificationRunner:
             )
         if "app=open5gs,nf=upf,name=upf1" in rendered:
             return CommandResult(0, json.dumps({"items": [_pod("upf-pod")]}))
-        if "grep -q 'Cell was activated'" in rendered:
+        # ssh_command shell-quotes the grep argument, so match the invariant
+        # rather than one particular quoting representation.
+        if "Cell was activated" in rendered and "/var/log/gnb.log" in rendered:
             return CommandResult(0, "")
         if "ip -j address show dev tun_srsue1" in rendered:
             return CommandResult(
