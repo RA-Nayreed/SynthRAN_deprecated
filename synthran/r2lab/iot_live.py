@@ -1,14 +1,14 @@
-"""Live experiment-side helpers for Amber transport through a selected R2Lab UE.
+"""Experiment-side Amber transport helpers for an upstream-provisioned R2Lab UE.
 
-This module deliberately owns no R2Lab reservation, radio, core, RAN, or UE
-activation lifecycle.  Those are 5g-Ansible responsibilities.  It contains
-only the narrow experiment mechanics needed after a physical deployment has
-already been accepted: bind traffic to the selected UE interface, expose a
-run-owned relay, host a run-owned MQTT collector, and observe exact counters.
+This module owns no reservation, radio, core, RAN, or UE activation lifecycle.
+The selected UE and its management transport come from the inventory generated
+by 5g-Ansible. SynthRAN only binds experiment traffic to the already-provisioned
+UE data interface and observes experiment-local state.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import ipaddress
 import json
@@ -31,8 +31,6 @@ from synthran.experiment.resources import (
 )
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.live_preflight import CommandResult
-from synthran.r2lab.hardware import UES, UeProfile
-from synthran.r2lab.resources import ue_gateway_command
 
 
 LOCAL_UE_RELAY_PORT = 18887
@@ -43,6 +41,17 @@ _RELAY_MARKER = "SYNTHRAN_R2LAB_RELAY"
 
 class R2LabIoTLiveError(ExperimentError):
     """Raised when the accepted physical experiment path cannot be used safely."""
+
+
+@dataclass(frozen=True)
+class PhysicalUeEndpoint:
+    """Management facts for one physical UE, sourced only from upstream inventory."""
+
+    name: str
+    host: str
+    user: str
+    mode: str
+    ssh_common_args: tuple[str, ...]
 
 
 def _suffix(run_id: str) -> str:
@@ -159,16 +168,49 @@ def render_physical_central_objects(
     return config, deployment
 
 
-def _validate_ue(ue: str) -> UeProfile:
-    value = ue.strip().lower()
-    profile = UES.get(value)
-    if profile is None or not profile.executable or not profile.is_fr1_quectel:
+def _validate_ue(inventory: NetworkInventory, ue: str) -> PhysicalUeEndpoint:
+    """Resolve one wwan0-capable experiment endpoint from upstream inventory facts."""
+
+    value = ue.strip()
+    host = inventory.ue(value)
+    user = host.variables.get("ansible_user")
+    address = host.variables.get("ansible_host", host.name)
+    mode = host.variables.get("mode", "")
+    common = host.variables.get("ansible_ssh_common_args", "")
+    if not user or not address:
+        raise R2LabIoTLiveError("selected physical UE inventory is missing SSH identity")
+    if mode not in {"mbim", "qmi"}:
         raise R2LabIoTLiveError(
-            "physical workload requires one executable FR1 Quectel UE"
+            "physical Amber workload requires an upstream UE with a wwan0 modem mode"
         )
-    if profile.data_interface != UE_INTERFACE:
-        raise R2LabIoTLiveError("selected physical UE does not expose wwan0")
-    return profile
+    try:
+        common_args = tuple(shlex.split(common)) if common else ()
+    except ValueError as exc:
+        raise R2LabIoTLiveError(
+            "selected physical UE inventory contains malformed SSH arguments"
+        ) from exc
+    return PhysicalUeEndpoint(
+        name=host.name,
+        host=address,
+        user=user,
+        mode=mode,
+        ssh_common_args=common_args,
+    )
+
+
+def _ue_command(endpoint: PhysicalUeEndpoint, *remote: str) -> tuple[str, ...]:
+    if not remote:
+        raise R2LabIoTLiveError("physical UE command requires explicit remote argv")
+    return (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        *endpoint.ssh_common_args,
+        f"{endpoint.user}@{endpoint.host}",
+        shlex.join(remote),
+    )
 
 
 _RELAY_SCRIPT = r'''
@@ -208,7 +250,7 @@ sock.close()
 
 def build_physical_ue_stdio_relay_command(
     *,
-    slice_name: str,
+    inventory: NetworkInventory,
     ue: str,
     run_id: str,
     central_address: str,
@@ -216,7 +258,7 @@ def build_physical_ue_stdio_relay_command(
     interface: str = UE_INTERFACE,
 ) -> tuple[str, ...]:
     validate_run_id(run_id)
-    profile = _validate_ue(ue)
+    endpoint = _validate_ue(inventory, ue)
     try:
         address = ipaddress.ip_address(central_address)
     except ValueError as exc:
@@ -227,9 +269,8 @@ def build_physical_ue_stdio_relay_command(
         raise R2LabIoTLiveError("central broker port is invalid")
     if interface != UE_INTERFACE:
         raise R2LabIoTLiveError("physical relay must bind to wwan0")
-    return ue_gateway_command(
-        slice_name,
-        profile,
+    return _ue_command(
+        endpoint,
         "python3",
         "-c",
         _RELAY_SCRIPT,
@@ -258,14 +299,13 @@ def route_uses_wwan0(text: str, destination: str) -> bool:
 
 def _ue_read(
     *,
-    slice_name: str,
-    profile: UeProfile,
+    endpoint: PhysicalUeEndpoint,
     command: Sequence[str],
     label: str = "physical UE workload precondition",
     timeout_seconds: int = 30,
 ) -> CommandResult:
     result = _run(
-        ue_gateway_command(slice_name, profile, *tuple(command)),
+        _ue_command(endpoint, *tuple(command)),
         timeout_seconds=timeout_seconds,
     )
     if result.returncode != 0:
@@ -273,12 +313,11 @@ def _ue_read(
     return result
 
 
-def _ue_counter(slice_name: str, profile: UeProfile, counter: str) -> int:
+def _ue_counter(endpoint: PhysicalUeEndpoint, counter: str) -> int:
     if counter not in {"rx_bytes", "tx_bytes"}:
         raise R2LabIoTLiveError("unsupported physical UE interface counter")
     result = _ue_read(
-        slice_name=slice_name,
-        profile=profile,
+        endpoint=endpoint,
         command=("cat", f"/sys/class/net/{UE_INTERFACE}/statistics/{counter}"),
         label=f"physical UE {counter} counter probe",
     )
@@ -288,10 +327,9 @@ def _ue_counter(slice_name: str, profile: UeProfile, counter: str) -> int:
     return int(value)
 
 
-def _prove_ue_route(slice_name: str, profile: UeProfile, central_address: str) -> None:
+def _prove_ue_route(endpoint: PhysicalUeEndpoint, central_address: str) -> None:
     route = _ue_read(
-        slice_name=slice_name,
-        profile=profile,
+        endpoint=endpoint,
         command=(
             "ip",
             "-j",
@@ -309,7 +347,7 @@ def _prove_ue_route(slice_name: str, profile: UeProfile, central_address: str) -
         )
 
 
-def _ue_relay_process_count(slice_name: str, profile: UeProfile, run_id: str) -> int:
+def _ue_relay_process_count(endpoint: PhysicalUeEndpoint, run_id: str) -> int:
     validate_run_id(run_id)
     probe = r'''
 import os, sys
@@ -329,8 +367,7 @@ for entry in os.listdir('/proc'):
 print(count)
 '''.strip()
     result = _ue_read(
-        slice_name=slice_name,
-        profile=profile,
+        endpoint=endpoint,
         command=("python3", "-c", probe, _RELAY_MARKER, run_id),
         label="physical UE relay cleanup probe",
     )
