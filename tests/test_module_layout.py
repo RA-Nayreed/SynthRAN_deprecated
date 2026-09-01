@@ -29,22 +29,19 @@ class ModuleLayoutTests(unittest.TestCase):
             "lifecycle.py",
             "provider.py",
             "run_events.py",
+            "adapters/fiveg.py",
             "experiment/__init__.py",
             "experiment/live.py",
+            "experiment/physical.py",
             "experiment/resources.py",
             "network/__init__.py",
             "network/runtime.py",
-            "network/resources.py",
-            "network/rfsim.py",
             "research/__init__.py",
             "research/amber_campaign.py",
             "research/amber_runtime.py",
+            "research/calibration.py",
+            "research/path.py",
             "research/v2.py",
-            "r2lab/__init__.py",
-            "r2lab/n2.py",
-            "r2lab/resources.py",
-            "r2lab/ue_ansible.py",
-            "r2lab/upstream_roles.py",
             "utils/__init__.py",
             "utils/environment.py",
             "utils/ssh.py",
@@ -59,9 +56,18 @@ class ModuleLayoutTests(unittest.TestCase):
             "control",
             "operations",
             "resources",
+            "r2lab",
             "workspace",
         ):
             self.assertFalse((SOURCE / relative).exists(), relative)
+
+    def test_retired_deployment_layers_do_not_return(self) -> None:
+        for relative in (
+            "network/resources.py",
+            "upstream_overlay.py",
+        ):
+            self.assertFalse((SOURCE / relative).exists(), relative)
+        self.assertFalse((REPOSITORY_ROOT / "deploy" / "ansible").exists())
 
     def test_flat_duplicate_modules_do_not_return(self) -> None:
         removed = {
@@ -88,27 +94,6 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
         self.assertFalse((SOURCE / "experiment" / "runtime.py").exists())
 
-    def test_superseded_r2lab_stack_does_not_return(self) -> None:
-        r2lab = SOURCE / "r2lab"
-        removed = {
-            "authority.py",
-            "cluster_ssh.py",
-            "foundation.py",
-            "gnb.py",
-            "guards.py",
-            "handoff.py",
-            "readiness.py",
-            "runtime.py",
-            "ue_overlay.py",
-        }
-        present = {path.name for path in r2lab.iterdir() if path.is_file()}
-        self.assertTrue(removed.isdisjoint(present), sorted(removed & present))
-        self.assertTrue((r2lab / "foundation_topology.py").is_file())
-        self.assertTrue((r2lab / "n2.py").is_file())
-        self.assertTrue((r2lab / "n3xx.py").is_file())
-        self.assertTrue((r2lab / "resources.py").is_file())
-        self.assertTrue((r2lab / "ue_ansible.py").is_file())
-
     def test_synthran_is_the_only_operator_entrypoint(self) -> None:
         self.assertTrue((SOURCE / "cli.py").is_file())
         for forbidden in (
@@ -122,8 +107,7 @@ class ModuleLayoutTests(unittest.TestCase):
             "synthran/backends",
             "synthran/experiment/commands.py",
             "synthran/network/r2lab.py",
-            "synthran/r2lab/_deployment_impl.py",
-            "synthran/r2lab/qfit_activation_provider.py",
+            "synthran/r2lab",
         ):
             self.assertFalse(_tracked(forbidden), forbidden)
 
