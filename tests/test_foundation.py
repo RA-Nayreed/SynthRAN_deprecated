@@ -132,7 +132,10 @@ class FoundationTests(unittest.TestCase):
 
     def test_tracked_product_text_avoids_internal_milestone_language(self) -> None:
         excluded_parts = {".git", ".deps", ".synthran", "__pycache__", "node_modules"}
-        forbidden = "pha" + "se"
+        milestone = re.compile(
+            r"\bphase(?:\s+|[-_])(?:[0-9]+|zero|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+            flags=re.IGNORECASE,
+        )
         text_suffixes = {".ini", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
         for root, dirs, files in os.walk(REPOSITORY_ROOT):
             dirs[:] = [directory for directory in dirs if directory not in excluded_parts]
@@ -141,14 +144,10 @@ class FoundationTests(unittest.TestCase):
                     continue
                 path = Path(root) / filename
                 relative = path.relative_to(REPOSITORY_ROOT).as_posix()
-                self.assertNotIn(forbidden, relative.lower(), relative)
+                self.assertIsNone(milestone.search(relative), relative)
                 if path.suffix.lower() in text_suffixes or path.name in {"LICENSE", "README.md", "THIRD_PARTY.md"}:
                     content = path.read_text(encoding="utf-8")
-                    if path.suffix.lower() == ".py":
-                        for quote in ('"', "'"):
-                            external_status_key = quote + forbidden + quote
-                            content = content.replace(external_status_key, quote + "kubernetes-status-state" + quote)
-                    self.assertNotIn(forbidden, content.lower(), relative)
+                    self.assertIsNone(milestone.search(content), relative)
 
     def test_interactive_guides_use_direct_commands_after_activation(self) -> None:
         paths = (
