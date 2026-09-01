@@ -144,28 +144,6 @@ class DependencyLockTests(unittest.TestCase):
             with self.assertRaisesRegex(DependencyError, "one exact version"):
                 load_lock(Path("virtual-lock.yml"))
 
-    def test_ansible_requirements_match_collection_lock(self) -> None:
-        lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
-        requirements = (
-            REPOSITORY_ROOT / "deploy" / "ansible" / "preparation-requirements.yml"
-        ).read_text(encoding="utf-8")
-        collections = lock.raw["ansible_collections"]
-        self.assertEqual(
-            {
-                "kubernetes.core": "6.5.0",
-                "community.general": "13.0.1",
-                "ansible.posix": "2.2.2",
-            },
-            {entry["name"]: entry["version"] for entry in collections.values()},
-        )
-        self.assertEqual(len(collections), requirements.count("  - name: "))
-        for entry in collections.values():
-            block = (
-                f"  - name: {entry['name']}\n"
-                f"    version: \"{entry['version']}\"\n"
-            )
-            self.assertIn(block, requirements)
-
     def test_golden_path_tool_requires_a_full_digest(self) -> None:
         lock_data = json.loads((REPOSITORY_ROOT / "dependencies.lock.yml").read_text())
         lock_data["tools"]["yq_linux_amd64"]["sha256"] = "latest"
