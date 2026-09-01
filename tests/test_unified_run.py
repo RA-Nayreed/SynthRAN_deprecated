@@ -1,26 +1,15 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
+import tempfile
 import unittest
 
 from synthran.cli import _parser
-from synthran.live_preflight import CommandResult
-from synthran.r2lab.foundation_topology import _physical_networks_ready
-from synthran.r2lab.hardware import PhysicalTopology
-
-
-def _topology() -> PhysicalTopology:
-    return PhysicalTopology(
-        core_node="sopnode-f2",
-        ran_node="sopnode-f3",
-        radio="n300",
-        ue="qfit07",
-    ).validate()
+from synthran.lifecycle import _deployment_spec
 
 
 class UnifiedRunTests(unittest.TestCase):
-    def test_run_parser_selects_backend(self) -> None:
+    def test_run_parser_selects_upstream_platform(self) -> None:
         physical = _parser().parse_args(
             (
                 "run",
@@ -59,46 +48,59 @@ class UnifiedRunTests(unittest.TestCase):
         self.assertEqual("rfsim", virtual.radio)
         self.assertTrue(virtual.quiet)
 
-    def test_physical_gnb_uses_upstream_role_boundary(self) -> None:
-        playbook = Path("deploy/ansible/r2lab-srsran-gnb.yml").read_text(encoding="utf-8")
-        self.assertIn("name: 5g/srsRAN/config", playbook)
-        self.assertIn("name: 5g/srsRAN/deploy", playbook)
-        self.assertIn("tasks_from: deploy_gnb.yml", playbook)
-        self.assertIn("rru in [\"n300\", \"n320\"]", playbook)
-        self.assertIn("synthran.run/id={{ synthran_run_id }}", playbook)
-        self.assertIn(
-            "synthran.io/deployment-authority=fiveg_ansible:{{ synthran_fiveg_ansible_commit }}",
-            playbook,
+    def test_rfsim_run_becomes_native_fiveg_spec(self) -> None:
+        args = _parser().parse_args(
+            (
+                "run",
+                "--radio",
+                "rfsim",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "virtual-001",
+            )
         )
+        with tempfile.TemporaryDirectory() as temporary:
+            known_hosts = Path(temporary) / "known_hosts"
+            known_hosts.write_text("fixture\n", encoding="utf-8")
+            spec = _deployment_spec(args, known_hosts=known_hosts)
+        self.assertEqual("fiveg/deployment/v1", spec["schema"])
+        self.assertEqual({"type": "rfsim", "ru": "rfsim"}, spec["platform"])
+        self.assertEqual({"qhats": [], "qfits": [], "phones": []}, spec["ues"])
+        self.assertEqual("none", spec["reservation"]["r2lab_mode"])
 
-    def test_foundation_requires_only_open5gs_n3network(self) -> None:
-        topology = _topology()
-
-        def runner_with(names: tuple[str, ...]):
-            payload = {"items": [{"metadata": {"name": name}} for name in names]}
-
-            def run(_command, _timeout):
-                return CommandResult(0, json.dumps(payload))
-
-            return run
-
-        ready, observed = _physical_networks_ready(
-            topology=topology,
-            known_hosts=Path("known-hosts"),
-            runner=runner_with(("n2network", "n3network", "ru-network")),
-            timeout_seconds=30,
+    def test_physical_run_passes_ru_ue_and_ssh_authority_upstream(self) -> None:
+        args = _parser().parse_args(
+            (
+                "run",
+                "--radio",
+                "r2lab",
+                "--device",
+                "n300",
+                "--ue",
+                "qfit07",
+                "--slice",
+                "slice-test",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "physical-001",
+            )
         )
-        self.assertTrue(ready)
-        self.assertEqual(observed, ("n3network",))
-
-        ready, observed = _physical_networks_ready(
-            topology=topology,
-            known_hosts=Path("known-hosts"),
-            runner=runner_with(("n2network", "ru-network")),
-            timeout_seconds=30,
-        )
-        self.assertFalse(ready)
-        self.assertEqual(observed, ())
+        with tempfile.TemporaryDirectory() as temporary:
+            known_hosts = Path(temporary) / "known_hosts"
+            known_hosts.write_text("fixture\n", encoding="utf-8")
+            spec = _deployment_spec(args, known_hosts=known_hosts)
+        self.assertEqual({"type": "r2lab", "ru": "n300"}, spec["platform"])
+        self.assertEqual(["qfit07"], spec["ues"]["qfits"])
+        self.assertEqual(["qfit07"], spec["deployment"]["selected_ues"])
+        self.assertEqual("require-existing", spec["reservation"]["r2lab_mode"])
+        self.assertEqual("slice-test", spec["r2lab"]["username"])
+        self.assertTrue(spec["r2lab"]["strict_host_key_checking"])
 
 
 if __name__ == "__main__":
