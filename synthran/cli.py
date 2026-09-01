@@ -12,16 +12,16 @@ import sys
 import tempfile
 from typing import Mapping, Sequence
 
+from synthran.adapters.fiveg import FiveGAdapter, FiveGAdapterError, write_spec
 from synthran.ambient_contract import (
     DEFAULT_ENERGY_NODE_VARIATION,
     DEFAULT_ENERGY_POWER_SCALE,
 )
 from synthran.dependencies import DependencyError, load_lock, sync_dependencies
 from synthran.errors import SynthRANError
-from synthran.fiveg_ansible import FiveGAnsibleError, load_inventory, run_offline_doctor
+from synthran.fiveg_ansible import FiveGAnsibleError, load_inventory
 from synthran.iot_source import AMBIENT_PROFILE, DEFAULT_IOT_SEED, TRANSPORT_PROFILE
-from synthran.lifecycle import configure_run_parser, execute_run
-from synthran.network.resources import SUPPORTED_NODES, build_preparation_inventory
+from synthran.lifecycle import _deployment_spec, configure_run_parser, execute_run
 from synthran.privacy import (
     PrivacyError,
     outgoing_commits,
@@ -32,16 +32,6 @@ from synthran.privacy import (
     scan_history,
     scan_worktree,
 )
-from synthran.r2lab.acceptance import PhysicalRunEvidence
-from synthran.r2lab.controller import gateway_command, subprocess_runner as r2lab_runner
-from synthran.r2lab.hardware import RADIOS, UES, PhysicalTopology, capabilities
-from synthran.r2lab.n3xx import stop_n3xx_gnb
-from synthran.r2lab.resources import (
-    R2LabTopologyResourceError,
-    load_topology,
-    release_physical_resources,
-)
-from synthran.r2lab.stale_claim import retire_if_lease_absent
 from synthran.research import (
     CampaignCondition,
     LoadSpec,
@@ -72,9 +62,6 @@ PUBLIC_COMMANDS = (
     "dev",
 )
 
-_EXECUTABLE_DEVICES = tuple(sorted(name for name, profile in RADIOS.items() if profile.executable))
-_EXECUTABLE_UES = tuple(sorted(name for name, profile in UES.items() if profile.executable))
-
 
 def _subparsers(parser: argparse.ArgumentParser) -> argparse._SubParsersAction:
     for action in parser._actions:
@@ -104,26 +91,40 @@ def _add_provider_context(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_operator_commands(root: argparse._SubParsersAction) -> None:
-    doctor = root.add_parser("doctor", help="run read-only readiness checks")
+    doctor = root.add_parser("doctor", help="validate a request through 5g-Ansible")
     doctor.add_argument("--radio", required=True, choices=("rfsim", "r2lab"))
-    doctor.add_argument("--core-node", default="sopnode-f2", choices=tuple(sorted(SUPPORTED_NODES)))
-    doctor.add_argument("--ran-node", default="sopnode-f3", choices=tuple(sorted(SUPPORTED_NODES)))
-    doctor.add_argument("--device", choices=_EXECUTABLE_DEVICES)
-    doctor.add_argument("--ue", choices=_EXECUTABLE_UES)
+    doctor.add_argument("--core", default="open5gs")
+    doctor.add_argument("--ran", default="srsRAN")
+    doctor.add_argument("--core-node", default="sopnode-f2")
+    doctor.add_argument("--ran-node", default="sopnode-f3")
+    doctor.add_argument("--device")
+    doctor.add_argument("--ue")
+    doctor.add_argument("--fiveg-profile", default="default")
+    doctor.add_argument("--duration-minutes", type=int, default=120)
     doctor.add_argument(
         "--slice",
         dest="r2lab_slice",
         default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
     )
+    doctor.add_argument(
+        "--known-hosts",
+        type=Path,
+        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
+    )
     _add_provider_context(doctor)
     doctor.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
     doctor.add_argument("--deps-root", type=Path, default=Path(".deps"))
+    doctor.add_argument("--network-run-root", type=Path, default=Path(".synthran/runs"), help=argparse.SUPPRESS)
     doctor.add_argument("--timeout", type=int, default=60)
     doctor.add_argument("--json", action="store_true")
 
-    inspect = root.add_parser("inspect", help="show capabilities or persisted run evidence")
+    inspect = root.add_parser("inspect", help="show upstream capabilities or persisted run evidence")
     inspect.add_argument("--radio", choices=("rfsim", "r2lab"))
     inspect.add_argument("--run-id")
+    inspect.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
+    inspect.add_argument("--deps-root", type=Path, default=Path(".deps"))
+    inspect.add_argument("--network-run-root", type=Path, default=Path(".synthran/runs"), help=argparse.SUPPRESS)
+    inspect.add_argument("--timeout", type=int, default=60)
     inspect.add_argument("--json", action="store_true")
 
     deps = root.add_parser("deps", help="manage immutable external dependencies")
@@ -157,10 +158,7 @@ def _add_operator_commands(root: argparse._SubParsersAction) -> None:
 
 
 def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
-    # Full lifecycle runs require these fields; controlled runs reuse an accepted
-    # network and validate their smaller contract at dispatch time.
     _make_optional(run, "radio", "run_id", "core_node", "ran_node")
-
     run.add_argument(
         "--iot-profile",
         choices=(AMBIENT_PROFILE, TRANSPORT_PROFILE),
@@ -175,42 +173,13 @@ def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
         default=DEFAULT_IOT_SEED,
         help="AMBER source seed",
     )
-    run.add_argument(
-        "--sensor-period",
-        type=int,
-        default=10,
-        help="Ambient-IoT sensing/publication period in seconds",
-    )
-    run.add_argument(
-        "--energy-power-scale",
-        type=float,
-        default=DEFAULT_ENERGY_POWER_SCALE,
-        help=(
-            "ambient-v1 external harvested-power multiplier in (0,1]; "
-            "1.0 preserves the energy-sufficient control"
-        ),
-    )
-    run.add_argument(
-        "--energy-node-variation",
-        type=float,
-        default=DEFAULT_ENERGY_NODE_VARIATION,
-        help=(
-            "ambient-v1 deterministic per-node harvested-power variation "
-            "fraction in [0,0.5]"
-        ),
-    )
-
-    run.add_argument(
-        "--network-run-id",
-        help="accepted RFSIM network run to reuse for controlled execution",
-    )
+    run.add_argument("--sensor-period", type=int, default=10)
+    run.add_argument("--energy-power-scale", type=float, default=DEFAULT_ENERGY_POWER_SCALE)
+    run.add_argument("--energy-node-variation", type=float, default=DEFAULT_ENERGY_NODE_VARIATION)
+    run.add_argument("--network-run-id", help="accepted RFSIM deployment to reuse")
     run.add_argument("--campaign-id")
     run.add_argument("--condition")
-    run.add_argument(
-        "--plan",
-        action="store_true",
-        help="persist/render the immutable controlled run or campaign plan only",
-    )
+    run.add_argument("--plan", action="store_true")
     run.add_argument("--inventory", type=Path)
     run.add_argument("--warmup-seconds", type=int, default=30)
     run.add_argument("--duration-seconds", type=int, default=180)
@@ -222,29 +191,16 @@ def _add_run_experiment_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--parallel-flows", type=int, default=1)
     run.add_argument("--load-port", type=int, default=5201)
     run.add_argument("--probe-target")
-
     campaign = run.add_argument_group("campaign")
-    campaign.add_argument("--campaign", type=Path, help="reuse an immutable campaign file")
-    campaign.add_argument("--seeds", help="comma-separated campaign AMBER seeds")
-    campaign.add_argument(
-        "--conditions",
-        help="comma-separated conditions, e.g. baseline,load50=0.5,load80=0.8",
-    )
+    campaign.add_argument("--campaign", type=Path)
+    campaign.add_argument("--seeds")
+    campaign.add_argument("--conditions")
     campaign.add_argument("--campaign-seed", type=int)
-    campaign.add_argument(
-        "--campaign-root",
-        type=Path,
-        default=Path(".synthran/campaigns"),
-        help=argparse.SUPPRESS,
-    )
+    campaign.add_argument("--campaign-root", type=Path, default=Path(".synthran/campaigns"), help=argparse.SUPPRESS)
 
 
 def _add_top_level_experiment_commands(root: argparse._SubParsersAction) -> None:
-    calibrate = root.add_parser(
-        "calibrate",
-        help="measure reference capacity of an accepted UE path",
-        description="Measure RAN/UE-path capacity and persist calibration evidence.",
-    )
+    calibrate = root.add_parser("calibrate", help="measure reference capacity of an accepted UE path")
     calibrate.add_argument("--inventory", type=Path, required=True)
     calibrate.add_argument("--network-run-id", required=True)
     calibrate.add_argument("--target", required=True)
@@ -255,34 +211,14 @@ def _add_top_level_experiment_commands(root: argparse._SubParsersAction) -> None
 
     analyze = root.add_parser("analyze", help="analyze a completed persisted campaign")
     analyze.add_argument("--campaign", type=Path, required=True)
-    analyze.add_argument(
-        "--run-root",
-        type=Path,
-        default=Path(".synthran/experiments"),
-        help=argparse.SUPPRESS,
-    )
+    analyze.add_argument("--run-root", type=Path, default=Path(".synthran/experiments"), help=argparse.SUPPRESS)
     analyze.add_argument("--out", type=Path, required=True)
 
-    release = root.add_parser(
-        "release",
-        help="release persistent resources owned by one physical run",
-    )
+    release = root.add_parser("release", help="stop one deployment through 5g-Ansible")
     release.add_argument("--run-id", required=True)
-    release.add_argument(
-        "--slice",
-        dest="r2lab_slice",
-        default=os.environ.get("SYNTHRAN_R2LAB_SLICE"),
-    )
-    release.add_argument("--owner", default=os.environ.get("SYNTHRAN_OWNER"))
-    release.add_argument(
-        "--allocation-id",
-        default=os.environ.get("SYNTHRAN_ALLOCATION_ID"),
-    )
-    release.add_argument(
-        "--known-hosts",
-        type=Path,
-        default=os.environ.get("SYNTHRAN_SLICES_KNOWN_HOSTS"),
-    )
+    release.add_argument("--lock", type=Path, default=Path("dependencies.lock.yml"))
+    release.add_argument("--deps-root", type=Path, default=Path(".deps"))
+    release.add_argument("--network-run-root", type=Path, default=Path(".synthran/runs"), help=argparse.SUPPRESS)
     release.add_argument("--timeout", type=int, default=300)
     release.add_argument("--json", action="store_true")
 
@@ -291,8 +227,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="synthran",
         description=(
-            "Run and inspect reproducible AMBER Ambient-IoT experiments across "
-            "virtual and physical radio backends."
+            "Run reproducible AMBER experiments while 5g-Ansible owns the 5G infrastructure."
         ),
     )
     parser.add_subparsers(dest="command", required=True)
@@ -318,8 +253,14 @@ def _read_json_object(path: Path, *, label: str) -> Mapping[str, object]:
 
 
 def _network_paths(root: Path, run_id: str) -> tuple[Path, Path]:
-    directory = root.resolve() / run_id
+    directory = root.expanduser().resolve() / run_id
     return directory / "manifest.json", directory / "network-evidence.json"
+
+
+def _controlled_inventory(args: argparse.Namespace, network_run_id: str) -> Path:
+    if args.inventory is not None:
+        return args.inventory.expanduser().resolve()
+    return args.network_run_root.expanduser().resolve() / network_run_id / "hosts.ini"
 
 
 def _parse_seeds(value: str) -> tuple[int, ...]:
@@ -342,9 +283,7 @@ def _parse_conditions(value: str) -> tuple[CampaignCondition, ...]:
             result.append(CampaignCondition("baseline"))
             continue
         if "=" not in text:
-            raise ResearchError(
-                "loaded conditions must use name=fraction or name=bps:<integer>"
-            )
+            raise ResearchError("loaded conditions must use name=fraction or name=bps:<integer>")
         name, raw = (part.strip() for part in text.split("=", 1))
         try:
             result.append(
@@ -364,10 +303,7 @@ def _load_campaign(path: Path) -> ResearchCampaign:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ResearchError("campaign specification must be readable JSON") from exc
-    if (
-        not isinstance(value, Mapping)
-        or value.get("schema") != "synthran/research-campaign/v1alpha1"
-    ):
+    if not isinstance(value, Mapping) or value.get("schema") != "synthran/research-campaign/v1alpha1":
         raise ResearchError("campaign specification schema is unsupported")
     raw_conditions = value.get("conditions")
     raw_runs = value.get("runs")
@@ -380,16 +316,8 @@ def _load_campaign(path: Path) -> ResearchCampaign:
         conditions.append(
             CampaignCondition(
                 str(item["name"]),
-                load_fraction=(
-                    float(item["load_fraction"])
-                    if item.get("load_fraction") is not None
-                    else None
-                ),
-                target_bps=(
-                    int(item["target_bps"])
-                    if item.get("target_bps") is not None
-                    else None
-                ),
+                load_fraction=float(item["load_fraction"]) if item.get("load_fraction") is not None else None,
+                target_bps=int(item["target_bps"]) if item.get("target_bps") is not None else None,
             )
         )
     campaign = build_campaign(
@@ -400,9 +328,7 @@ def _load_campaign(path: Path) -> ResearchCampaign:
         campaign_seed=int(value.get("campaign_seed")),
     )
     if raw_runs != [run.to_dict() for run in campaign.runs]:
-        raise ResearchError(
-            "persisted campaign run schedule does not match its deterministic contract"
-        )
+        raise ResearchError("persisted campaign run schedule does not match its deterministic contract")
     return campaign
 
 
@@ -416,56 +342,25 @@ def _is_campaign_run(args: argparse.Namespace) -> bool:
 
 
 def _is_controlled_run(args: argparse.Namespace) -> bool:
-    if args.command != "run":
-        return False
     return bool(
-        _is_campaign_run(args)
-        or getattr(args, "network_run_id", None) is not None
-        or getattr(args, "condition", None) is not None
+        args.command == "run"
+        and (
+            _is_campaign_run(args)
+            or getattr(args, "network_run_id", None) is not None
+            or getattr(args, "condition", None) is not None
+        )
     )
 
 
 def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
-    if args.command != "run" or getattr(args, "radio", None) not in {"rfsim", "r2lab"}:
+    if args.command != "run" or args.radio != "rfsim" or _is_controlled_run(args) or not args.run_id:
         return
-    if _is_controlled_run(args):
+    path = args.experiment_root.expanduser().resolve() / args.run_id / "manifest.json"
+    if not path.is_file():
         return
-    run_id = getattr(args, "run_id", None)
-    if not run_id:
-        return
-
-    manifest_path: Path | None = None
-    if args.radio == "rfsim":
-        candidate = Path(args.experiment_root).expanduser().resolve() / run_id / "manifest.json"
-        if candidate.is_file():
-            manifest_path = candidate
-    else:
-        result_path = (
-            Path(args.r2lab_run_root).expanduser().resolve()
-            / run_id
-            / "physical"
-            / "physical-workload-result.json"
-        )
-        if result_path.is_file():
-            result = _read_json_object(result_path, label="persisted physical workload result")
-            workload_id = result.get("workload_id")
-            if not isinstance(workload_id, str) or not workload_id:
-                raise SynthRANError("persisted physical workload result has no workload ID")
-            candidate = (
-                Path(args.r2lab_experiment_root).expanduser().resolve()
-                / workload_id
-                / "manifest.json"
-            )
-            if not candidate.is_file():
-                raise SynthRANError("persisted physical workload manifest is unavailable")
-            manifest_path = candidate
-
-    if manifest_path is None:
-        return
-    manifest = _read_json_object(manifest_path, label="persisted AMBER workload manifest")
-    if manifest.get("iot_source") != "amber":
-        raise SynthRANError("persisted workload is not an AMBER workload")
+    manifest = _read_json_object(path, label="persisted AMBER workload manifest")
     expected = {
+        "iot_source": "amber",
         "iot_profile": args.iot_profile,
         "iot_seed": args.iot_seed,
         "sensor_period_seconds": args.sensor_period,
@@ -478,8 +373,6 @@ def _validate_persisted_iot_identity(args: argparse.Namespace) -> None:
 def _require_controlled_common(args: argparse.Namespace) -> None:
     if args.radio not in {None, "rfsim"}:
         raise ResearchError("controlled runs currently support the RFSIM backend only")
-    if args.inventory is None and not args.plan:
-        raise ResearchError("controlled run requires --inventory")
     if args.probe_target is None and not args.plan:
         raise ResearchError("controlled run requires --probe-target")
 
@@ -515,9 +408,7 @@ def _amber_research_spec(args: argparse.Namespace) -> AmberResearchSpec:
             enabled=loaded,
             target_bps=args.target_bps if loaded else None,
             target_fraction=args.target_fraction if loaded else None,
-            reference_capacity_bps=(
-                args.reference_capacity_bps if loaded else None
-            ),
+            reference_capacity_bps=args.reference_capacity_bps if loaded else None,
             parallel_flows=args.parallel_flows,
             server_port=args.load_port,
         ),
@@ -533,7 +424,7 @@ def _campaign_path(args: argparse.Namespace) -> Path:
     return args.campaign_root.expanduser().resolve() / f"{args.campaign_id}.json"
 
 
-def _load_or_create_campaign(args: argparse.Namespace):
+def _load_or_create_campaign(args: argparse.Namespace) -> tuple[ResearchCampaign, Path]:
     path = _campaign_path(args)
     if args.campaign is not None:
         return _load_campaign(path), path
@@ -576,15 +467,13 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
         stream = RunEventStream(run_id=campaign.campaign_id, radio="rfsim", terminal=sys.stdout)
         stream.emit("→ workload: controlled AMBER campaign", stage="workload", event="started")
         try:
-            manifest, evidence = _network_paths(
-                args.network_run_root, campaign.network_run_id
-            )
+            manifest, evidence = _network_paths(args.network_run_root, campaign.network_run_id)
             result_path = execute_amber_campaign(
                 campaign=campaign,
                 iot_profile=args.iot_profile,
                 energy_power_scale=args.energy_power_scale,
                 energy_node_variation=args.energy_node_variation,
-                inventory=load_inventory(args.inventory),
+                inventory=load_inventory(_controlled_inventory(args, campaign.network_run_id)),
                 lock=load_lock(args.lock),
                 dependency_root=args.deps_root,
                 network_manifest=manifest,
@@ -613,29 +502,16 @@ def _dispatch_controlled_run(args: argparse.Namespace) -> int:
 
     spec = _amber_research_spec(args)
     if args.plan:
-        print(
-            json.dumps(
-                {"schema": "synthran/research-request/v2alpha1", **spec.to_request_dict()},
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        print(json.dumps({"schema": "synthran/research-request/v2alpha1", **spec.to_request_dict()}, indent=2, sort_keys=True))
         print("\nExecution action: none")
         return 0
-
     stream = RunEventStream(run_id=spec.run_id, radio="rfsim", terminal=sys.stdout)
-    stream.emit(
-        f"→ workload: controlled AMBER {spec.condition}",
-        stage="workload",
-        event="started",
-    )
+    stream.emit(f"→ workload: controlled AMBER {spec.condition}", stage="workload", event="started")
     try:
-        manifest, evidence = _network_paths(
-            args.network_run_root, spec.network_run_id
-        )
+        manifest, evidence = _network_paths(args.network_run_root, spec.network_run_id)
         summary_path = execute_amber_research_experiment(
             spec=spec,
-            inventory=load_inventory(args.inventory),
+            inventory=load_inventory(_controlled_inventory(args, spec.network_run_id)),
             lock=load_lock(args.lock),
             dependency_root=args.deps_root,
             network_manifest=manifest,
@@ -673,11 +549,7 @@ def _dispatch_analysis(args: argparse.Namespace) -> int:
     run_root = args.run_root.expanduser().resolve()
     first_v2 = run_root / campaign.runs[0].run_id / "research-summary-v2.json"
     if first_v2.is_file():
-        result = analyze_amber_campaign(
-            campaign=campaign,
-            run_root=run_root,
-            output_path=args.out,
-        )
+        result = analyze_amber_campaign(campaign=campaign, run_root=run_root, output_path=args.out)
         print(json.dumps(result, indent=2, sort_keys=True))
         print(f"Campaign analysis: {args.out}")
         return 0
@@ -688,78 +560,36 @@ def _dispatch_analysis(args: argparse.Namespace) -> int:
     ]
     analysis = analyze_campaign(campaign, summaries)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(analysis, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    args.out.write_text(json.dumps(analysis, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(analysis, indent=2, sort_keys=True))
     print(f"Campaign analysis: {args.out}")
     return 0 if analysis["usable_runs"] == analysis["expected_runs"] else 2
 
 
-def _doctor_r2lab(args: argparse.Namespace) -> int:
-    if args.device is None or args.ue is None:
-        raise SynthRANError("doctor --radio r2lab requires --device and --ue")
-    if not args.r2lab_slice:
-        raise SynthRANError("doctor --radio r2lab requires --slice or SYNTHRAN_R2LAB_SLICE")
-    topology = PhysicalTopology(
-        core_node=args.core_node,
-        ran_node=args.ran_node,
-        radio=args.device,
-        ue=args.ue,
-    ).validate()
-    gateway = r2lab_runner(gateway_command(args.r2lab_slice, "true"), args.timeout)
-    lease = None
-    if gateway.returncode == 0:
-        lease = r2lab_runner(
-            gateway_command(args.r2lab_slice, "rhubarbe", "leases", "--check"),
-            args.timeout,
-        )
-    checks = [
-        {"name": "selection", "passed": True, "detail": topology.to_dict()},
-        {
-            "name": "gateway",
-            "passed": gateway.returncode == 0,
-            "detail": "strict public-key SSH to Faraday",
-        },
-        {
-            "name": "lease",
-            "passed": lease is not None and lease.returncode == 0,
-            "detail": "active R2Lab lease",
-        },
+def _adapter(args: argparse.Namespace) -> FiveGAdapter:
+    return FiveGAdapter.from_lock(
+        lock=load_lock(args.lock),
+        dependency_root=args.deps_root,
+        state_root=args.network_run_root,
+        timeout_seconds=args.timeout,
+    )
+
+
+def _doctor(args: argparse.Namespace) -> int:
+    adapter = _adapter(args)
+    capabilities = adapter.capabilities()
+    checks: list[dict[str, object]] = [
+        {"name": "fiveg-ansible", "passed": True, "detail": "machine API available"}
     ]
-    ready = all(check["passed"] is True for check in checks)
-    payload = {"schema": "synthran/doctor/v1", "radio": "r2lab", "ready": ready, "checks": checks}
-    if args.json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-    else:
-        print("SynthRAN doctor (r2lab)")
-        for check in checks:
-            print(f"[{'PASS' if check['passed'] else 'FAIL'}] {check['name']}: {check['detail']}")
-        print(f"Result: {'READY' if ready else 'NOT READY'}")
-    return 0 if ready else 2
-
-
-def _doctor_rfsim(args: argparse.Namespace) -> int:
-    if args.core_node == args.ran_node:
-        raise SynthRANError("core and RAN nodes must differ")
+    known_hosts = Path(args.known_hosts).expanduser().resolve() if args.known_hosts else Path(".")
+    if args.radio == "r2lab" and not known_hosts.is_file():
+        raise SynthRANError("doctor --radio r2lab requires an existing --known-hosts file")
+    probe = argparse.Namespace(**vars(args))
+    probe.run_id = "doctor-probe"
     with tempfile.TemporaryDirectory(prefix="synthran-doctor-") as directory:
-        inventory = Path(directory) / "hosts.ini"
-        text, _ = build_preparation_inventory(
-            core_node=args.core_node,
-            ran_node=args.ran_node,
-            source=inventory,
-        )
-        inventory.write_text(text, encoding="utf-8", newline="\n")
-        report = run_offline_doctor(
-            inventory_path=inventory,
-            lock_path=args.lock,
-            dependency_root=args.deps_root,
-        )
-    checks = [
-        {"name": check.name, "passed": check.passed, "detail": check.detail}
-        for check in report.checks
-    ]
+        path = write_spec(Path(directory) / "request.json", _deployment_spec(probe, known_hosts=known_hosts))
+        plan = adapter.plan(path)
+    checks.append({"name": "deployment-request", "passed": True, "detail": plan.get("spec", {})})
     if args.slices_experiment:
         if not args.slices_project:
             raise SynthRANError("provider verification requires --slices-project or SYNTHRAN_SLICES_PROJECT")
@@ -769,166 +599,88 @@ def _doctor_rfsim(args: argparse.Namespace) -> int:
             experiment=args.slices_experiment,
             timeout_seconds=args.timeout,
         )
-        checks.append(
-            {
-                "name": "provider",
-                "passed": provider.ready,
-                "detail": f"{args.slices_project}/{args.slices_experiment}",
-            }
-        )
-    ready = bool(checks) and all(check["passed"] is True for check in checks)
-    payload = {"schema": "synthran/doctor/v1", "radio": "rfsim", "ready": ready, "checks": checks}
+        checks.append({"name": "provider", "passed": provider.ready, "detail": f"{args.slices_project}/{args.slices_experiment}"})
+    ready = all(check["passed"] is True for check in checks)
+    payload = {
+        "schema": "synthran/doctor/v2",
+        "radio": args.radio,
+        "ready": ready,
+        "checks": checks,
+        "capabilities": capabilities,
+    }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print("SynthRAN doctor (rfsim)")
+        print(f"SynthRAN doctor ({args.radio})")
         for check in checks:
             print(f"[{'PASS' if check['passed'] else 'FAIL'}] {check['name']}: {check['detail']}")
         print(f"Result: {'READY' if ready else 'NOT READY'}")
     return 0 if ready else 2
 
 
-def _doctor(args: argparse.Namespace) -> int:
-    return _doctor_r2lab(args) if args.radio == "r2lab" else _doctor_rfsim(args)
-
-
-def _candidate_evidence(run_id: str) -> tuple[Path, ...]:
+def _candidate_evidence(args: argparse.Namespace) -> tuple[Path, ...]:
+    run_id = args.run_id
+    root = args.network_run_root.expanduser().resolve()
     return (
-        Path(".synthran/r2lab") / run_id / "physical-run.json",
-        Path(".synthran/experiments-r2lab") / run_id / "experiment-evidence.json",
+        root / run_id / "manifest.json",
+        root / run_id / "state.json",
+        root / run_id / "network-evidence.json",
         Path(".synthran/experiments") / run_id / "experiment-evidence.json",
-        Path(".synthran/runs") / run_id / "network-evidence.json",
-        Path(".synthran/preparations") / run_id / "manifest.json",
+        Path(".synthran/experiments-r2lab") / run_id / "experiment-evidence.json",
     )
 
 
 def _inspect(args: argparse.Namespace) -> int:
+    adapter = _adapter(args)
     if args.run_id is None:
-        if args.radio != "r2lab":
-            raise SynthRANError("inspect without --run-id currently supports --radio r2lab capabilities")
-        payload = capabilities()
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        print(json.dumps(adapter.capabilities(), indent=2, sort_keys=True))
         return 0
-
     found: list[dict[str, object]] = []
-    for path in _candidate_evidence(args.run_id):
-        if not path.is_file():
-            continue
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SynthRANError(f"persisted run evidence is unreadable: {path}") from exc
-        found.append({"path": str(path), "payload": payload})
+    for path in _candidate_evidence(args):
+        if path.is_file():
+            found.append({"path": str(path), "payload": _read_json_object(path, label="persisted run evidence")})
+    state = args.network_run_root.expanduser().resolve() / args.run_id / "state.json"
+    if state.is_file():
+        current = _read_json_object(state, label="5g-Ansible deployment state").get("state")
+        if current not in {"stopped", "cleanup-failed"}:
+            found.append({"path": "fiveg:status", "payload": adapter.status(args.run_id)})
     if not found:
         raise SynthRANError(f"no persisted evidence found for run {args.run_id}")
+    payload = {"run_id": args.run_id, "evidence": found}
     if args.json:
-        print(json.dumps({"run_id": args.run_id, "evidence": found}, indent=2, sort_keys=True))
+        print(json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(f"SynthRAN run {args.run_id}")
         for item in found:
-            payload = item["payload"]
-            schema = payload.get("schema") if isinstance(payload, dict) else None
-            state = None
-            if isinstance(payload, dict):
-                state = payload.get("status", payload.get("ready", payload.get("accepted")))
-            print(f"- {item['path']} :: {schema or 'unknown'} :: {state}")
+            value = item["payload"]
+            schema = value.get("schema") if isinstance(value, Mapping) else None
+            state_value = value.get("state", value.get("ready", value.get("accepted"))) if isinstance(value, Mapping) else None
+            print(f"- {item['path']} :: {schema or 'unknown'} :: {state_value}")
     return 0
 
 
 def _release(args: argparse.Namespace) -> int:
-    run_root = Path(".synthran/r2lab")
-    run_directory = run_root / args.run_id
-    if not run_directory.exists():
-        payload = {
-            "schema": "synthran/release/v1",
-            "run_id": args.run_id,
-            "released": False,
-            "detail": "no active physical claim found; virtual workloads clean up within their run",
-        }
+    directory = args.network_run_root.expanduser().resolve() / args.run_id
+    state_path = directory / "state.json"
+    if not state_path.is_file():
+        payload = {"schema": "synthran/release/v2", "run_id": args.run_id, "released": False, "detail": "no 5g-Ansible deployment state found"}
         print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload["detail"])
         return 0
-    if not args.r2lab_slice:
-        raise SynthRANError(
-            "physical release requires --slice or SYNTHRAN_R2LAB_SLICE"
-        )
-
-    topology = load_topology(run_root=run_root, run_id=args.run_id).validate()
-    retirement = retire_if_lease_absent(
-        run_root=run_root,
-        run_id=args.run_id,
-        slice_name=args.r2lab_slice,
-        topology=topology,
-        runner=r2lab_runner,
-        timeout_seconds=min(args.timeout, 300),
-    )
-    if retirement is not None:
-        result = {
-            "schema": "synthran/release/v1",
-            "run_id": args.run_id,
-            "radio": topology.radio,
-            "ue": topology.ue,
-            "released": False,
-            "retired": True,
-            "hardware_mutated": False,
-            "detail": (
-                "current R2Lab lease is not held; retired the stale local claim "
-                "without touching provider hardware"
-            ),
-            "retirement": retirement.to_dict(),
-        }
-        print(
-            json.dumps(result, indent=2, sort_keys=True)
-            if args.json
-            else result["detail"]
-        )
-        return 0
-
-    if not args.owner or args.known_hosts is None:
-        raise SynthRANError(
-            "physical release with a current lease requires --owner/SYNTHRAN_OWNER "
-            "and --known-hosts/SYNTHRAN_SLICES_KNOWN_HOSTS"
-        )
-    known_hosts = Path(args.known_hosts).expanduser().resolve()
-    if not known_hosts.is_file():
-        raise SynthRANError("strict SLICES known-hosts file is missing")
-    evidence_path = run_directory / "physical-run.json"
-    stop = None
-    if evidence_path.is_file():
-        evidence = PhysicalRunEvidence.read_json(evidence_path)
-        if evidence.gnb_start is not None:
-            stop = lambda: stop_n3xx_gnb(
-                run_id=args.run_id,
-                slice_name=args.r2lab_slice,
-                owner=args.owner,
-                allocation_id=args.allocation_id,
-                known_hosts=known_hosts,
-                run_root=run_root,
-                timeout_seconds=max(args.timeout, 30),
-            )
-    payload = release_physical_resources(
-        run_id=args.run_id,
-        slice_name=args.r2lab_slice,
-        run_root=run_root,
-        timeout_seconds=min(args.timeout, 300),
-        stop_gnb=stop,
-    )
-    result = {
-        "schema": "synthran/release/v1",
-        "run_id": args.run_id,
-        "radio": topology.radio,
-        "ue": topology.ue,
-        "released": True,
-        "retired": False,
-        "release": payload,
-    }
-    print(json.dumps(result, indent=2, sort_keys=True) if args.json else "Selected run resources released.")
+    state = _read_json_object(state_path, label="5g-Ansible deployment state")
+    if state.get("state") == "stopped":
+        payload = {"schema": "synthran/release/v2", "run_id": args.run_id, "released": False, "detail": "deployment is already stopped"}
+    else:
+        result = _adapter(args).down(args.run_id)
+        if result.get("state") != "stopped":
+            raise SynthRANError("5g-Ansible cleanup did not reach stopped state")
+        payload = {"schema": "synthran/release/v2", "run_id": args.run_id, "released": True, "upstream": result}
+    print(json.dumps(payload, indent=2, sort_keys=True) if args.json else payload.get("detail", "Deployment released."))
     return 0
 
 
 def _deps_sync(args: argparse.Namespace) -> int:
-    lock = load_lock(args.lock)
     sync_dependencies(
-        lock,
+        load_lock(args.lock),
         args.root,
         include_transitive=args.all,
         names=args.dependency_names,
@@ -941,8 +693,7 @@ def _deps_sync(args: argparse.Namespace) -> int:
 def _privacy_scan(args: argparse.Namespace) -> int:
     repo = repository_root()
     if args.outgoing:
-        commits = outgoing_commits(repo, args.remote, sys.stdin)
-        findings = scan_commits(repo, commits)
+        findings = scan_commits(repo, outgoing_commits(repo, args.remote, sys.stdin))
     elif args.history:
         findings = scan_history(repo)
     else:
@@ -962,12 +713,7 @@ def _hooks_install(args: argparse.Namespace) -> int:
     if os.name != "nt":
         hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     try:
-        subprocess.run(
-            ["git", "config", "core.hooksPath", ".githooks"],
-            cwd=repo,
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
+        subprocess.run(["git", "config", "core.hooksPath", ".githooks"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
         raise PrivacyError("unable to configure repository hooks") from exc
     print("repository hooks activated")
@@ -976,9 +722,7 @@ def _hooks_install(args: argparse.Namespace) -> int:
 
 def _validate_lifecycle_run(args: argparse.Namespace) -> None:
     if args.plan:
-        raise SynthRANError(
-            "run --plan is for controlled runs/campaigns; full lifecycle runs execute directly"
-        )
+        raise SynthRANError("run --plan is for controlled runs/campaigns; full lifecycle runs execute directly")
     required = {
         "--radio": args.radio,
         "--run-id": args.run_id,
@@ -1013,12 +757,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         if args.privacy_command == "scan":
             return _privacy_scan(args)
         if args.privacy_command == "redact":
-            redact_file(
-                args.source,
-                args.destination,
-                dry_run=args.dry_run,
-                output=sys.stdout,
-            )
+            redact_file(args.source, args.destination, dry_run=args.dry_run, output=sys.stdout)
             return 0
     if args.command == "dev" and args.dev_command == "hooks" and args.hooks_command == "install":
         return _hooks_install(args)
@@ -1041,8 +780,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         SynthRANError,
         ResearchError,
-        R2LabTopologyResourceError,
         DependencyError,
+        FiveGAdapterError,
         FiveGAnsibleError,
         PrivacyError,
         SlicesControllerError,
