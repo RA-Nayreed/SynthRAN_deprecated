@@ -24,7 +24,7 @@ class DependencyLockTests(unittest.TestCase):
             next(item.commit for item in lock.git if item.name == "amber"),
         )
         self.assertEqual(
-            "71025e88326732dcf592e99a8c07c700704650ac",
+            "44dc1788b6a32fb1546c0368568b4f66cc43c318",
             next(item.commit for item in lock.git if item.name == "fiveg_ansible"),
         )
         self.assertEqual("3.12.13", lock.raw["conda"]["packages"]["python"]["version"])
@@ -96,13 +96,14 @@ class DependencyLockTests(unittest.TestCase):
 
     def test_unknown_selected_dependency_is_rejected(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
+        output = StringIO()
         with self.assertRaisesRegex(DependencyError, "unknown Git dependencies"):
             sync_dependencies(
                 lock,
                 REPOSITORY_ROOT / ".dry-run-deps-must-not-exist",
                 names=("missing",),
                 dry_run=True,
-                output=StringIO(),
+                output=output,
             )
 
     def test_mutable_git_ref_is_rejected_as_commit(self) -> None:
