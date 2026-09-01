@@ -55,7 +55,7 @@ from synthran.research import (
 )
 from synthran.research.amber_campaign import analyze_amber_campaign, execute_amber_campaign
 from synthran.research.amber_runtime import execute_amber_research_experiment
-from synthran.research.runtime import calibrate_capacity
+from synthran.research.calibration import calibrate_capacity
 from synthran.research.v2 import AmberResearchSpec
 from synthran.run_events import RunEventStream
 from synthran.slices_controller import SlicesControllerError, verify_slices_controller
