@@ -138,8 +138,19 @@ class ModuleLayoutTests(unittest.TestCase):
         self.assertTrue((SOURCE / "cli.py").is_file())
         for forbidden in (
             "synthran/commands",
-            "synthran/operator.py",
+            "synthran/__main__.py",
+            "cli",
             "synthran/entrypoint.py",
             "synthran/launcher.py",
+            "synthran/operator.py",
+            "synthran/command_runtime.py",
+            "synthran/backends",
+            "synthran/experiment/commands.py",
+            "synthran/network/r2lab.py",
+            "synthran/r2lab",
         ):
             self.assertFalse(_tracked(forbidden), forbidden)
+
+
+if __name__ == "__main__":
+    unittest.main()
