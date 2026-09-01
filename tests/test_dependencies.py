@@ -13,13 +13,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class DependencyLockTests(unittest.TestCase):
-    def test_repository_lock_is_valid_and_immutable(self) -> None:
+    def test_repository_lock_contains_only_direct_git_dependencies(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
-        self.assertEqual(4, len(lock.git))
+        self.assertEqual(2, len(lock.git))
         self.assertTrue(all(len(item.commit) == 40 for item in lock.git))
-        self.assertEqual(2, sum(item.sync for item in lock.git))
-        self.assertIn("amber", {item.name for item in lock.git})
-        self.assertIn("fiveg_ansible", {item.name for item in lock.git})
+        self.assertTrue(all(item.sync for item in lock.git))
+        self.assertEqual({"amber", "fiveg_ansible"}, {item.name for item in lock.git})
         self.assertEqual(
             "08dd6bd445e607ad3accf4e9a2dff51a499ebdf9",
             next(item.commit for item in lock.git if item.name == "amber"),
@@ -31,7 +30,7 @@ class DependencyLockTests(unittest.TestCase):
         self.assertEqual("3.12.13", lock.raw["conda"]["packages"]["python"]["version"])
         self.assertEqual("4.1.1", lock.raw["conda"]["packages"]["simpy"]["version"])
 
-    def test_dry_run_selects_direct_dependencies_without_writing(self) -> None:
+    def test_dry_run_syncs_both_direct_dependencies_without_writing(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
         output = StringIO()
         root = REPOSITORY_ROOT / ".dry-run-deps-must-not-exist"
@@ -41,11 +40,10 @@ class DependencyLockTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("fiveg_ansible", rendered)
         self.assertIn("amber", rendered)
-        self.assertNotIn("contiki_ng", rendered)
         self.assertNotIn("open5gs_k8s", rendered)
         self.assertNotIn("srsran_helm", rendered)
 
-    def test_dry_run_all_includes_transitive_dependencies(self) -> None:
+    def test_include_transitive_cannot_reintroduce_upstream_internal_repositories(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
         output = StringIO()
         with patch.object(Path, "mkdir") as mkdir:
@@ -57,25 +55,25 @@ class DependencyLockTests(unittest.TestCase):
                 output=output,
             )
             mkdir.assert_not_called()
-        self.assertIn("open5gs_k8s", output.getvalue())
-        self.assertIn("srsran_helm", output.getvalue())
+        rendered = output.getvalue()
+        self.assertIn("fiveg_ansible", rendered)
+        self.assertIn("amber", rendered)
+        self.assertNotIn("open5gs_k8s", rendered)
+        self.assertNotIn("srsran_helm", rendered)
 
-    def test_dry_run_can_select_only_the_physical_dependencies(self) -> None:
+    def test_dry_run_can_select_only_fiveg_ansible(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
         output = StringIO()
         sync_dependencies(
             lock,
             REPOSITORY_ROOT / ".dry-run-deps-must-not-exist",
-            names=("fiveg_ansible", "srsran_helm"),
+            names=("fiveg_ansible",),
             dry_run=True,
             output=output,
         )
         rendered = output.getvalue()
         self.assertIn("fiveg_ansible", rendered)
-        self.assertIn("srsran_helm", rendered)
-        self.assertNotIn("contiki_ng", rendered)
         self.assertNotIn("amber", rendered)
-        self.assertNotIn("open5gs_k8s", rendered)
 
     def test_unknown_selected_dependency_is_rejected(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
