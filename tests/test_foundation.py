@@ -115,7 +115,8 @@ class FoundationTests(unittest.TestCase):
         physical = readme.split("## Physical R2Lab run", 1)[1].split("## Live progress and logs", 1)[0]
         self.assertIn("synthran run", physical)
         self.assertIn("--radio r2lab", physical)
-        self.assertIn("5g-Ansible performs the physical deployment", physical)
+        self.assertIn("5g-Ansible performs provider setup", physical)
+        self.assertIn("physical deployment", physical)
 
         for name in (
             "architecture.md",
