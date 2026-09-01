@@ -1,6 +1,6 @@
 # Architecture
 
-SynthRAN is an experiment-orchestration, measurement, and evidence layer. It does **not** deploy or repair 5G infrastructure itself. The pinned `5g-Ansible` machine API is the sole authority for reservation, POS, Kubernetes, core, RAN, radio/RU, UE activation, and deployment teardown.
+SynthRAN is an experiment-orchestration, measurement, and evidence layer. It does **not** own provider selection or deploy/repair 5G infrastructure. The pinned `5g-Ansible` machine API is the sole authority for SLICES provider context, reservation, POS, Kubernetes, core, RAN, radio/RU, UE activation, and deployment teardown.
 
 ## System boundary
 
@@ -16,6 +16,7 @@ experiment request
         |
         v
     5g-Ansible
+ SLICES provider context
  reservation / POS / Kubernetes
  core / RAN / RU / UE / teardown
         |
@@ -58,7 +59,7 @@ synthran deps ...
 synthran dev ...
 ```
 
-`run` describes the requested topology to 5g-Ansible, consumes its resulting artifacts, observes the live path, executes the workload, records evidence, and cleans only experiment-owned state. `doctor` is read-only. `calibrate`, `inspect`, and `analyze` operate on accepted deployment/experiment evidence.
+`run` describes provider intent and requested topology to 5g-Ansible, consumes upstream artifacts, observes the live path, executes the workload, records evidence, and cleans only experiment-owned state. `doctor` calls upstream `capabilities` and `plan`; it does not mutate provider or deployment state. `calibrate`, `inspect`, and `analyze` operate on accepted deployment/experiment evidence.
 
 ## Deployment boundary
 
@@ -74,6 +75,8 @@ bin/fiveg scenario
 ```
 
 The native request schema is `fiveg/deployment/v1`. The upstream manifest schema is `fiveg/deployment-manifest/v1`.
+
+Provider intent is part of the native request. With provider management enabled, 5g-Ansible selects the requested SLICES project, reuses or creates the named experiment, acquires the Post5G network identity, persists that identity in upstream state/manifest, and revalidates it on resume. SynthRAN consumes that evidence; it does not reproduce the provider lifecycle.
 
 SynthRAN deliberately has no second support matrix for cores, RANs, radios, or physical UEs. Topology validation belongs to 5g-Ansible. SynthRAN may impose experiment-specific acceptance requirements after deployment—for example, the current RFSIM Amber experiment requires a live `tun_srsue1` PDU path—but that is not a deployment-support restriction.
 
@@ -111,7 +114,7 @@ Amber publishers
 -> collector
 ```
 
-The physical experiment records `wwan0` byte counters and re-proves the route after delivery. Reservation, radio configuration, modem activation, registration, and PDU establishment remain upstream responsibilities.
+The physical experiment records `wwan0` byte counters and re-proves the route after delivery. Provider context, reservation, radio configuration, modem activation, registration, and PDU establishment remain upstream responsibilities.
 
 ## Experiment-owned Kubernetes resources
 
@@ -127,10 +130,9 @@ Capacity calibration follows the same rule: verify the existing path, measure, a
 
 ## Evidence model
 
-The important artifact split is:
-
 ```text
 5g-Ansible
+  provider identity/network
   deployment manifest
   generated inventory
   upstream state directory
@@ -144,31 +146,29 @@ SynthRAN
   run event evidence
 ```
 
-Upstream artifacts establish deployment provenance. SynthRAN evidence establishes observed path state and scientific/workload acceptance. Neither substitutes for fresh observation when a live run begins.
+Upstream artifacts establish provider and deployment provenance. SynthRAN evidence establishes observed path state and scientific/workload acceptance. Neither substitutes for fresh observation when a live run begins.
 
 ## Source layout
 
-The principal boundaries are:
-
 ```text
-synthran/adapters/fiveg.py          thin 5g-Ansible machine adapter
-synthran/lifecycle.py               experiment orchestration
-synthran/network/runtime.py         read-only network verification/evidence
-synthran/experiment/observe.py      read-only UE/PDU observation
-synthran/experiment/rfsim.py        RFSIM Amber experiment
+synthran/adapters/fiveg.py             thin 5g-Ansible machine adapter
+synthran/lifecycle.py                  experiment orchestration
+synthran/network/runtime.py            read-only network verification/evidence
+synthran/experiment/observe.py         read-only UE/PDU observation
+synthran/experiment/rfsim.py           RFSIM Amber experiment
 synthran/experiment/rfsim_transport.py experiment-local RFSIM transport
-synthran/experiment/physical.py     physical Amber experiment
-synthran/iot_edge_transport.py      physical UE experiment transport
-synthran/research/                  measurement + analysis
-synthran/privacy.py                 repository/privacy controls
+synthran/experiment/physical.py        physical Amber experiment
+synthran/iot_edge_transport.py         physical UE experiment transport
+synthran/research/                     measurement + analysis
+synthran/privacy.py                    repository/privacy controls
 ```
 
-There is no `synthran/r2lab/` controller, no `deploy/ansible/` wrapper tree, no local network resource-preparation layer, and no direct Ansible streaming executor.
+There is no SynthRAN provider controller, no `synthran/r2lab/` controller, no `deploy/ansible/` wrapper tree, no local network resource-preparation layer, and no direct Ansible streaming executor.
 
 ## Design rules
 
-- 5g-Ansible is the sole 5G deployment authority.
-- SynthRAN passes native topology requests instead of maintaining a parallel support matrix.
+- 5g-Ansible is the sole provider and 5G deployment authority.
+- SynthRAN passes native provider/topology requests instead of maintaining parallel controller logic.
 - Deployment artifacts are consumed, not rewritten.
 - Live infrastructure control is never inferred from historical evidence.
 - Experiment mutation is bounded to run-owned workload/measurement state.
