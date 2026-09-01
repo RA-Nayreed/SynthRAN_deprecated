@@ -3,14 +3,8 @@ name: Purge fiveg boundary
 on:
   pull_request:
     paths:
-      - "synthran/adapters/**"
-      - "synthran/amber_experiment_runtime.py"
-      - "synthran/cli.py"
-      - "synthran/experiment/**"
-      - "synthran/fiveg_ansible.py"
-      - "synthran/iot_edge_transport.py"
-      - "synthran/lifecycle.py"
-      - "synthran/network/runtime.py"
+      - "synthran/**"
+      - "deploy/**"
       - "tests/test_fiveg_adapter.py"
       - "tests/test_fiveg_ansible.py"
       - ".github/workflows/purge-fiveg-boundary.yml"
@@ -18,14 +12,8 @@ on:
     branches:
       - purge/thin-fiveg-adapter
     paths:
-      - "synthran/adapters/**"
-      - "synthran/amber_experiment_runtime.py"
-      - "synthran/cli.py"
-      - "synthran/experiment/**"
-      - "synthran/fiveg_ansible.py"
-      - "synthran/iot_edge_transport.py"
-      - "synthran/lifecycle.py"
-      - "synthran/network/runtime.py"
+      - "synthran/**"
+      - "deploy/**"
       - "tests/test_fiveg_adapter.py"
       - "tests/test_fiveg_ansible.py"
       - ".github/workflows/purge-fiveg-boundary.yml"
@@ -57,10 +45,15 @@ jobs:
           python -m unittest -v \
             tests.test_fiveg_adapter \
             tests.test_fiveg_ansible
-      - name: Prove no SynthRAN R2Lab subsystem
+      - name: Prove deleted deployment layers stay deleted
         run: |
           test ! -e synthran/r2lab
+          test ! -e synthran/network/resources.py
+          test ! -e synthran/upstream_overlay.py
+          test ! -e deploy/ansible
           ! grep -R -n 'synthran\.r2lab' synthran
+          ! grep -R -n 'synthran\.network\.resources' synthran
+          ! grep -R -n 'synthran\.upstream_overlay' synthran
       - name: Prove no local topology support matrix
         run: |
           ! grep -R -n -E 'SUPPORTED_(CORE|RAN|RADIO)' synthran/adapters synthran/fiveg_ansible.py synthran/lifecycle.py synthran/cli.py
