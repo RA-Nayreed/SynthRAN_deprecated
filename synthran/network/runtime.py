@@ -1,53 +1,29 @@
-"""Thin 5g-Ansible deployment boundary plus read-only RFSIM path evidence.
-
-5g-Ansible owns network deployment.  SynthRAN only translates the remaining
-legacy run inputs into an upstream spec, validates upstream provenance, and
-observes the experiment path.  No Ansible, worktree, overlay, or Kubernetes
-mutation belongs in this module.
-"""
+"""Read-only network evidence for experiments on a 5g-Ansible deployment."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 import ipaddress
 import json
 from pathlib import Path
 import re
-import subprocess
 import tempfile
-from typing import Any, Callable, Mapping, Sequence, TextIO
+from typing import Any, Callable, Mapping
 
-from synthran.adapters.fiveg import (
-    FIVEG_SPEC_SCHEMA,
-    FiveGAdapter,
-    FiveGAdapterError,
-    write_spec,
-)
 from synthran.dependencies import DependencyLock
-from synthran.fiveg_ansible import NetworkDeploymentPlan, NetworkInventory
+from synthran.fiveg_ansible import NetworkInventory
 from synthran.live_preflight import (
-    CommandResult,
     LivePreflightError,
     Runner,
     ssh_command,
     subprocess_runner,
 )
-from synthran.slices_controller import fingerprint as context_fingerprint
 
 
 DEPLOYMENT_SCHEMA = "fiveg/deployment-manifest/v1"
 NETWORK_EVIDENCE_SCHEMA = "synthran/network-evidence/v1alpha1"
-DEFAULT_DEPLOY_TIMEOUT_SECONDS = 3600
 RUN_ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-HEX_SECRET_RE = re.compile(r"(?i)\b[0-9a-f]{32}\b")
-SUBSCRIBER_RE = re.compile(r"\b[0-9]{14,16}\b")
-PRIVATE_IPV4_RE = re.compile(
-    r"(?<![0-9])(?:10(?:\.[0-9]{1,3}){3}|"
-    r"192\.168(?:\.[0-9]{1,3}){2}|"
-    r"172\.(?:1[6-9]|2[0-9]|3[01])(?:\.[0-9]{1,3}){2})(?![0-9])"
-)
 KUBERNETES_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 RFSIM_NAMESPACE = "open5gs"
 RFSIM_INTERFACE = "tun_srsue1"
@@ -55,39 +31,7 @@ RFSIM_PDU_NETWORK = ipaddress.ip_network("12.1.0.0/16")
 
 
 class NetworkRuntimeError(RuntimeError):
-    """Raised when network provenance or experiment-path observation fails."""
-
-
-RunCommand = Callable[
-    [Sequence[str], Path, Mapping[str, str] | None, int],
-    CommandResult,
-]
-
-
-def run_command(
-    command: Sequence[str],
-    cwd: Path,
-    environment: Mapping[str, str] | None,
-    timeout_seconds: int,
-) -> CommandResult:
-    """Compatibility command runner for preparation code pending deletion."""
-
-    try:
-        completed = subprocess.run(
-            list(command),
-            cwd=cwd,
-            env=dict(environment) if environment is not None else None,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=timeout_seconds,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise NetworkRuntimeError("a required command was not found") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise NetworkRuntimeError("a command exceeded its timeout") from exc
-    return CommandResult(completed.returncode, completed.stdout or "")
+    """Raised when upstream provenance or experiment-path observation fails."""
 
 
 def validate_run_id(value: str) -> str:
@@ -113,183 +57,11 @@ def atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary_path.replace(path)
 
 
-def tree_sha256(root: Path) -> str:
-    """Compatibility hash helper used only by preparation code pending deletion."""
-
-    digest = hashlib.sha256()
-    try:
-        files = sorted(path for path in root.rglob("*") if path.is_file())
-        for path in files:
-            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(path.read_bytes())
-    except OSError as exc:
-        raise NetworkRuntimeError("unable to hash directory tree") from exc
-    if not files:
-        raise NetworkRuntimeError("directory tree is empty")
-    return digest.hexdigest()
-
-
-def sanitize_deployment_text(text: str, private_paths: Sequence[Path]) -> str:
-    """Redact secrets, subscriber IDs, private IPs, and local paths from evidence."""
-
-    sanitized = text
-    for path in sorted(
-        {str(item.resolve(strict=False)) for item in private_paths},
-        key=len,
-        reverse=True,
-    ):
-        if path:
-            sanitized = sanitized.replace(path, "<local-path>")
-            sanitized = sanitized.replace(path.replace("\\", "/"), "<local-path>")
-    sanitized = HEX_SECRET_RE.sub("<secret>", sanitized)
-    sanitized = SUBSCRIBER_RE.sub("<subscriber-id>", sanitized)
-    return PRIVATE_IPV4_RE.sub("<private-ip>", sanitized)
-
-
-def _container_reference(lock: DependencyLock, name: str) -> str:
-    containers = lock.raw.get("containers")
-    if not isinstance(containers, dict):
-        raise NetworkRuntimeError("dependency lock container mapping is unavailable")
-    entry = containers.get(name)
-    if not isinstance(entry, dict):
-        raise NetworkRuntimeError(f"dependency lock is missing container {name}")
-    image, digest = entry.get("image"), entry.get("digest")
-    if (
-        not isinstance(image, str)
-        or not image
-        or not isinstance(digest, str)
-        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
-    ):
-        raise NetworkRuntimeError(f"container {name} is not digest-addressed")
-    return f"{image}@{digest}"
-
-
-def golden_path_image_variables(lock: DependencyLock) -> dict[str, str]:
-    """Compatibility image map for experiment code pending manifest migration."""
-
-    return {
-        name: _container_reference(lock, name)
-        for name in (
-            "open5gs",
-            "open5gs_smf",
-            "open5gs_mongodb",
-            "open5gs_amf",
-            "srsran_gnb",
-            "srsran_ue",
-            "busybox_1_32",
-            "busybox_1_36",
-        )
-    }
-
-
-@dataclass(frozen=True)
-class DeploymentResult:
-    run_id: str
-    run_directory: Path
-    manifest_path: Path
-    log_path: Path
-    spec_path: Path
-
-
-def _locked_commit(lock: DependencyLock, name: str) -> str:
-    dependency = next((item for item in lock.git if item.name == name), None)
+def _locked_fiveg_commit(lock: DependencyLock) -> str:
+    dependency = next((item for item in lock.git if item.name == "fiveg_ansible"), None)
     if dependency is None:
-        raise NetworkRuntimeError(f"dependency lock does not define {name}")
+        raise NetworkRuntimeError("dependency lock does not define fiveg_ansible")
     return dependency.commit
-
-
-def _migration_spec(
-    *,
-    plan: NetworkDeploymentPlan,
-    lock: DependencyLock,
-    run_id: str,
-) -> dict[str, Any]:
-    """Translate the old CLI shape without defining a SynthRAN support matrix."""
-
-    platform_type = "rfsim" if plan.inventory.radio == "rfsim" else "r2lab"
-    return {
-        "schema": FIVEG_SPEC_SCHEMA,
-        "id": run_id,
-        "core": {"type": plan.inventory.core, "node": plan.inventory.core_node.name},
-        "ran": {"type": plan.inventory.ran, "node": plan.inventory.ran_node.name},
-        "platform": {"type": platform_type, "ru": plan.inventory.radio},
-        "ues": {"qhats": [], "qfits": [], "phones": []},
-        "monitoring": {
-            "enabled": plan.inventory.monitoring_enabled,
-            "node": plan.inventory.all_vars.get("monitor_node_name", "sopnode-f1"),
-        },
-        "profile": plan.profile,
-        "reservation": {"enabled": False, "r2lab_mode": "none"},
-        "deployment": {
-            "selected_slices": ["slice1"] if plan.inventory.core == "open5gs" else [],
-            "selected_ues": ["uesim01"]
-            if platform_type == "rfsim" and plan.inventory.ran == "srsRAN"
-            else [],
-            "open5gs_webui_enabled": False,
-            "open5gs_admin_account_enabled": False,
-            "extra_vars": {
-                "repo_branch": _locked_commit(lock, "open5gs_k8s"),
-                "version": _locked_commit(lock, "srsran_helm"),
-            },
-        },
-        "scenario": {"type": "none"},
-    }
-
-
-def execute_network_deployment(
-    *,
-    plan: NetworkDeploymentPlan,
-    lock: DependencyLock,
-    dependency_root: Path,
-    run_id: str,
-    run_root: Path = Path(".synthran/runs"),
-    timeout_seconds: int = DEFAULT_DEPLOY_TIMEOUT_SECONDS,
-    progress: TextIO | None = None,
-    resume: bool = False,
-    **_: Any,
-) -> DeploymentResult:
-    """Deploy only through the pinned 5g-Ansible machine API."""
-
-    run_id = validate_run_id(run_id)
-    state_root = run_root.expanduser().resolve()
-    state_root.mkdir(parents=True, exist_ok=True)
-    spec_path = state_root / f"{run_id}.fiveg.json"
-    write_spec(spec_path, _migration_spec(plan=plan, lock=lock, run_id=run_id))
-    try:
-        adapter = FiveGAdapter.from_lock(
-            lock=lock,
-            dependency_root=dependency_root,
-            state_root=state_root,
-            timeout_seconds=timeout_seconds,
-        )
-        if progress is not None:
-            print(f"[synthran] 5g-Ansible plan: {run_id}", file=progress, flush=True)
-        adapter.plan(spec_path)
-        if progress is not None:
-            print(f"[synthran] 5g-Ansible up: {run_id}", file=progress, flush=True)
-        manifest = adapter.up(spec_path, resume=resume)
-    except FiveGAdapterError as exc:
-        raise NetworkRuntimeError(str(exc)) from exc
-
-    if manifest.get("id") != run_id or manifest.get("state") != "ready":
-        raise NetworkRuntimeError("5g-Ansible did not return a ready deployment manifest")
-    if manifest.get("fiveg_ansible_commit") != _locked_commit(lock, "fiveg_ansible"):
-        raise NetworkRuntimeError("5g-Ansible manifest commit does not match the lock")
-    directory_value = manifest.get("state_directory")
-    if not isinstance(directory_value, str) or not directory_value:
-        raise NetworkRuntimeError("5g-Ansible manifest did not report its state directory")
-    run_directory = Path(directory_value).expanduser().resolve()
-    manifest_path = run_directory / "manifest.json"
-    if not manifest_path.is_file():
-        raise NetworkRuntimeError("5g-Ansible deployment manifest was not persisted")
-    return DeploymentResult(
-        run_id=run_id,
-        run_directory=run_directory,
-        manifest_path=manifest_path,
-        log_path=run_directory / "deploy.log",
-        spec_path=spec_path,
-    )
 
 
 def load_deployment_manifest(
@@ -313,7 +85,7 @@ def load_deployment_manifest(
         raise NetworkRuntimeError("5g-Ansible deployment manifest ID does not match")
     if payload.get("state") != "ready":
         raise NetworkRuntimeError("5g-Ansible deployment is not ready")
-    if payload.get("fiveg_ansible_commit") != _locked_commit(lock, "fiveg_ansible"):
+    if payload.get("fiveg_ansible_commit") != _locked_fiveg_commit(lock):
         raise NetworkRuntimeError("5g-Ansible deployment provenance does not match the lock")
     return payload
 
@@ -425,12 +197,7 @@ def verify_network_path(
     timeout_seconds: int = 30,
     now: datetime | None = None,
 ) -> NetworkVerificationReport:
-    """Read-only proof of the current Amber-over-RFSIM PDU path.
-
-    Deployment ownership and topology validity come from the upstream manifest.
-    This check intentionally does not require SynthRAN-specific Kubernetes labels
-    or mutate the deployed network.
-    """
+    """Read-only proof of the current Amber-over-RFSIM PDU path."""
 
     run_id = validate_run_id(run_id)
     checks: list[VerificationCheck] = []
@@ -473,6 +240,7 @@ def verify_network_path(
         checks.append(VerificationCheck("gnb-cell", False, "gNB pod is unavailable"))
     else:
         gnb_name = str(gnb["metadata"]["name"])
+
         def cell() -> str:
             result = runner(
                 ssh_command(
@@ -495,6 +263,7 @@ def verify_network_path(
         checks.append(VerificationCheck("ue-tunnel", False, "srsUE pod is unavailable"))
     else:
         ue_name = str(ue["metadata"]["name"])
+
         def tunnel() -> str:
             nonlocal pdu_address
             interfaces = _remote_json(
@@ -546,6 +315,7 @@ def verify_network_path(
         checks.append(VerificationCheck("upf-route", False, "UPF pod is unavailable"))
     else:
         upf_name = str(upf["metadata"]["name"])
+
         def upf_route() -> str:
             routes = _remote_json(
                 runner,
@@ -566,9 +336,7 @@ def verify_network_path(
         record("upf-route", upf_route)
 
     dependencies = {
-        item.name: item.commit
-        for item in lock.git
-        if item.name == "fiveg_ansible"
+        item.name: item.commit for item in lock.git if item.name == "fiveg_ansible"
     }
     return NetworkVerificationReport(
         run_id=run_id,
