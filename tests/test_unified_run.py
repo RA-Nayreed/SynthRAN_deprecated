@@ -64,10 +64,7 @@ class UnifiedRunTests(unittest.TestCase):
                 "project-test",
             )
         )
-        with tempfile.TemporaryDirectory() as temporary:
-            known_hosts = Path(temporary) / "known_hosts"
-            known_hosts.write_text("fixture\n", encoding="utf-8")
-            spec = _deployment_spec(args, known_hosts=known_hosts)
+        spec = _deployment_spec(args, known_hosts=None)
         self.assertEqual("fiveg/deployment/v1", spec["schema"])
         self.assertEqual(
             {
@@ -81,6 +78,8 @@ class UnifiedRunTests(unittest.TestCase):
         self.assertEqual({"type": "rfsim", "ru": "rfsim"}, spec["platform"])
         self.assertEqual({"qhats": [], "qfits": [], "phones": []}, spec["ues"])
         self.assertEqual("none", spec["reservation"]["r2lab_mode"])
+        self.assertEqual("", spec["r2lab"]["known_hosts_file"])
+        self.assertTrue(spec["r2lab"]["strict_host_key_checking"])
 
     def test_physical_run_passes_provider_ru_ue_and_ssh_authority_upstream(self) -> None:
         args = _parser().parse_args(
@@ -132,11 +131,8 @@ class UnifiedRunTests(unittest.TestCase):
                 "virtual-001",
             )
         )
-        with tempfile.TemporaryDirectory() as temporary:
-            known_hosts = Path(temporary) / "known_hosts"
-            known_hosts.write_text("fixture\n", encoding="utf-8")
-            with self.assertRaisesRegex(Exception, "slices-project"):
-                _deployment_spec(args, known_hosts=known_hosts)
+        with self.assertRaisesRegex(Exception, "slices-project"):
+            _deployment_spec(args, known_hosts=None)
 
 
 if __name__ == "__main__":
