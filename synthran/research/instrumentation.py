@@ -15,7 +15,7 @@ import time
 from typing import Any, Callable, Iterator, Mapping
 
 from synthran.experiment import build_scenario as build_base_scenario
-from synthran.experiment import runtime as base_runtime
+from synthran.experiment import live as base_runtime
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.live_preflight import ssh_command
 from synthran.research import (
