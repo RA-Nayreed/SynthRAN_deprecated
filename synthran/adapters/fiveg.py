@@ -147,6 +147,16 @@ def load_spec(path: Path) -> Mapping[str, Any]:
     return value
 
 
+def _failure_detail(result: CommandResult) -> str:
+    """Return one concise upstream diagnostic without replaying a full subprocess log."""
+
+    text = result.stderr.strip() or result.stdout.strip()
+    if not text:
+        return ""
+    line = next((item.strip() for item in reversed(text.splitlines()) if item.strip()), "")
+    return line[-1000:]
+
+
 @dataclass(frozen=True)
 class FiveGAdapter:
     """Invoke one locked 5g-Ansible checkout through ``bin/fiveg`` only."""
@@ -201,9 +211,10 @@ class FiveGAdapter:
             self.timeout_seconds,
         )
         if result.returncode != 0:
-            raise FiveGAdapterError(
-                f"5g-Ansible {arguments[0] if arguments else 'operation'} failed"
-            )
+            operation = arguments[0] if arguments else "operation"
+            detail = _failure_detail(result)
+            suffix = f": {detail}" if detail else ""
+            raise FiveGAdapterError(f"5g-Ansible {operation} failed{suffix}")
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
