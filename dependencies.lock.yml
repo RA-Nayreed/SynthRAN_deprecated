@@ -1,6 +1,6 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-09-01T03:50:00Z",
+  "resolved_at_utc": "2026-09-01T03:55:00Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
@@ -25,128 +25,9 @@
       "tag": "2.1.2-alpine",
       "digest": "sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797",
       "license": "EPL-2.0 OR EDL-1.0"
-    },
-    "open5gs": {
-      "image": "ghcr.io/niloysh/open5gs",
-      "tag": "v2.7.0",
-      "digest": "sha256:eb8b23589c724ba2e18b783c544dbcd56f02da29f818d4cf1974853b53aee329",
-      "platform": "linux/amd64",
-      "role": "Golden path Open5GS network functions",
-      "license": "NOASSERTION"
-    },
-    "open5gs_smf": {
-      "image": "ghcr.io/niloysh/open5gs",
-      "tag": "v2.7.0",
-      "digest": "sha256:eb8b23589c724ba2e18b783c544dbcd56f02da29f818d4cf1974853b53aee329",
-      "platform": "linux/amd64",
-      "role": "Golden path Open5GS slice-one SMF",
-      "license": "NOASSERTION"
-    },
-    "open5gs_mongodb": {
-      "image": "docker.io/r2labuser/mongodb",
-      "tag": "4.4.4-debian-10-r0",
-      "digest": "sha256:95abfb776bb4e6ee34f7b5b1c811f978d132136035deacdb7143f798f0343a31",
-      "platform": "linux/amd64",
-      "role": "Golden path Open5GS subscriber database",
-      "license": "NOASSERTION"
-    },
-    "open5gs_amf": {
-      "image": "docker.io/r2labuser/open5gs-amf-patched",
-      "tag": "v2.7.0",
-      "digest": "sha256:13818df32958781f910a61a20df8b3c856ae5ef33d941517b959885182bd4295",
-      "platform": "linux/amd64",
-      "role": "Golden path patched Open5GS AMF",
-      "license": "NOASSERTION"
-    },
-    "srsran_gnb": {
-      "image": "docker.io/r2labuser/srsran-gnb-zmq-csi",
-      "tag": "v1.0.0.21",
-      "digest": "sha256:89ceaebc6adddb9900b3cae01316fadea8660aeff6ce60e1b335ba0a9d0ff9cd",
-      "platform": "linux/amd64",
-      "role": "Golden path srsRAN RFSIM gNB",
-      "license": "NOASSERTION"
-    },
-    "srsran_gnb_physical": {
-      "image": "docker.io/r2labuser/srsran-gnb-uhd-csi",
-      "tag": "v1.0.0.21",
-      "digest": "sha256:7c3bd04fca5e241e9e245c52cc5882bb47c522a55c32b5ed1b9a1ed8fc56a7f2",
-      "platform": "linux/amd64",
-      "role": "Physical R2Lab N300 srsRAN gNB",
-      "license": "NOASSERTION"
-    },
-    "srsran_gnb_physical_n320": {
-      "image": "docker.io/r2labuser/srsran-gnb-uhd",
-      "tag": "v1.0",
-      "digest": "sha256:f22e391ff19bb4d838e24962f6429a64abae0bd6abd812f4be8c10f8af8fe690",
-      "platform": "linux/amd64",
-      "role": "Physical R2Lab N320 srsRAN gNB",
-      "license": "NOASSERTION"
-    },
-    "srsran_ue": {
-      "image": "ghcr.io/ziyad-mabrouk/srsue",
-      "tag": "v1.0",
-      "digest": "sha256:c1c9eb2119e48d1f5f9120c71cd539c606fca6c242a2e430409269c121610bb2",
-      "platform": "linux/amd64",
-      "role": "Golden path srsUE edge gateway",
-      "license": "NOASSERTION"
-    },
-    "busybox_1_32": {
-      "image": "docker.io/library/busybox",
-      "tag": "1.32.0",
-      "digest": "sha256:31a54a0cf86d7354788a8265f60ae6acb4b348a67efbcf7c1007dd3cf7af05ab",
-      "platform": "linux/amd64",
-      "role": "Golden path Open5GS readiness helper",
-      "license": "GPL-2.0-only"
-    },
-    "busybox_1_36": {
-      "image": "docker.io/library/busybox",
-      "tag": "1.36",
-      "digest": "sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f",
-      "platform": "linux/amd64",
-      "role": "Golden path DNS and gNB-log helper",
-      "license": "GPL-2.0-only"
-    }
-  },
-  "ansible_collections": {
-    "kubernetes_core": {
-      "name": "kubernetes.core",
-      "version": "6.5.0",
-      "source": "https://galaxy.ansible.com",
-      "role": "Golden path Kubernetes and Helm modules",
-      "license": "GPL-3.0-or-later"
-    },
-    "community_general": {
-      "name": "community.general",
-      "version": "13.0.1",
-      "source": "https://galaxy.ansible.com",
-      "role": "Kernel module management required by locked upstream preparation",
-      "license": "GPL-3.0-or-later"
-    },
-    "ansible_posix": {
-      "name": "ansible.posix",
-      "version": "2.2.2",
-      "source": "https://galaxy.ansible.com",
-      "role": "Mount management required by locked upstream preparation",
-      "license": "GPL-3.0-or-later"
     }
   },
   "tools": {
-    "yq_linux_amd64": {
-      "version": "4.45.1",
-      "sha256": "sha256:654d2943ca1d3be2024089eb4f270f4070f491a0610481d128509b2834870049",
-      "url": "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64",
-      "path": "/usr/local/bin/yq",
-      "role": "Golden path locked Helm values transformation",
-      "license": "MIT"
-    },
-    "helm_linux_amd64": {
-      "version": "3.18.4",
-      "sha256": "sha256:f8180838c23d7c7d797b208861fecb591d9ce1690d8704ed1e4cb8e2add966c1",
-      "url": "https://get.helm.sh/helm-v3.18.4-linux-amd64.tar.gz",
-      "path": "/usr/local/bin/helm",
-      "role": "Golden path Kubernetes package deployment",
-      "license": "Apache-2.0"
-    },
     "iperf3_linux_amd64_source": {
       "version": "3.21",
       "sha256": "sha256:656e4405ebd620121de7ceca3eaf43a88f79ea1b857d041a6a0b1314801acdd8",
@@ -156,20 +37,6 @@
       "role": "Source-locked static iperf3 for reproducible research load generation",
       "license": "BSD-3-Clause"
     }
-  },
-  "remote_python": {
-    "packages": {
-      "dnspython": "2.3.0",
-      "kubernetes": "32.0.1",
-      "pymongo": "4.5.0",
-      "python-dateutil": "2.8.2",
-      "ruamel.yaml": "0.18.5",
-      "six": "1.16.0"
-    }
-  },
-  "resource_bootstrap": {
-    "status": "ready",
-    "reason": "The operator accepted the experimental use of mutable upstream apt, chart, manifest, and installer transitives; live preparation is enabled only through the guarded Linux SLICES controller path."
   },
   "conda": {
     "environment_name": "synthran",
