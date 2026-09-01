@@ -42,7 +42,7 @@ RFSIM and R2Lab are upstream platform selections. There is no separate `synthran
 
 ```text
 run        request an upstream deployment and execute an experiment
- doctor    validate a native deployment request through 5g-Ansible plan
+doctor     validate a native deployment request through 5g-Ansible plan
 calibrate  measure reference capacity on an accepted RFSIM path
 inspect    show upstream capabilities or persisted run state
 analyze    analyze a completed campaign
@@ -69,6 +69,19 @@ Authenticate the provider tools required by the pinned 5g-Ansible checkout and p
 export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
 export SYNTHRAN_SLICES_KNOWN_HOSTS="$PWD/.synthran/known_hosts"
 ```
+
+## Validate the repository
+
+Run the complete offline validation before live acceptance:
+
+```zsh
+python -m unittest discover -s tests -v
+synthran dev privacy scan --worktree
+git diff --check
+git status --short
+```
+
+Offline success proves the installed CLI, unit contracts, architecture boundary, and tracked-source privacy checks. It is not live RFSIM or physical R2Lab acceptance.
 
 ## Virtual run
 
