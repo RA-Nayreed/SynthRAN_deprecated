@@ -9,22 +9,6 @@ import time
 from typing import Any, Mapping
 
 from synthran.experiment import ExperimentError, validate_run_id
-from synthran.experiment.r2lab import (
-    LOCAL_UE_RELAY_PORT,
-    ManagedPhysicalUeRelay,
-    _prove_ue_route,
-    _ue_relay_process_count,
-    _validate_ue,
-    build_physical_ue_stdio_relay_command,
-)
-from synthran.experiment.runtime import (
-    REMOTE_EDGE_FORWARD_PORT,
-    _core_address,
-    _remote,
-    _remote_path_exists,
-    _ssh_reverse_tunnel_command,
-    _transfer_file,
-)
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.ingress import IngressSnapshot
 from synthran.iot_edge_transport import (
@@ -38,6 +22,22 @@ from synthran.iot_edge_transport import (
 )
 from synthran.iot_source import MQTTEndpoint
 from synthran.live_preflight import LivePreflightError, ssh_command
+from synthran.r2lab.iot_live import (
+    LOCAL_UE_RELAY_PORT,
+    ManagedPhysicalUeRelay,
+    _prove_ue_route,
+    _ue_relay_process_count,
+    _validate_ue,
+    build_physical_ue_stdio_relay_command,
+)
+from synthran.r2lab.iot_tunnel import (
+    REMOTE_EDGE_FORWARD_PORT,
+    _core_address,
+    _remote,
+    _remote_path_exists,
+    _ssh_reverse_tunnel_command,
+    _transfer_file,
+)
 
 
 R2LAB_AMBER_INGRESS_PORT = 18886
