@@ -15,13 +15,18 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 class DependencyLockTests(unittest.TestCase):
     def test_repository_lock_is_valid_and_immutable(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
-        self.assertEqual(5, len(lock.git))
+        self.assertEqual(4, len(lock.git))
         self.assertTrue(all(len(item.commit) == 40 for item in lock.git))
-        self.assertEqual(3, sum(item.sync for item in lock.git))
+        self.assertEqual(2, sum(item.sync for item in lock.git))
         self.assertIn("amber", {item.name for item in lock.git})
+        self.assertIn("fiveg_ansible", {item.name for item in lock.git})
         self.assertEqual(
             "08dd6bd445e607ad3accf4e9a2dff51a499ebdf9",
             next(item.commit for item in lock.git if item.name == "amber"),
+        )
+        self.assertEqual(
+            "b207228ba02ae30cb1155d1d2e06ae235d61a37c",
+            next(item.commit for item in lock.git if item.name == "fiveg_ansible"),
         )
         self.assertEqual("3.12.13", lock.raw["conda"]["packages"]["python"]["version"])
         self.assertEqual("21.0.9", lock.raw["conda"]["packages"]["openjdk"]["version"])
@@ -36,9 +41,10 @@ class DependencyLockTests(unittest.TestCase):
         self.assertFalse(root.exists())
         rendered = output.getvalue()
         self.assertIn("fiveg_ansible", rendered)
-        self.assertIn("contiki_ng", rendered)
         self.assertIn("amber", rendered)
+        self.assertNotIn("contiki_ng", rendered)
         self.assertNotIn("open5gs_k8s", rendered)
+        self.assertNotIn("srsran_helm", rendered)
 
     def test_dry_run_all_includes_transitive_dependencies(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
