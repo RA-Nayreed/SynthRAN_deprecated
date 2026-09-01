@@ -5,7 +5,10 @@ on:
     paths:
       - "synthran/adapters/**"
       - "synthran/fiveg_ansible.py"
+      - "synthran/lifecycle.py"
       - "synthran/network/runtime.py"
+      - "synthran/r2lab/iot_lifecycle.py"
+      - "synthran/r2lab/iot_workload.py"
       - "tests/test_fiveg_adapter.py"
       - "tests/test_fiveg_ansible.py"
       - ".github/workflows/purge-fiveg-boundary.yml"
@@ -15,7 +18,10 @@ on:
     paths:
       - "synthran/adapters/**"
       - "synthran/fiveg_ansible.py"
+      - "synthran/lifecycle.py"
       - "synthran/network/runtime.py"
+      - "synthran/r2lab/iot_lifecycle.py"
+      - "synthran/r2lab/iot_workload.py"
       - "tests/test_fiveg_adapter.py"
       - "tests/test_fiveg_ansible.py"
       - ".github/workflows/purge-fiveg-boundary.yml"
@@ -31,12 +37,15 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Compile adapter boundary
+      - name: Compile upstream-only lifecycle
         run: |
           python -m py_compile \
             synthran/adapters/fiveg.py \
             synthran/fiveg_ansible.py \
-            synthran/network/runtime.py
+            synthran/lifecycle.py \
+            synthran/network/runtime.py \
+            synthran/r2lab/iot_lifecycle.py \
+            synthran/r2lab/iot_workload.py
       - name: Run adapter boundary tests
         run: |
           python -m unittest -v \
@@ -44,8 +53,13 @@ jobs:
             tests.test_fiveg_ansible
       - name: Prove no local topology support matrix
         run: |
-          ! grep -R -n -E 'SUPPORTED_(CORE|RAN|RADIO)' synthran/adapters synthran/fiveg_ansible.py
-          ! grep -R -n 'apply_network_overlay' synthran/adapters synthran/fiveg_ansible.py
+          ! grep -R -n -E 'SUPPORTED_(CORE|RAN|RADIO)' synthran/adapters synthran/fiveg_ansible.py synthran/lifecycle.py
+          ! grep -R -n 'apply_network_overlay' synthran/adapters synthran/fiveg_ansible.py synthran/lifecycle.py
+      - name: Prove lifecycle delegates network mutation upstream
+        run: |
+          grep -q 'FiveGAdapter' synthran/lifecycle.py
+          ! grep -n -E 'ansible-playbook|worktree add|apply_network_overlay|copytree|execute_resource_preparation|prepare_physical_resources|stage_n3xx_gnb|start_n3xx_gnb|activate_physical_ue' synthran/lifecycle.py
+          ! grep -n -E 'verify_current_n3xx_n2|load_topology|PhysicalRunEvidence' synthran/r2lab/iot_workload.py synthran/r2lab/iot_lifecycle.py
       - name: Prove network executor delegates upstream
         run: |
           grep -q 'FiveGAdapter' synthran/network/runtime.py
