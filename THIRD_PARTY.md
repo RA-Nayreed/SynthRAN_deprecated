@@ -6,7 +6,7 @@ SynthRAN original code is licensed under Apache-2.0. External projects remain se
 
 | Dependency | Purpose | Locked identity | Reuse | License status |
 |---|---|---|---|---|
-| `RA-Nayreed/5g-Ansible` | SLICES provider context, 5G infrastructure authority, and structured deployment progress | `627b190e66aafadf618b0fb9ab2511a07ada535e` | External detached checkout at `.deps/5g_ansible-r2lab`; invoked only through `bin/fiveg` | `NOASSERTION` in the SynthRAN lock; do not copy or redistribute upstream source without reviewing its own repository |
+| `RA-Nayreed/5g-Ansible` | SLICES provider context, 5G infrastructure authority, and structured deployment progress | `4799f4d93577840a56255fef1a1eb7fb6017b87f` | External detached checkout at `.deps/5g_ansible-r2lab`; invoked only through `bin/fiveg` | `NOASSERTION` in the SynthRAN lock; do not copy or redistribute upstream source without reviewing its own repository |
 | `RA-Nayreed/Amber` | Ambient-IoT discrete-event source model | `08dd6bd445e607ad3accf4e9a2dff51a499ebdf9` | External detached checkout at `.deps/amber`; SynthRAN experiment adapters remain local | BSD-3-Clause |
 | `eclipse-mosquitto` | Experiment-owned MQTT broker | `2.1.2-alpine@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797` | Container image | EPL-2.0 OR EDL-1.0; retain image notices |
 | iperf3 | Controlled research load generation | source `3.21`, `sha256:656e4405ebd620121de7ceca3eaf43a88f79ea1b857d041a6a0b1314801acdd8` | Source-locked research tool | BSD-3-Clause |
