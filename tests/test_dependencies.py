@@ -24,11 +24,30 @@ class DependencyLockTests(unittest.TestCase):
             next(item.commit for item in lock.git if item.name == "amber"),
         )
         self.assertEqual(
-            "b207228ba02ae30cb1155d1d2e06ae235d61a37c",
+            "71025e88326732dcf592e99a8c07c700704650ac",
             next(item.commit for item in lock.git if item.name == "fiveg_ansible"),
         )
         self.assertEqual("3.12.13", lock.raw["conda"]["packages"]["python"]["version"])
         self.assertEqual("4.1.1", lock.raw["conda"]["packages"]["simpy"]["version"])
+
+    def test_lock_has_no_upstream_owned_dependency_sections(self) -> None:
+        lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
+        self.assertEqual(
+            {"schema", "resolved_at_utc", "git", "containers", "tools", "conda", "github_actions"},
+            set(lock.raw),
+        )
+        self.assertEqual({"mosquitto"}, set(lock.raw["containers"]))
+        self.assertEqual({"iperf3_linux_amd64_source"}, set(lock.raw["tools"]))
+        for retired in (
+            "ansible_collections",
+            "remote_python",
+            "resource_bootstrap",
+            "open5gs",
+            "open5gs_smf",
+            "helm_linux_amd64",
+            "yq_linux_amd64",
+        ):
+            self.assertNotIn(retired, json.dumps(lock.raw))
 
     def test_dry_run_syncs_both_direct_dependencies_without_writing(self) -> None:
         lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
@@ -135,42 +154,11 @@ class DependencyLockTests(unittest.TestCase):
             with self.assertRaisesRegex(DependencyError, "must be 'synthran'"):
                 load_lock(Path("virtual-lock.yml"))
 
-    def test_ansible_collection_version_range_is_rejected(self) -> None:
+    def test_iperf_tool_requires_a_full_digest(self) -> None:
         lock_data = json.loads((REPOSITORY_ROOT / "dependencies.lock.yml").read_text())
-        lock_data["ansible_collections"]["kubernetes_core"]["version"] = ">=6.5"
-        with patch.object(Path, "read_text", return_value=json.dumps(lock_data)):
-            with self.assertRaisesRegex(DependencyError, "one exact version"):
-                load_lock(Path("virtual-lock.yml"))
-
-    def test_golden_path_tool_requires_a_full_digest(self) -> None:
-        lock_data = json.loads((REPOSITORY_ROOT / "dependencies.lock.yml").read_text())
-        lock_data["tools"]["yq_linux_amd64"]["sha256"] = "latest"
+        lock_data["tools"]["iperf3_linux_amd64_source"]["sha256"] = "latest"
         with patch.object(Path, "read_text", return_value=json.dumps(lock_data)):
             with self.assertRaisesRegex(DependencyError, "full sha256 digest"):
-                load_lock(Path("virtual-lock.yml"))
-
-    def test_locked_remote_tools_have_immutable_linux_sources(self) -> None:
-        lock = load_lock(REPOSITORY_ROOT / "dependencies.lock.yml")
-        tools = lock.raw["tools"]
-        self.assertEqual(
-            "sha256:f8180838c23d7c7d797b208861fecb591d9ce1690d8704ed1e4cb8e2add966c1",
-            tools["helm_linux_amd64"]["sha256"],
-        )
-        self.assertEqual("/usr/local/bin/helm", tools["helm_linux_amd64"]["path"])
-        self.assertEqual(
-            "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64",
-            tools["yq_linux_amd64"]["url"],
-        )
-        self.assertEqual(
-            "32.0.1",
-            lock.raw["remote_python"]["packages"]["kubernetes"],
-        )
-
-    def test_remote_python_package_version_range_is_rejected(self) -> None:
-        lock_data = json.loads((REPOSITORY_ROOT / "dependencies.lock.yml").read_text())
-        lock_data["remote_python"]["packages"]["pymongo"] = ">=4"
-        with patch.object(Path, "read_text", return_value=json.dumps(lock_data)):
-            with self.assertRaisesRegex(DependencyError, "one exact version"):
                 load_lock(Path("virtual-lock.yml"))
 
 
