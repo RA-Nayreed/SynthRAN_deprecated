@@ -7,27 +7,64 @@ from unittest.mock import patch
 
 from synthran.fiveg_ansible import InventoryHost, NetworkInventory
 from synthran.iot_edge_transport import (
+    PHYSICAL_UE_INTERFACE,
     RfsimEdgeTransportAdapter,
     RfsimEdgeTransportSession,
     _local_forward_command,
+    _physical_local_forward_command,
     _remote_listener_probe_command,
+    prove_physical_ue_route,
+    resolve_physical_ue,
 )
 from synthran.iot_source import MQTTEndpoint
+from synthran.live_preflight import CommandResult
 
 
-def inventory() -> NetworkInventory:
+def inventory(*, physical: bool = False) -> NetworkInventory:
+    ue_hosts = {}
+    all_vars = {"core": "open5gs", "ran": "srsran", "rru": "rfsim"}
+    if physical:
+        all_vars["rru"] = "n300"
+        ue_hosts = {
+            "qfit07": InventoryHost(
+                name="qfit07",
+                variables={
+                    "ansible_host": "qfit07",
+                    "ansible_user": "root",
+                    "ansible_ssh_common_args": (
+                        "-o ProxyJump=slice@faraday.inria.fr "
+                        "-o StrictHostKeyChecking=yes "
+                        "-o UserKnownHostsFile=/tmp/known_hosts"
+                    ),
+                    "mode": "mbim",
+                },
+            )
+        }
     return NetworkInventory(
         path=Path("inventory.ini"),
         sha256="a" * 64,
         core_node=InventoryHost(
             name="sopnode-f2",
-            variables={"ansible_user": "root", "ansible_host": "core.example"},
+            variables={
+                "ansible_user": "root",
+                "ansible_host": "core.example",
+                "nic_interface": "ens2f1",
+                "ip": "172.28.2.77",
+                "storage": "sda1",
+            },
         ),
         ran_node=InventoryHost(
             name="sopnode-f3",
-            variables={"ansible_user": "root", "ansible_host": "ran.example"},
+            variables={
+                "ansible_user": "root",
+                "ansible_host": "ran.example",
+                "nic_interface": "ens15f1",
+                "ip": "172.28.2.95",
+                "storage": "sdb2",
+            },
         ),
-        all_vars={"core": "open5gs", "ran": "srsran", "rru": "rfsim"},
+        all_vars=all_vars,
+        ue_hosts=ue_hosts,
     )
 
 
@@ -162,7 +199,7 @@ class RfsimEdgeTransportTests(unittest.TestCase):
                 "synthran.iot_edge_transport._remote_port_is_closed",
                 return_value=False,
             ):
-                with self.assertRaisesRegex(Exception, "already owned"):
+                with self.assertRaisesRegex(Exception, "already in use"):
                     adapter.start(
                         run_id="amber-rfsim-test",
                         ue_pod="srsran-ue-test",
@@ -230,6 +267,51 @@ class RfsimEdgeTransportTests(unittest.TestCase):
             {18883: (101,), 18886: (102,)},
         )
         self.assertTrue(session.evidence()["cleanup_valid"])
+
+
+class PhysicalEdgeTransportTests(unittest.TestCase):
+    def test_physical_ue_is_resolved_only_from_upstream_inventory(self) -> None:
+        endpoint = resolve_physical_ue(inventory(physical=True), "qfit07")
+        self.assertEqual("qfit07", endpoint.name)
+        self.assertEqual("qfit07", endpoint.host)
+        self.assertEqual("root", endpoint.user)
+        self.assertEqual("mbim", endpoint.mode)
+        self.assertIn("ProxyJump=slice@faraday.inria.fr", " ".join(endpoint.ssh_common_args))
+
+    def test_unknown_physical_ue_fails_closed(self) -> None:
+        with self.assertRaisesRegex(Exception, "not present in the upstream inventory"):
+            resolve_physical_ue(inventory(physical=True), "qfit99")
+
+    def test_physical_forward_uses_upstream_proxy_and_selected_ue(self) -> None:
+        endpoint = resolve_physical_ue(inventory(physical=True), "qfit07")
+        command = _physical_local_forward_command(
+            endpoint,
+            local_port=18886,
+            target_host="172.28.2.77",
+            target_port=18886,
+        )
+        rendered = " ".join(command)
+        self.assertIn("ProxyJump=slice@faraday.inria.fr", rendered)
+        self.assertIn("StrictHostKeyChecking=yes", rendered)
+        self.assertIn("127.0.0.1:18886:172.28.2.77:18886", rendered)
+        self.assertIn("root@qfit07", rendered)
+        self.assertNotIn("0.0.0.0", rendered)
+
+    def test_physical_route_gate_requires_wwan0(self) -> None:
+        endpoint = resolve_physical_ue(inventory(physical=True), "qfit07")
+        with patch(
+            "synthran.iot_edge_transport._run",
+            return_value=CommandResult(0, '[{"dst":"172.28.2.77","dev":"wwan0"}]'),
+        ):
+            prove_physical_ue_route(endpoint, "172.28.2.77")
+        self.assertEqual("wwan0", PHYSICAL_UE_INTERFACE)
+
+        with patch(
+            "synthran.iot_edge_transport._run",
+            return_value=CommandResult(0, '[{"dst":"172.28.2.77","dev":"eth0"}]'),
+        ):
+            with self.assertRaisesRegex(Exception, "not routed through wwan0"):
+                prove_physical_ue_route(endpoint, "172.28.2.77")
 
 
 if __name__ == "__main__":
