@@ -1,81 +1,75 @@
 # Dependencies
 
-SynthRAN integrates reviewed upstream projects by immutable identity. External repositories remain external dependencies; SynthRAN wraps them with validation, narrow overlays, evidence, and cleanup rather than vendoring or rewriting them.
+SynthRAN locks only dependencies it consumes directly. Infrastructure internals owned by 5g-Ansible are deliberately absent from the SynthRAN lock.
 
 ## Lock file
 
-`dependencies.lock.yml` is the reproducibility authority for reviewed upstream Git commits, tool versions, and container identities.
+`dependencies.lock.yml` is the reproducibility authority for SynthRAN's direct Git dependencies, experiment container/tool identities, Conda runtime, and CI actions.
 
-Synchronize the managed checkouts with:
+Synchronize the managed Git checkouts with:
 
 ```zsh
 synthran deps sync
 ```
 
-or select exact dependencies:
+or select one direct dependency:
 
 ```zsh
-synthran deps sync --name fiveg_ansible --name srsran_helm
+synthran deps sync --name fiveg_ansible
+synthran deps sync --name amber
 ```
 
 Managed checkouts live below ignored `.deps/` storage and are not committed.
 
-## Core upstream projects
+## Direct upstream projects
 
-The run path depends on reviewed versions of components including:
+SynthRAN directly pins exactly two Git repositories:
 
-- `fiveg_ansible` for SLICES/R2Lab infrastructure and UE roles;
-- `srsran_helm` for reviewed srsRAN deployment/radio profiles;
-- Open5GS Kubernetes material used by the virtual and physical foundation;
-- Contiki-NG/Cooja for deterministic IoT traffic;
-- runtime tools such as Helm, Ansible, Mosquitto, iperf3, and provider CLIs.
+- `fiveg_ansible`: provider and 5G infrastructure authority exposed through `bin/fiveg`;
+- `amber`: deterministic Ambient-IoT source model.
 
-Exact commits and image identities belong in the lock file, not duplicated as mutable documentation claims.
+The lock does **not** pin 5g-Ansible's internal Open5GS, srsRAN, Helm, yq, Ansible collection, remote-bootstrap, radio-image, or Kubernetes implementation choices. Those identities belong to the upstream deployment repository and must be reviewed there.
 
-## Shared Ansible execution
+SynthRAN also directly locks the Mosquitto container used by its experiment collector/transport, the iperf3 source used by controlled research measurements, and the Conda packages required to run SynthRAN, Amber, and the pinned machine interface.
 
-Ansible is a common actuation mechanism across both radio backends. Long Ansible work must use:
+## 5g-Ansible boundary
+
+SynthRAN invokes only the pinned machine API:
 
 ```text
-synthran.ansible_streaming.run_streaming_ansible_command
+bin/fiveg capabilities
+bin/fiveg plan
+bin/fiveg up
+bin/fiveg status
+bin/fiveg down
+bin/fiveg scenario
 ```
 
-This applies to virtual deployment, physical Open5GS reconciliation, and R2Lab UE setup/connect/stop. The shared wrapper provides one sanitized progress/failure/heartbeat contract.
+There is no SynthRAN-owned Ansible wrapper tree, no upstream source overlay, and no direct deployment executor. Provider selection, SLICES experiment creation/reuse, reservation/POS work, Kubernetes, core/RAN/RU/UE deployment, and teardown are upstream responsibilities.
 
-Do not add a second Ansible subprocess implementation for a new backend path.
+`ansible-core` remains in the controller Conda environment because the pinned 5g-Ansible checkout executes its own Ansible implementation in that environment. This does not make SynthRAN the owner of upstream Ansible collections or playbooks.
 
-## Overlays
+## Containers and tools
 
-SynthRAN may create an isolated worktree or temporary copy of a locked upstream dependency and apply reviewed, deterministic transformations required by the experiment contract. Such transformations must:
+A dependency belongs in this repository only when SynthRAN itself consumes it. Current direct runtime identities are:
 
-- start from the exact locked commit;
-- fail if expected upstream source no longer matches;
-- remain run-local;
-- record the resulting provenance/hash where relevant;
-- never mutate the managed locked checkout in place.
+- digest-locked Mosquitto for experiment-owned MQTT resources;
+- source-locked iperf3 for reproducible research load generation.
 
-## Containers
-
-Runtime container identities should be digest-addressed where supported. A mutable tag alone is not sufficient reproducibility evidence for a claimed accepted path.
-
-Physical radio images that are tied to a reviewed upstream profile must match the profile and lock contract before cluster mutation.
-
-## Tool discovery
-
-A missing executable is an environment error, not permission to fetch an arbitrary replacement during a live run. Installation belongs to the reviewed environment/setup path. Live execution should use the dependency identities already selected by the repository environment and lock file.
+A missing upstream deployment tool or image is a 5g-Ansible environment/deployment error. SynthRAN must not compensate by downloading, pinning, or installing an upstream-internal replacement.
 
 ## Updating a dependency
 
-A dependency update should include:
+A direct dependency update should include:
 
 1. the new immutable identity in `dependencies.lock.yml`;
-2. adapter/overlay updates required by upstream changes;
+2. adapter or experiment-boundary updates required by the new interface;
 3. tests for the affected boundary;
 4. a clean privacy scan;
-5. fresh live evidence before capability claims are updated;
-6. third-party attribution updates if licensing/provenance changed.
+5. fresh live evidence before capability or result claims are updated;
+6. attribution updates when licensing/provenance changes.
 
-A unit-test pass proves adapter consistency, not live acceptance. `docs/results.md` changes only when new accepted evidence justifies them.
+For a 5g-Ansible change, first prove its machine-interface tests, then pin the exact reviewed commit in SynthRAN and prove SynthRAN's normal suite against that commit. Unit CI proves interface consistency; live RFSIM/R2Lab acceptance proves the integrated deployment/experiment path.
 
 ## Third-party attribution
 
