@@ -81,14 +81,16 @@ class AnsibleStreamingParserTests(unittest.TestCase):
         self.assertNotIn("\n", rendered)
 
     def test_failure_reason_is_bounded_and_redacted(self) -> None:
+        subscriber = "1234567" + "89012345"
+        token = "a" * 64
         rendered = parse_ansible_line(
-            'fatal: [sopnode-f2]: FAILED! => {"msg": "subscriber 123456789012345 and token aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}',
+            f'fatal: [sopnode-f2]: FAILED! => {{"msg": "subscriber {subscriber} and token {token}"}}',
             current_task="Deploy core",
         )
         self.assertIsNotNone(rendered)
         assert rendered is not None
-        self.assertNotIn("123456789012345", rendered)
-        self.assertNotIn("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", rendered)
+        self.assertNotIn(subscriber, rendered)
+        self.assertNotIn(token[:32], rendered)
         self.assertIn("<redacted>", rendered)
 
 
