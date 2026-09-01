@@ -48,7 +48,7 @@ class UnifiedRunTests(unittest.TestCase):
         self.assertEqual("rfsim", virtual.radio)
         self.assertTrue(virtual.quiet)
 
-    def test_rfsim_run_becomes_native_fiveg_spec(self) -> None:
+    def test_rfsim_run_becomes_provider_aware_native_fiveg_spec(self) -> None:
         args = _parser().parse_args(
             (
                 "run",
@@ -60,6 +60,8 @@ class UnifiedRunTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "virtual-001",
+                "--slices-project",
+                "project-test",
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
@@ -67,11 +69,20 @@ class UnifiedRunTests(unittest.TestCase):
             known_hosts.write_text("fixture\n", encoding="utf-8")
             spec = _deployment_spec(args, known_hosts=known_hosts)
         self.assertEqual("fiveg/deployment/v1", spec["schema"])
+        self.assertEqual(
+            {
+                "manage": True,
+                "project": "project-test",
+                "experiment": "virtual-001",
+                "experiment_duration": "4h",
+            },
+            spec["provider"],
+        )
         self.assertEqual({"type": "rfsim", "ru": "rfsim"}, spec["platform"])
         self.assertEqual({"qhats": [], "qfits": [], "phones": []}, spec["ues"])
         self.assertEqual("none", spec["reservation"]["r2lab_mode"])
 
-    def test_physical_run_passes_ru_ue_and_ssh_authority_upstream(self) -> None:
+    def test_physical_run_passes_provider_ru_ue_and_ssh_authority_upstream(self) -> None:
         args = _parser().parse_args(
             (
                 "run",
@@ -89,18 +100,43 @@ class UnifiedRunTests(unittest.TestCase):
                 "sopnode-f3",
                 "--run-id",
                 "physical-001",
+                "--slices-project",
+                "project-test",
+                "--slices-experiment",
+                "provider-test",
             )
         )
         with tempfile.TemporaryDirectory() as temporary:
             known_hosts = Path(temporary) / "known_hosts"
             known_hosts.write_text("fixture\n", encoding="utf-8")
             spec = _deployment_spec(args, known_hosts=known_hosts)
+        self.assertEqual("provider-test", spec["provider"]["experiment"])
         self.assertEqual({"type": "r2lab", "ru": "n300"}, spec["platform"])
         self.assertEqual(["qfit07"], spec["ues"]["qfits"])
         self.assertEqual(["qfit07"], spec["deployment"]["selected_ues"])
         self.assertEqual("require-existing", spec["reservation"]["r2lab_mode"])
         self.assertEqual("slice-test", spec["r2lab"]["username"])
         self.assertTrue(spec["r2lab"]["strict_host_key_checking"])
+
+    def test_full_run_requires_provider_project_before_upstream_plan(self) -> None:
+        args = _parser().parse_args(
+            (
+                "run",
+                "--radio",
+                "rfsim",
+                "--core-node",
+                "sopnode-f2",
+                "--ran-node",
+                "sopnode-f3",
+                "--run-id",
+                "virtual-001",
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            known_hosts = Path(temporary) / "known_hosts"
+            known_hosts.write_text("fixture\n", encoding="utf-8")
+            with self.assertRaisesRegex(Exception, "slices-project"):
+                _deployment_spec(args, known_hosts=known_hosts)
 
 
 if __name__ == "__main__":
