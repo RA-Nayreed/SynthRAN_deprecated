@@ -6,7 +6,7 @@ parses the generated inventory only to address experiment probes and workloads.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import re
@@ -39,7 +39,7 @@ class NetworkInventory:
     core_node: InventoryHost
     ran_node: InventoryHost
     all_vars: Mapping[str, str]
-    ue_hosts: Mapping[str, InventoryHost]
+    ue_hosts: Mapping[str, InventoryHost] = field(default_factory=dict)
 
     @property
     def core(self) -> str:
