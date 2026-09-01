@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any, Mapping
 
-import synthran.experiment_runtime as base_runtime
+import synthran.experiment.live as base_runtime
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.ingress import IngressSnapshot
 from synthran.research import NETWORK_SAMPLE_SCHEMA, ResearchError, append_jsonl

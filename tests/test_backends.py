@@ -28,6 +28,8 @@ class OrchestrationBoundaryTests(unittest.TestCase):
                         "sopnode-f2",
                         "--ran-node",
                         "sopnode-f3",
+                        "--slices-project",
+                        "project-test",
                     ]
                 ),
             )
@@ -48,11 +50,15 @@ class OrchestrationBoundaryTests(unittest.TestCase):
                     "sopnode-f2",
                     "--ran-node",
                     "sopnode-f3",
+                    "--slices-project",
+                    "project-test",
                 ]
             ),
         )
         execute.assert_called_once()
-        self.assertEqual("boundary-test-002", execute.call_args.args[0].run_id)
+        args = execute.call_args.args[0]
+        self.assertEqual("boundary-test-002", args.run_id)
+        self.assertEqual("project-test", args.slices_project)
 
 
 if __name__ == "__main__":

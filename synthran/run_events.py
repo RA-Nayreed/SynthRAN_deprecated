@@ -1,8 +1,8 @@
 """Canonical lifecycle and child-runtime events for ``synthran run``.
 
-Lifecycle code decides what happened and emits semantic events. This module
-owns only event persistence, terminal rendering, child-stream normalization,
-and generic stage presentation.
+SynthRAN owns experiment lifecycle rendering.  5g-Ansible owns deployment
+progress semantics and supplies them as versioned ``fiveg/event/v1`` records;
+SynthRAN relays those records without parsing Ansible text.
 """
 
 from __future__ import annotations
@@ -15,53 +15,28 @@ from typing import Any, Mapping, TextIO
 
 
 PREFIX = "[synthran]"
+FIVEG_EVENT_SCHEMA = "fiveg/event/v1"
 PUBLIC_STAGES = frozenset(
     {"provider", "infrastructure", "network", "workload", "acceptance", "cleanup"}
 )
 
-_INTERNAL_PREFIXES = (
-    "preparation started:",
-    "controller-preflight:",
-    "isolated-worktree:",
-    "verify-worktree:",
-    "upstream-overlay:",
-    "ansible-collections:",
-    "ansible-syntax:",
-    "upstream-syntax:",
-    "network-foundation-syntax:",
-    "tool-preparation-syntax:",
-    "reservation-inspection:",
-    "allocation-inspection:",
-    "allocation-reclaim-",
-    "allocation-create:",
-    "allocation-verification-",
-    "upstream-resource-preparation:",
-    "network-foundation-reconciliation:",
-    "locked-tool-preparation:",
-    "resource preparation:",
-    "network deployment started:",
-    "ansible-deployment:",
-    "network deployment:",
-)
-_INTERNAL_OUTPUT_PREFIXES = (
-    "SLICES resources prepared for run ",
-    "Generated inventory:",
-    "Private authority:",
-    "Sanitized manifest:",
-    "Sanitized log:",
-    "Sanitized evidence:",
-    "Deployment completed for run ",
-    "Run directory:",
-)
-_VALIDATOR_PREFIXES = (
-    "SynthRAN doctor (",
-    "SynthRAN network verification (",
-    "[PASS] ",
-    "Result: READY",
-    "Result: NOT READY",
-    "Result: PATH PROVEN",
-    "Result: NOT PROVEN",
-)
+_FIVEG_PHASES = {
+    "provider": ("provider", "SLICES provider"),
+    "reservation": ("infrastructure", "SLICES reservation"),
+    "r2lab-authority": ("infrastructure", "R2Lab authority"),
+    "collections": ("infrastructure", "deployment dependencies"),
+    "r2lab-deployment": ("infrastructure", "physical resources"),
+    "deployment": ("infrastructure", "5G deployment"),
+    "scenario": ("network", "5G scenario"),
+    "cleanup": ("cleanup", "5G cleanup"),
+}
+_FIVEG_MARKERS = {
+    "started": "→",
+    "completed": "✓",
+    "failed": "✗",
+    "resumed": "↻",
+    "skipped": "–",
+}
 
 
 def _utc_now() -> str:
@@ -76,28 +51,10 @@ def _strip_child_prefix(message: str) -> str:
 
 
 def normalize_child_message(message: str) -> str | None:
-    """Return one meaningful child-runtime event, or ``None`` for noise."""
+    """Normalize only experiment-owned Amber/research child progress."""
 
     value = _strip_child_prefix(message)
     if not value:
-        return None
-    lower = value.lower()
-    if any(lower.startswith(prefix.lower()) for prefix in _INTERNAL_PREFIXES):
-        return None
-    if any(value.startswith(prefix) for prefix in _INTERNAL_OUTPUT_PREFIXES):
-        return None
-    if any(value.startswith(prefix) for prefix in _VALIDATOR_PREFIXES):
-        return None
-    if value.startswith(("PLAY: ", "TASK: ", "HANDLER: ")):
-        return None
-
-    if value == "reservation-discovery: active owned reservation selected":
-        return "  ✓ active owned reservation selected"
-    if value == "network prerequisite: verifying path-proven baseline...":
-        return None
-    if value == "network and Amber transport prerequisites: OK":
-        return "  ✓ current 5G session and AMBER transport prerequisites ready"
-    if value.startswith("experiment: "):
         return None
     if value.startswith("Amber energy treatment: "):
         return "  " + value
@@ -109,16 +66,6 @@ def normalize_child_message(message: str) -> str | None:
         return "    outcomes: " + value.removeprefix("Amber source outcomes: ")
     if value.startswith("error: "):
         return "✗ " + value.removeprefix("error: ")
-
-    # The Ansible adapter emits only these three event forms.
-    if value.startswith("→ "):
-        return "  " + value
-    if value.startswith("… "):
-        return "    " + value
-    if value.startswith("✗ "):
-        return "  " + value
-
-    # Controlled research emits compact scientific progress already.
     if value.startswith((
         "research:",
         "Amber research summary:",
@@ -127,7 +74,6 @@ def normalize_child_message(message: str) -> str | None:
         "Capacity evidence:",
     )):
         return "  " + value
-
     return None
 
 
@@ -149,7 +95,7 @@ def _event_kind(message: str) -> str:
 
 
 class RunEventStream:
-    """TextIO-compatible canonical runtime stream."""
+    """TextIO-compatible canonical experiment event stream."""
 
     def __init__(
         self,
@@ -220,7 +166,7 @@ class RunEventStream:
 
 
 class RunProgress:
-    """Render already-semantic lifecycle stages without backend inference."""
+    """Render experiment stages and relay already-semantic upstream events."""
 
     def __init__(
         self,
@@ -247,6 +193,31 @@ class RunProgress:
     def _validate_stage(stage: str) -> None:
         if stage not in PUBLIC_STAGES:
             raise ValueError(f"unsupported public lifecycle stage: {stage}")
+
+    def relay_fiveg_event(self, upstream: Mapping[str, Any]) -> None:
+        """Relay one versioned 5g-Ansible progress event without inferring truth."""
+
+        if upstream.get("schema") != FIVEG_EVENT_SCHEMA:
+            return
+        if upstream.get("deployment_id") != self.stream.run_id:
+            return
+        phase = upstream.get("phase")
+        event = upstream.get("event")
+        if not isinstance(phase, str) or phase not in _FIVEG_PHASES:
+            return
+        if not isinstance(event, str) or event not in _FIVEG_MARKERS:
+            return
+        stage, label = _FIVEG_PHASES[phase]
+        marker = _FIVEG_MARKERS[event]
+        component = upstream.get("component")
+        component_value = component if isinstance(component, str) and component else None
+        self.stream.emit(
+            f"  {marker} {label}",
+            stage=stage,
+            event=event,
+            component=component_value,
+            detail={"upstream": dict(upstream)},
+        )
 
     def start(self, stage: str, detail: str | None = None) -> None:
         self._validate_stage(stage)

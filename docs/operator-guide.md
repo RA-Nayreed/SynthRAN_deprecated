@@ -1,8 +1,8 @@
 # Operator guide
 
-This is the supported procedure for running SynthRAN on SLICES with either the virtual RFSIM backend or the physical R2Lab backend.
+This is the supported procedure for running SynthRAN over a deployment owned by the pinned 5g-Ansible machine API.
 
-## 1. Install and verify
+## 1. Install
 
 ```zsh
 cd ~/SynthRAN
@@ -17,46 +17,86 @@ For repository validation:
 ```zsh
 python -m unittest discover -s tests -v
 synthran dev privacy scan --worktree
+git diff --check
+git status --short
 ```
 
-There is one installed executable. Do not operate the network by calling internal Python helpers or historical backend command names.
+There is one installed executable. Do not operate infrastructure by calling historical backend helpers or deleted internal command groups.
 
-## 2. Authenticate provider tools
+## 2. Provider and SSH prerequisites
 
-Provider authentication and project creation remain outside SynthRAN.
+Authenticate the provider tooling used by 5g-Ansible and choose an existing SLICES project:
 
 ```zsh
 slices auth login
 slices project list
+export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
 ```
 
-Select a SLICES project that already exists and export the identity SynthRAN should use:
+SynthRAN does not run `slices project use`, create SLICES experiments, acquire Post5G prefixes, or make POS reservations itself. A full `synthran run` sends provider intent in the native `fiveg/deployment/v1` request. The pinned 5g-Ansible machine API owns selection/reuse/creation and records provider evidence in its manifest.
+
+Unless `--slices-experiment` is supplied, the provider experiment defaults to the SynthRAN run ID. `--slices-duration` controls the requested provider-experiment duration for first creation.
+
+SynthRAN-owned SSH observation always uses strict host-key checking. A custom reviewed trust store is optional:
 
 ```zsh
-export SYNTHRAN_SLICES_PROJECT='PROJECT_NAME'
-export SYNTHRAN_OWNER='YOUR_SLICES_USERNAME'
+export SYNTHRAN_SLICES_KNOWN_HOSTS='/absolute/path/to/sopnodes_known_hosts'
 ```
 
-A full lifecycle run selects that project, creates or reuses the provider experiment associated with its run ID, acquires the Post5G prefix, and verifies the resulting provider network.
+If no custom file is supplied, normal OpenSSH user/system known-hosts files are used. Do not disable strict host-key checking to make a run pass. Physical runs may pass `--known-hosts` when a separate reviewed trust store is required.
 
-You may override the provider experiment with `--slices-experiment`, but the normal path is to let it match the run ID.
+## 3. Full validation order on Duckburg
 
-## 3. Read-only readiness
+Before mutating live resources, prove the checked-out PR and direct dependencies:
 
-### RFSIM
+```zsh
+cd ~/SynthRAN
+git switch purge/thin-fiveg-adapter
+git pull --ff-only origin purge/thin-fiveg-adapter
+git status --short
+git rev-parse HEAD
+
+conda activate synthran
+python -m pip install --no-deps -e .
+synthran deps sync
+synthran --help
+
+python -m unittest discover -s tests -v
+synthran dev privacy scan --worktree
+git diff --check
+git status --short
+```
+
+Then validate the provider session and upstream machine request without deployment:
+
+```zsh
+slices auth login
+slices project list
+
+synthran doctor \
+  --radio rfsim \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
+```
+
+Only after those checks pass should live RFSIM acceptance be attempted. Physical R2Lab acceptance comes after RFSIM acceptance.
+
+## 4. Doctor
+
+`doctor` is a structural upstream check. It calls 5g-Ansible `capabilities` and `plan`; it does not select provider state, reserve resources, deploy, or connect a UE.
+
+RFSIM:
 
 ```zsh
 synthran doctor \
   --radio rfsim \
   --core-node sopnode-f2 \
-  --ran-node sopnode-f3
+  --ran-node sopnode-f3 \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-The virtual doctor validates the selected node topology, pinned dependencies, and local deployment prerequisites. If an existing provider experiment is supplied with `--slices-experiment`, it also verifies that context.
-
-### R2Lab
-
-An active R2Lab lease is required before physical mutation.
+Physical R2Lab:
 
 ```zsh
 export SYNTHRAN_R2LAB_SLICE='YOUR_R2LAB_SLICE'
@@ -67,57 +107,80 @@ synthran doctor \
   --ue qfit07 \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
-  --slice "$SYNTHRAN_R2LAB_SLICE"
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 ```
 
-The physical doctor is read-only. It validates the selected executable topology, strict public-key access to Faraday, and the active lease.
-
-To inspect the physical hardware catalogue:
+For the authoritative list of supported cores, RANs, platforms, RUs, and UEs, use:
 
 ```zsh
 synthran inspect --radio r2lab
 ```
 
-## 4. Run the virtual backend
+That output is the pinned 5g-Ansible capability response; SynthRAN has no hardware catalogue of its own.
 
-Use a new immutable run ID:
+## 5. Virtual RFSIM run
+
+Use a fresh run ID for acceptance. Do not reuse a failed deployment state across changed intent or changed upstream provenance.
 
 ```zsh
-export RUN_ID='virtual-001'
+export RUN_ID="rfsim-acceptance-$(date +%Y%m%d-%H%M%S)"
 
 synthran run \
   --radio rfsim \
   --core-node sopnode-f2 \
   --ran-node sopnode-f3 \
   --run-id "$RUN_ID" \
-  --owner "$SYNTHRAN_OWNER" \
   --slices-project "$SYNTHRAN_SLICES_PROJECT"
 ```
 
-The command owns the complete sequence:
+The control flow is:
 
 ```text
-provider context
--> infrastructure allocation/bootstrap
--> authority and deployment-prerequisite verification
--> Open5GS + srsRAN/RFSIM deployment
--> live 5G session readiness (gNB, PDU, UPF route)
--> selected IoT workload
--> workload transport proof through the live UE PDU path
--> acceptance evidence
+native deployment request
+→ 5g-Ansible provider context
+→ 5g-Ansible reservation/POS/deployment
+→ upstream ready manifest + inventory
+→ SynthRAN read-only PDU-path proof
+→ Amber workload
+→ experiment evidence
 ```
 
-The network-readiness check establishes that the expected gNB, srsUE, PDU session, and UPF route are live. It is not itself an end-to-end transport test. Workload setup separately proves transport with a connection explicitly sourced from the UE PDU address.
+A provider experiment may be intentionally reused independently of the SynthRAN deployment ID by supplying `--slices-experiment`. Provider network assignments are still discovered dynamically by 5g-Ansible; they are not copied into SynthRAN configuration.
 
-There is no supported need to call resource preparation, network deployment, network verification, or workload execution as separate CLI commands.
+SynthRAN does not patch the upstream UE Deployment or restart/reconcile gNB/UE state. The accepted RFSIM deployment remains available for controlled measurements until `synthran release` is called.
 
-## 5. Run the physical backend
-
-The physical path requires a strict known-hosts file for the selected SLICES compute nodes. Use a reviewed existing file or create it through the provider access workflow; do not disable host-key checking.
+Immediately inspect the accepted deployment and preserve its run directory:
 
 ```zsh
-export SYNTHRAN_SLICES_KNOWN_HOSTS='/absolute/path/to/sopnodes_known_hosts'
-export RUN_ID='physical-001'
+synthran inspect --run-id "$RUN_ID"
+find ".synthran/runs/$RUN_ID" -maxdepth 2 -type f -print | sort
+```
+
+When the retained RFSIM deployment is no longer needed:
+
+```zsh
+synthran release --run-id "$RUN_ID"
+```
+
+## 6. Physical R2Lab run
+
+A physical run delegates the RU, UE, R2Lab identity, provider intent, reservation policy, and deployment to 5g-Ansible. Confirm an appropriate R2Lab lease/reservation window before starting.
+
+```zsh
+export SYNTHRAN_R2LAB_SLICE='YOUR_R2LAB_SLICE'
+export RUN_ID="r2lab-acceptance-$(date +%Y%m%d-%H%M%S)"
+
+synthran doctor \
+  --radio r2lab \
+  --device n300 \
+  --ue qfit07 \
+  --core-node sopnode-f2 \
+  --ran-node sopnode-f3 \
+  --slice "$SYNTHRAN_R2LAB_SLICE" \
+  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 
 synthran run \
   --radio r2lab \
@@ -127,124 +190,83 @@ synthran run \
   --ran-node sopnode-f3 \
   --run-id "$RUN_ID" \
   --slice "$SYNTHRAN_R2LAB_SLICE" \
-  --owner "$SYNTHRAN_OWNER" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS" \
-  --slices-project "$SYNTHRAN_SLICES_PROJECT"
+  --slices-project "$SYNTHRAN_SLICES_PROJECT" \
+  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
 ```
 
-The physical command owns:
+After the upstream deployment is ready, SynthRAN resolves the selected UE from the generated inventory, proves the expected user-plane route, runs Amber, and records experiment evidence. It does not implement radio power control, UE activation, gNB staging, N2 convergence, or physical resource ownership.
 
-```text
-provider context
--> exact radio/UE claim under the active lease
--> selected compute-node/Open5GS foundation
--> pinned N3xx gNB staging
--> singleton gNB + stable N2
--> selected UE setup/connect through pinned 5g_ansible roles
--> registration + PDU state
--> route-bound user-plane verification
--> selected IoT workload
--> acceptance evidence
--> exact physical cleanup
+Unless `--keep-resources` is supplied, an accepted physical run ends by calling 5g-Ansible `down` for the exact deployment ID.
+
+Inspect and preserve the run evidence after completion:
+
+```zsh
+synthran inspect --run-id "$RUN_ID"
+find ".synthran/runs/$RUN_ID" -maxdepth 2 -type f -print | sort
 ```
 
-By default accepted physical resources are released at the end. `--keep-resources` is available only when the operator intentionally needs the run-owned hardware to remain active for immediate follow-up work.
+## 7. Live progress
 
-If a previous run owns the current Open5GS namespace and automatic ownership handoff cannot be resolved safely, use `--previous-run-id` with the exact prior run ID. Never guess it.
-
-## 6. Live progress
-
-`synthran run` is the single live progress surface. Lifecycle state, meaningful Ansible events, workload progress, failures, and acceptance all use the same renderer:
-
-```text
-[synthran] → infrastructure
-[synthran]   … node bootstrap · 2m
-[synthran] ✓ infrastructure
-[synthran] → network
-[synthran]   ✓ gNB cell active
-[synthran]   ✓ PDU session · 12.1.0.x
-[synthran] ✓ network: READY
-[synthran] → workload
-[synthran]   ✓ PDU-bound TCP transport gate passed
-[synthran] ✓ workload: accepted
-[synthran] ✓ experiment accepted
-```
-
-Internal offline/live readiness validators still protect execution boundaries, but their full PASS tables are not printed during `run`. Run lifecycle output reports the resulting prerequisite state instead. Use the standalone `synthran doctor` command when those checks need to be diagnosed directly.
-
-All long Ansible work uses the same sparse streaming adapter across virtual deployment, physical Open5GS work, and physical UE setup/connect/cleanup. A task header is not considered evidence that the task ran: tasks that Ansible subsequently marks skipped are omitted. Routine package/configuration chatter is suppressed; long meaningful tasks emit heartbeats; failures retain the task, host, state, and a bounded sanitized reason.
-
-Every run persists the canonical structured event evidence to:
+`synthran run` persists canonical experiment events to:
 
 ```text
 .synthran/events/<run-id>.jsonl
 ```
 
-There is no separate public log/follow command. Detailed preparation/deployment/component logs are forensic artifacts for failure diagnosis rather than a second operator progress system.
+Deployment progress is not inferred from Ansible text. SynthRAN requests the upstream `fiveg/event/v1` channel and relays those already-semantic records into the same operator stream. Typical output is:
 
-`--quiet` suppresses terminal progress but does not disable run evidence persistence.
+```text
+[synthran] → network: 5g-Ansible deployment and experiment path observation
+[synthran]   → SLICES provider
+[synthran]   ✓ SLICES provider
+[synthran]   → SLICES reservation
+[synthran]   ✓ SLICES reservation
+[synthran]   → deployment dependencies
+[synthran]   ✓ deployment dependencies
+[synthran]   → 5G deployment
+[synthran]   ✓ 5G deployment
+[synthran] ✓ network: READY
+[synthran] → workload: deterministic Amber experiment
+[synthran] ✓ workload: accepted
+[synthran] → acceptance: verify experiment evidence
+```
 
-## 7. Inspect evidence
+5g-Ansible keeps stdout for its final machine result and writes detailed Ansible/provider evidence to its own run logs. SynthRAN never parses or re-streams raw `PLAY`, `TASK`, handler, host-change, or module-result output. `--quiet` suppresses terminal rendering while preserving evidence.
+
+## 8. Inspect and release
 
 ```zsh
 synthran inspect --run-id "$RUN_ID"
+synthran release --run-id "$RUN_ID"
 ```
 
-The command discovers the persisted evidence associated with the run and reports the available schemas/statuses. Use `--json` when another tool needs machine-readable output.
+`inspect` reads persisted evidence and current upstream status where applicable. `release` calls the pinned 5g-Ansible `down` machine verb. It does not reconstruct resource ownership or execute local cleanup playbooks.
 
-Do not use a historical PDU address, pod name, reservation ID, allocation ID, or lease observation as current mutation authority. Persisted evidence proves the historical run; live control always refreshes current state.
-
-## 8. Release exact physical resources
-
-If a physical run fails before its normal cleanup or was intentionally left active:
-
-```zsh
-synthran release \
-  --run-id "$RUN_ID" \
-  --slice "$SYNTHRAN_R2LAB_SLICE" \
-  --owner "$SYNTHRAN_OWNER" \
-  --known-hosts "$SYNTHRAN_SLICES_KNOWN_HOSTS"
-```
-
-Release is run-scoped. It may stop the run-owned gNB and release only the radio/UE resources bound to that run. If ownership cannot be proven, release fails rather than broadening its target.
-
-Never substitute wildcard Kubernetes deletion, global radio power-off, guessed allocation IDs, `pkill`, or `killall` for exact cleanup.
-
-For RFSIM, transient workload resources are cleaned inside `run`; an accepted network epoch may remain available for controlled measurements.
+Historical evidence is not current mutation authority. Live deployment mutation always belongs to 5g-Ansible.
 
 ## 9. Controlled measurements
 
-Controlled measurement is a mode of `run`, not a second command namespace. The current controlled implementation is validated on accepted RFSIM network evidence.
-
-After an accepted virtual run, the generated inventory is normally:
+Controlled measurements operate on an accepted RFSIM deployment and its generated inventory:
 
 ```text
-.synthran/preparations/<run-id>/hosts.ini
+.synthran/runs/<network-run-id>/hosts.ini
 ```
 
-and the accepted virtual network evidence uses the same run ID under `.synthran/runs/`.
-
-### Measure reference RAN/UE-path capacity
-
-Choose a prepared peer outside the 5G core host. See `research-measurement-peer.md`.
+Capacity calibration:
 
 ```zsh
 export NETWORK_RUN='virtual-001'
-export INVENTORY=".synthran/preparations/$NETWORK_RUN/hosts.ini"
+export INVENTORY=".synthran/runs/$NETWORK_RUN/hosts.ini"
 export MEASUREMENT_PEER_IP='PEER_IPV4'
-export CALIBRATION='.synthran/research/capacity.json'
 
 synthran calibrate \
   --inventory "$INVENTORY" \
   --network-run-id "$NETWORK_RUN" \
   --target "$MEASUREMENT_PEER_IP" \
-  --duration-seconds 10 \
-  --out "$CALIBRATION"
+  --out .synthran/capacity/$NETWORK_RUN.json
 ```
 
-`calibrate` measures the accepted RAN/UE path. It does not calibrate AMBER energy.
-
-### Execute one controlled run
+One controlled Amber run:
 
 ```zsh
 synthran run \
@@ -263,20 +285,13 @@ synthran run \
   --inventory "$INVENTORY"
 ```
 
-For `ambient-v1`, `--energy-power-scale` and `--energy-node-variation` are explicit source-model treatments. Add `--plan` to render the immutable request without executing it.
+Controlled measurements may create bounded experiment-owned routes, probes, MQTT resources, or load instrumentation. They must remove what they create and never repair the 5G deployment.
 
-Controlled AMBER runs use the same `[synthran]` runtime event stream as full lifecycle runs.
-
-### Build and execute a campaign
-
-The deterministic campaign schedule is persisted automatically before execution, so there is no separate campaign-plan/campaign-run command pair.
+## 10. Campaigns and analysis
 
 ```zsh
-export REFERENCE_BPS=$(jq -r '.reference_capacity_bps' "$CALIBRATION")
-export CAMPAIGN_ID='campaign-001'
-
 synthran run \
-  --campaign-id "$CAMPAIGN_ID" \
+  --campaign-id campaign-001 \
   --network-run-id "$NETWORK_RUN" \
   --seeds 424242,424243,424244 \
   --conditions 'baseline,load50=0.5,load80=0.8,load95=0.95' \
@@ -284,60 +299,43 @@ synthran run \
   --iot-profile ambient-v1 \
   --inventory "$INVENTORY" \
   --probe-target "$MEASUREMENT_PEER_IP" \
-  --reference-capacity-bps "$REFERENCE_BPS" \
-  --sensor-period 5 \
-  --warmup-seconds 30 \
-  --duration-seconds 180 \
-  --sample-interval 1 \
-  --probe-interval 1 \
-  --parallel-flows 2 \
-  --load-port 5220
+  --reference-capacity-bps REFERENCE_CAPACITY
 ```
 
-Use the same command with `--plan` to persist and inspect the deterministic schedule without execution. A later invocation may use `--campaign .synthran/campaigns/$CAMPAIGN_ID.json` to execute that exact schedule.
-
-Analyze completed runs with the separate read-only verb:
+Use `--plan` to persist and inspect the deterministic campaign schedule without execution.
 
 ```zsh
-mkdir -p .synthran/reports
-
 synthran analyze \
-  --campaign ".synthran/campaigns/$CAMPAIGN_ID.json" \
-  --out ".synthran/reports/$CAMPAIGN_ID-analysis.json"
+  --campaign .synthran/campaigns/campaign-001.json \
+  --out .synthran/reports/campaign-001-analysis.json
 ```
 
-Physical deterministic workload support does not yet imply physical controlled-load campaign acceptance. Do not point the current controlled campaign path at a physical run and claim parity without a reviewed physical measurement implementation and accepted evidence.
+Physical Amber support does not imply physical controlled-load campaign acceptance. Do not claim that parity without reviewed implementation and accepted evidence.
 
-## 10. Preserve evidence
+## 11. Preserve evidence
 
-Keep complete raw run or campaign bundles outside normal Git history. Preserve:
+Preserve complete raw run or campaign bundles outside normal Git history, including:
 
-- run and campaign specifications;
-- provider/resource provenance;
-- measurement windows;
-- telemetry and sequence evidence;
-- RTT probes;
-- network-counter samples and timing evidence;
-- load records;
-- validity summaries;
-- dependency identities;
-- artifact hashes;
-- canonical structured run events;
-- forensic component logs when relevant.
+- upstream deployment manifest and generated inventory;
+- provider identity/network evidence from the upstream manifest;
+- structured `fiveg/event/v1` deployment progress;
+- upstream deployment forensic logs when relevant;
+- SynthRAN network and experiment evidence;
+- telemetry and sequence records;
+- measurement windows and probes;
+- network-counter samples and load records;
+- dependency identities and artifact hashes;
+- canonical structured SynthRAN run events.
 
-JSONL is the audit source. Parquet is a deterministic analysis derivative. Checksum manifests must exclude the checksum file itself.
-
-## 11. Provider release
-
-Do not release a Post5G prefix while any active work still depends on it. Provider-level teardown outside a run remains an explicit provider action where required.
+JSONL is the audit source. Parquet is a deterministic analysis derivative.
 
 ## Failure rules
 
-- never reuse a run ID for different intent or topology;
+- never reuse a run ID for different intent, topology, or upstream provenance;
 - preserve partial evidence after failure;
 - diagnose the smallest failing boundary first;
-- refresh current authority before retrying live mutation;
-- never infer later acceptance from an earlier successful boundary;
-- fail closed when exact rollback/cleanup cannot be proven;
+- do not repair infrastructure from experiment code;
+- never infer current authority from historical evidence;
+- fail closed when exact experiment cleanup cannot be proven;
 - do not convert an infrastructure failure into a scientific result;
-- do not convert a legitimate scientific outcome into an infrastructure failure merely because it was unexpected.
+- do not convert an unexpected scientific outcome into an infrastructure failure.

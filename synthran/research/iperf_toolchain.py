@@ -16,7 +16,7 @@ import shlex
 from typing import Mapping
 
 from synthran.dependencies import DependencyError, load_lock
-import synthran.experiment_runtime as base_runtime
+import synthran.experiment.live as base_runtime
 from synthran.experiment import ExperimentError
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.live_preflight import ssh_command

@@ -50,7 +50,7 @@ from synthran.research.iperf import (
     stop_owned_iperf_server,
 )
 from synthran.research.iperf_window import parse_measurement_load_log
-from synthran.research.runtime import _require_network_ready
+from synthran.research.path import require_network_ready as _require_network_ready
 from synthran.research.sampling import ResearchNetworkSampler
 from synthran.research.v2 import (
     AmberResearchSpec,

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import Mock
 
 from synthran.research import LoadSpec, MeasurementSpec, ResearchExperimentSpec
-from synthran.research.runtime import _prove_pre_window_target
+from synthran.research.path import prove_pre_window_target
 
 
 class LoadedReachabilityGateTests(unittest.TestCase):
@@ -31,7 +31,7 @@ class LoadedReachabilityGateTests(unittest.TestCase):
         prove_icmp = Mock(side_effect=AssertionError("ICMP must not gate loaded runs"))
         prove_transport = Mock()
 
-        _prove_pre_window_target(
+        prove_pre_window_target(
             spec=self._spec(loaded=True),
             prove_icmp=prove_icmp,
             prove_transport=prove_transport,
@@ -46,7 +46,7 @@ class LoadedReachabilityGateTests(unittest.TestCase):
             side_effect=AssertionError("baseline must not start load transport")
         )
 
-        _prove_pre_window_target(
+        prove_pre_window_target(
             spec=self._spec(loaded=False),
             prove_icmp=prove_icmp,
             prove_transport=prove_transport,

@@ -224,6 +224,8 @@ class CliTests(unittest.TestCase):
                     "sopnode-f3",
                     "--run-id",
                     "amber-001",
+                    "--slices-project",
+                    "project-test",
                     "--iot-profile",
                     "ambient-v1",
                     "--iot-seed",
@@ -236,6 +238,7 @@ class CliTests(unittest.TestCase):
             ),
         )
         args = execute.call_args.args[0]
+        self.assertEqual("project-test", args.slices_project)
         self.assertEqual("ambient-v1", args.iot_profile)
         self.assertEqual(17, args.iot_seed)
         self.assertEqual(12, args.sensor_period)
@@ -260,6 +263,8 @@ class CliTests(unittest.TestCase):
                     "sopnode-f3",
                     "--run-id",
                     "physical-001",
+                    "--slices-project",
+                    "project-test",
                     "--iot-profile",
                     "ambient-v1",
                     "--iot-seed",
@@ -270,6 +275,7 @@ class CliTests(unittest.TestCase):
             ),
         )
         args = execute.call_args.args[0]
+        self.assertEqual("project-test", args.slices_project)
         self.assertEqual("ambient-v1", args.iot_profile)
         self.assertEqual(17, args.iot_seed)
         self.assertEqual(12, args.sensor_period)
@@ -292,6 +298,8 @@ class CliTests(unittest.TestCase):
                     "sopnode-f3",
                     "--run-id",
                     "physical-energy-001",
+                    "--slices-project",
+                    "project-test",
                     "--energy-power-scale",
                     "0.42",
                 ]

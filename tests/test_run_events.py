@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from synthran.run_events import (
+    FIVEG_EVENT_SCHEMA,
     PUBLIC_STAGES,
     RunEventStream,
     RunProgress,
@@ -15,28 +16,21 @@ from synthran.run_events import (
 
 
 class ChildNormalizationTests(unittest.TestCase):
-    def test_internal_doctor_and_old_path_proof_output_is_hidden(self) -> None:
+    def test_unknown_and_deployment_chatter_is_not_interpreted(self) -> None:
         for line in (
             "SynthRAN doctor (offline)",
             "[PASS] inventory: open5gs + srsRAN + rfsim",
             "Result: READY",
-            "SynthRAN network verification (run-001)",
-            "Result: PATH PROVEN",
-            "Deployment completed for run run-001; path proof is still required.",
-            "Sanitized evidence: network-evidence.json",
+            "PLAY: Deploy Open5GS CN",
+            "TASK: Open5GS config: Update AMF ConfigMap on disk",
+            "[synthran] → Open5GS locked images",
+            "[synthran] … Open5GS locked images · 1m",
+            "some upstream debug line",
         ):
             with self.subTest(line=line):
                 self.assertIsNone(normalize_child_message(line))
 
-    def test_ansible_and_amber_events_are_normalized(self) -> None:
-        self.assertEqual(
-            "  → Open5GS locked images",
-            normalize_child_message("[synthran] → Open5GS locked images"),
-        )
-        self.assertEqual(
-            "    … Open5GS locked images · 1m",
-            normalize_child_message("[synthran] … Open5GS locked images · 1m"),
-        )
+    def test_amber_events_are_still_normalized(self) -> None:
         self.assertEqual(
             "  Amber energy treatment: external-power-scale=1, node-variation=0",
             normalize_child_message(
@@ -49,13 +43,6 @@ class ChildNormalizationTests(unittest.TestCase):
                 "[synthran] Amber source: 180 opportunities, 144 decoded, 36 classified source loss"
             ),
         )
-
-    def test_skipped_or_unknown_child_chatter_does_not_leak(self) -> None:
-        self.assertIsNone(normalize_child_message("PLAY: Deploy Open5GS CN"))
-        self.assertIsNone(
-            normalize_child_message("TASK: Open5GS config: Update AMF ConfigMap on disk")
-        )
-        self.assertIsNone(normalize_child_message("some upstream debug line"))
 
 
 class RunEventStreamTests(unittest.TestCase):
@@ -91,10 +78,63 @@ class RunEventStreamTests(unittest.TestCase):
                 terminal=terminal,
                 root=Path(temporary),
             )
-            stream.write("[synthran] → Open5GS locked images\n")
+            stream.write("[synthran] Amber source: 10 events ready\n")
             stream.flush()
-        self.assertEqual("[synthran]   → Open5GS locked images\n", terminal.getvalue())
+        self.assertEqual("[synthran]     10 events ready\n", terminal.getvalue())
         self.assertNotIn("[synthran] [synthran]", terminal.getvalue())
+
+
+class UpstreamRelayTests(unittest.TestCase):
+    def test_fiveg_event_is_relayed_and_preserved_as_upstream_detail(self) -> None:
+        terminal = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            progress = RunProgress(
+                run_id="run-001",
+                radio="rfsim",
+                terminal=terminal,
+            )
+            progress.stream.path = root / "events.jsonl"
+            upstream = {
+                "schema": FIVEG_EVENT_SCHEMA,
+                "deployment_id": "run-001",
+                "phase": "deployment",
+                "event": "started",
+                "component": "5g-stack",
+                "detail": {"ignored_by_renderer": "kept-for-evidence"},
+            }
+            progress.relay_fiveg_event(upstream)
+            progress.close()
+            persisted = json.loads((root / "events.jsonl").read_text().splitlines()[0])
+
+        self.assertEqual("[synthran]   → 5G deployment\n", terminal.getvalue())
+        self.assertEqual("infrastructure", persisted["stage"])
+        self.assertEqual("5g-stack", persisted["component"])
+        self.assertEqual(upstream, persisted["detail"]["upstream"])
+
+    def test_foreign_or_unknown_fiveg_events_are_ignored(self) -> None:
+        terminal = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary:
+            progress = RunProgress(run_id="run-001", radio="rfsim", terminal=terminal)
+            progress.stream.path = Path(temporary) / "events.jsonl"
+            progress.relay_fiveg_event(
+                {
+                    "schema": FIVEG_EVENT_SCHEMA,
+                    "deployment_id": "other-run",
+                    "phase": "deployment",
+                    "event": "started",
+                }
+            )
+            progress.relay_fiveg_event(
+                {
+                    "schema": FIVEG_EVENT_SCHEMA,
+                    "deployment_id": "run-001",
+                    "phase": "future-phase",
+                    "event": "started",
+                }
+            )
+            progress.close()
+        self.assertEqual("", terminal.getvalue())
 
 
 class RunLifecycleRenderingTests(unittest.TestCase):
@@ -137,7 +177,7 @@ class RunLifecycleRenderingTests(unittest.TestCase):
         self.assertNotIn("→ path", output)
         self.assertNotIn("PATH PROVEN", output)
 
-    def test_renderer_does_not_read_backend_evidence_to_infer_truth(self) -> None:
+    def test_renderer_does_not_read_backend_chatter_to_infer_truth(self) -> None:
         terminal = io.StringIO()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

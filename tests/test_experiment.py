@@ -23,7 +23,7 @@ class ExperimentContractTests(unittest.TestCase):
         self,
         root: Path,
         *,
-        status: str = "path-proven",
+        state: str = "ready",
         ready: bool = True,
     ) -> tuple[Path, Path]:
         manifest = root / "manifest.json"
@@ -31,9 +31,10 @@ class ExperimentContractTests(unittest.TestCase):
         manifest.write_text(
             json.dumps(
                 {
-                    "run_id": "network-accepted-01",
-                    "status": status,
-                    "network_evidence": evidence.name,
+                    "schema": "fiveg/deployment-manifest/v1",
+                    "id": "network-accepted-01",
+                    "state": state,
+                    "fiveg_ansible_commit": "a" * 40,
                 }
             ),
             encoding="utf-8",
@@ -48,9 +49,6 @@ class ExperimentContractTests(unittest.TestCase):
                         "pdu_address": "12.1.0.1",
                         "pdu_network": "12.1.0.0/16",
                         "ue_interface": "tun_srsue1",
-                        "slice": "slice1",
-                        "sst": 1,
-                        "dnn": "internet",
                     },
                 }
             ),
@@ -58,12 +56,10 @@ class ExperimentContractTests(unittest.TestCase):
         )
         return manifest, evidence
 
-    def test_experiment_requires_path_proven_network(self) -> None:
+    def test_experiment_requires_ready_upstream_deployment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            manifest, evidence = self._network_evidence(
-                Path(temporary), status="deployed-unverified"
-            )
-            with self.assertRaisesRegex(ExperimentError, "status=path-proven"):
+            manifest, evidence = self._network_evidence(Path(temporary), state="failed")
+            with self.assertRaisesRegex(ExperimentError, "ready 5g-Ansible deployment"):
                 load_path_proven_network(manifest, evidence)
 
     def test_build_scenario_uses_accepted_pdu(self) -> None:
@@ -75,6 +71,7 @@ class ExperimentContractTests(unittest.TestCase):
                 network_evidence=evidence,
             )
             self.assertEqual(scenario.sensor_count, 10)
+            self.assertEqual(scenario.network_run_id, "network-accepted-01")
             self.assertEqual(scenario.pdu_address, "12.1.0.1")
             self.assertEqual(
                 scenario.sensor_topic,

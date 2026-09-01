@@ -16,7 +16,7 @@ from synthran.experiment import (
     append_jsonl,
     append_rejected,
 )
-from synthran.mqtt_collector import _mqtt_reason_succeeded
+from synthran.iot_collector import _reason_succeeded
 
 
 @dataclass(frozen=True)
@@ -66,7 +66,7 @@ def collect_mqtt_window(
         del userdata, flags, properties
         nonlocal connected
         with condition:
-            connected = _mqtt_reason_succeeded(reason_code)
+            connected = _reason_succeeded(reason_code)
             if connected:
                 client.subscribe(scenario.sensor_topic, qos=0)
             else:
