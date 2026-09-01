@@ -40,6 +40,12 @@ sanitize_deployment_text = _legacy.sanitize_deployment_text
 validate_run_id = _legacy.validate_run_id
 verify_network_path = _legacy.verify_network_path
 
+# Temporary migration-only helpers still consumed by the old resource and
+# provenance layers.  They stay private to this package boundary and disappear
+# when ``network.resources`` and the legacy manifest contract are removed.
+tree_sha256 = _legacy.tree_sha256
+context_fingerprint = _legacy.context_fingerprint
+
 
 @dataclass(frozen=True)
 class DeploymentResult:
