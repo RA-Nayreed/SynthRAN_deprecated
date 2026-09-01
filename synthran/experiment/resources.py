@@ -53,6 +53,14 @@ def names(scenario: ExperimentScenario) -> dict[str, str]:
     }
 
 
+def central_names(run_id: str) -> dict[str, str]:
+    suffix = _suffix(run_id)
+    return {
+        "central_config": f"synthran-exp-central-{suffix}",
+        "central_deployment": f"synthran-exp-central-{suffix}",
+    }
+
+
 def render_edge_patch(
     scenario: ExperimentScenario,
     *,
@@ -68,9 +76,7 @@ def render_edge_patch(
         "spec": {
             "template": {
                 "metadata": {
-                    "labels": {
-                        "synthran.run/id": scenario.network_run_id,
-                    },
+                    "labels": {"synthran.run/id": scenario.network_run_id},
                     "annotations": {
                         RUN_LABEL: scenario.run_id,
                         DEFAULT_CONTAINER_ANNOTATION: "ue",
@@ -82,10 +88,7 @@ def render_edge_patch(
                             "name": EDGE_VOLUME,
                             "configMap": {"name": resource_names["edge_config"]},
                         },
-                        {
-                            "name": EDGE_RUNTIME_VOLUME,
-                            "emptyDir": {},
-                        },
+                        {"name": EDGE_RUNTIME_VOLUME, "emptyDir": {}},
                     ],
                     "containers": [
                         {
@@ -147,40 +150,19 @@ def render_edge_cleanup_patch() -> Mapping[str, Any]:
     }
 
 
-def render_experiment_objects(
-    scenario: ExperimentScenario,
+def render_central_objects(
     *,
+    run_id: str,
     lock: DependencyLock,
     core_node: str,
-    core_address: str,
-) -> tuple[Mapping[str, Any], ...]:
-    """Render ConfigMaps plus a host-network central MQTT Deployment."""
+) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+    """Render the run-owned host-network central MQTT resources."""
 
-    try:
-        ipaddress.ip_address(core_address)
-    except ValueError as exc:
-        raise ExperimentError("core address must be a literal IP address") from exc
-    resource_names = names(scenario)
+    resource_names = central_names(run_id)
     labels = {
         "app.kubernetes.io/name": "synthran-experiment",
         "app.kubernetes.io/component": "mqtt",
-        RUN_LABEL: scenario.run_id,
-    }
-    edge_config = {
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": resource_names["edge_config"],
-            "namespace": "open5gs",
-            "labels": labels,
-        },
-        "data": {
-            "mosquitto.conf": render_edge_mosquitto_config(
-                scenario,
-                central_broker_address=core_address,
-                central_broker_port=CENTRAL_PORT,
-            )
-        },
+        RUN_LABEL: run_id,
     }
     central_config = {
         "apiVersion": "v1",
@@ -208,14 +190,14 @@ def render_experiment_objects(
             "replicas": 1,
             "selector": {
                 "matchLabels": {
-                    RUN_LABEL: scenario.run_id,
+                    RUN_LABEL: run_id,
                     ROLE_LABEL: "central-mqtt",
                 }
             },
             "template": {
                 "metadata": {
                     "labels": {
-                        RUN_LABEL: scenario.run_id,
+                        RUN_LABEL: run_id,
                         ROLE_LABEL: "central-mqtt",
                     }
                 },
@@ -260,7 +242,52 @@ def render_experiment_objects(
             },
         },
     }
-    return edge_config, central_config, central_deployment
+    return central_config, central_deployment
+
+
+def render_experiment_objects(
+    scenario: ExperimentScenario,
+    *,
+    lock: DependencyLock,
+    core_node: str,
+    core_address: str,
+) -> tuple[Mapping[str, Any], ...]:
+    """Render the RFSIM edge ConfigMap plus shared central MQTT resources."""
+
+    try:
+        ipaddress.ip_address(core_address)
+    except ValueError as exc:
+        raise ExperimentError("core address must be a literal IP address") from exc
+    resource_names = names(scenario)
+    labels = {
+        "app.kubernetes.io/name": "synthran-experiment",
+        "app.kubernetes.io/component": "mqtt",
+        RUN_LABEL: scenario.run_id,
+    }
+    edge_config = {
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": resource_names["edge_config"],
+            "namespace": "open5gs",
+            "labels": labels,
+        },
+        "data": {
+            "mosquitto.conf": render_edge_mosquitto_config(
+                scenario,
+                central_broker_address=core_address,
+                central_broker_port=CENTRAL_PORT,
+            )
+        },
+    }
+    return (
+        edge_config,
+        *render_central_objects(
+            run_id=scenario.run_id,
+            lock=lock,
+            core_node=core_node,
+        ),
+    )
 
 
 def json_document(value: Mapping[str, Any]) -> str:
