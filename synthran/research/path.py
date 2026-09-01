@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from synthran.dependencies import DependencyLock
-from synthran.experiment import live as experiment_live
+from synthran.experiment.observe import discover_rfsim_ue_pod
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.network.runtime import verify_network_path
 from synthran.research import ResearchError, ResearchExperimentSpec
@@ -38,7 +38,7 @@ def require_network_ready(
             "controlled measurement requires a currently path-proven network: "
             + detail
         )
-    current_ue = experiment_live._discover_ue_pod(inventory, network_run_id)
+    current_ue = discover_rfsim_ue_pod(inventory, network_run_id)
     if current_ue != ue_pod:
         raise ResearchError(
             "controlled measurement UE pod changed after runtime handoff"
