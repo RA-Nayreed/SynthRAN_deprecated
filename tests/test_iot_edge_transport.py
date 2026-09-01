@@ -97,8 +97,11 @@ class RfsimTransportTests(unittest.TestCase):
                 "synthran-rfsim-relay-run-1",
             )
         rendered = " ".join(str(value) for value in mocked.call_args.args)
-        self.assertIn("SO_BINDTODEVICE", rendered)
+        # Linux SO_BINDTODEVICE is socket option 25.  The relay also binds its
+        # source IP explicitly, so both device and PDU identity are constrained.
+        self.assertIn("setsockopt(socket.SOL_SOCKET, 25", rendered)
         self.assertIn("tun_srsue1", rendered)
+        self.assertIn("upstream.bind((source_ip, 0))", rendered)
         self.assertIn("12.1.0.8", rendered)
         self.assertIn("172.28.2.77", rendered)
         self.assertEqual("tun_srsue1", UE_INTERFACE)
