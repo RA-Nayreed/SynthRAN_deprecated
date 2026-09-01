@@ -1,14 +1,13 @@
-"""Shared live RFSIM experiment mechanics used by the Amber workload.
+"""Shared process, SSH, and Kubernetes primitives for live experiments.
 
-This module deliberately contains no source-model logic.  It owns the narrow
-SSH/Kubernetes/process primitives needed to attach an accepted Amber workload to
-an already-ready RFSIM network and to restore that network afterwards.
+This module contains no 5G reconciliation or deployment repair. Infrastructure
+is upstream-owned; these helpers support only observation and run-scoped
+experiment resources/processes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import ipaddress
 import json
 import os
@@ -20,22 +19,10 @@ import subprocess
 import time
 from typing import Any, Mapping, Sequence, TextIO
 
-from synthran.dependencies import DependencyLock
-from synthran.experiment import ExperimentCheck, ExperimentError, ExperimentScenario
-from synthran.experiment.resources import (
-    EDGE_CONTAINER,
-    RUN_LABEL,
-    json_document,
-    render_edge_cleanup_patch,
-)
+from synthran.experiment import ExperimentError
+from synthran.experiment.resources import RUN_LABEL
 from synthran.fiveg_ansible import NetworkInventory
 from synthran.live_preflight import CommandResult, LivePreflightError, ssh_command
-from synthran.network.runtime import (
-    NetworkVerificationReport,
-    sanitize_deployment_text,
-    verify_network_path,
-)
-from synthran.network.rfsim import reconcile_rfsim_runtime
 
 
 DEFAULT_COLLECTION_SECONDS = 180
@@ -158,34 +145,6 @@ def _remote(
     return _checked(command, label=label, timeout_seconds=timeout_seconds)
 
 
-def _transfer_file(
-    inventory: NetworkInventory,
-    source_file: Path,
-    remote_path: str,
-    *,
-    label: str,
-) -> None:
-    """Transfer one UTF-8 experiment artifact through the strict SSH boundary."""
-
-    try:
-        content = source_file.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ExperimentError(f"{label} source is not readable UTF-8 text") from exc
-    try:
-        command = ssh_command(
-            inventory.core_node,
-            "sh",
-            "-c",
-            f"cat > {shlex.quote(remote_path)}",
-        )
-    except LivePreflightError as exc:
-        raise ExperimentError(str(exc)) from exc
-    result = _run(command, input_text=content, timeout_seconds=30)
-    if result.returncode != 0:
-        reason = (result.stderr or result.stdout).strip()
-        raise ExperimentError(f"{label} failed" + (f": {reason}" if reason else ""))
-
-
 def _remote_json(
     inventory: NetworkInventory,
     command: str,
@@ -210,38 +169,41 @@ def _remote_json(
     return value
 
 
-def _one_name(payload: Mapping[str, Any], *, label: str) -> str:
-    items = payload.get("items")
-    if not isinstance(items, list) or not all(isinstance(item, dict) for item in items):
-        raise ExperimentError(f"{label} discovery returned malformed data")
-    active = [
-        item
-        for item in items
-        if not (
-            isinstance(item.get("metadata"), dict)
-            and item["metadata"].get("deletionTimestamp") is not None
+def _transfer_file(
+    inventory: NetworkInventory,
+    source_file: Path,
+    remote_path: str,
+    *,
+    label: str,
+) -> None:
+    try:
+        content = source_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ExperimentError(f"{label} source is not readable UTF-8 text") from exc
+    try:
+        command = ssh_command(
+            inventory.core_node,
+            "sh",
+            "-c",
+            f"cat > {shlex.quote(remote_path)}",
         )
-    ]
-    if not active:
-        raise ExperimentError(f"no {label} was found")
-    if len(active) != 1:
-        raise ExperimentError(f"multiple {label} resources were found; refusing to choose one")
-    metadata = active[0].get("metadata")
-    name = metadata.get("name") if isinstance(metadata, dict) else None
-    if not isinstance(name, str) or not name:
-        raise ExperimentError(f"{label} metadata is malformed")
-    return name
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    result = _run(command, input_text=content, timeout_seconds=30)
+    if result.returncode != 0:
+        reason = (result.stderr or result.stdout).strip()
+        raise ExperimentError(f"{label} failed" + (f": {reason}" if reason else ""))
 
 
 def _core_address(inventory: NetworkInventory) -> str:
     value = inventory.core_node.variables.get("ip")
     if not value:
-        raise ExperimentError("prepared inventory is missing the core node IP address")
+        raise ExperimentError("upstream inventory is missing the core node IP address")
     try:
         ipaddress.ip_address(value)
     except ValueError as exc:
-        raise ExperimentError("prepared inventory has an invalid core node IP address") from exc
-    return str(value)
+        raise ExperimentError("upstream inventory has an invalid core node IP address") from exc
+    return value
 
 
 def _probe_ssh_forwarding(
@@ -253,9 +215,7 @@ def _probe_ssh_forwarding(
     try:
         command = ssh_command(host, "sshd", "-T")
     except LivePreflightError as exc:
-        raise ExperimentError(
-            f"SSH forwarding probe failed on {host.name}: {exc}"
-        ) from exc
+        raise ExperimentError(f"SSH forwarding probe failed on {host.name}: {exc}") from exc
     result = _run(command, timeout_seconds=timeout_seconds)
     if result.returncode != 0:
         raise ExperimentError(f"SSH forwarding is unavailable on {host.name}")
@@ -285,8 +245,8 @@ def _wait_tcp(
             except Exception:
                 pass
             raise ExperimentError(
-                f"{process.name} exited with code {process.process.poll()} before "
-                f"TCP endpoint {host}:{port} became ready; see {process.log_path}"
+                f"{process.name} exited before TCP endpoint {host}:{port} became ready; "
+                f"see {process.log_path}"
             )
         sock = socket.socket(family, socket.SOCK_STREAM)
         sock.settimeout(1.0)
@@ -341,17 +301,17 @@ def _ssh_tunnel_command(
     if not base:
         raise ExperimentError("unable to construct strict SSH tunnel")
     target = base.pop()
-    base.extend(
-        (
+    return tuple(
+        base
+        + [
             "-o",
             "ExitOnForwardFailure=yes",
             "-L",
             f"127.0.0.1:{local_port}:127.0.0.1:{remote_port}",
             target,
             remote_command,
-        )
+        ]
     )
-    return tuple(base)
 
 
 def _kubectl_apply_object(
@@ -374,24 +334,6 @@ def _kubectl_apply_object(
         raise ExperimentError(f"{label} failed")
 
 
-def _kubectl_patch_deployment(
-    inventory: NetworkInventory,
-    deployment: str,
-    patch: Mapping[str, Any],
-    *,
-    label: str,
-) -> None:
-    _remote(
-        inventory,
-        "sh",
-        "-c",
-        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl patch deployment "
-        f"{shlex.quote(deployment)} -n {KUBERNETES_NAMESPACE} "
-        f"--type=strategic -p {shlex.quote(json_document(patch))}",
-        label=label,
-    )
-
-
 def _wait_rollout(inventory: NetworkInventory, deployment: str, *, label: str) -> None:
     _remote(
         inventory,
@@ -401,173 +343,6 @@ def _wait_rollout(inventory: NetworkInventory, deployment: str, *, label: str) -
         f"{shlex.quote(deployment)} -n {KUBERNETES_NAMESPACE} --timeout=180s",
         label=label,
         timeout_seconds=200,
-    )
-
-
-def _collect_rollout_diagnostics(
-    inventory: NetworkInventory,
-    *,
-    network_run_id: str,
-    log_path: Path,
-    private_paths: Sequence[Path],
-    verification: NetworkVerificationReport | None = None,
-) -> None:
-    parts: list[str] = [
-        f"=== SynthRAN Rollout Diagnostics ({datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}) ===",
-        f"Network Run ID: {network_run_id}",
-        "",
-    ]
-    if verification is not None:
-        parts.extend(("=== Network Verification Checks ===", verification.render(), ""))
-
-    def safe(command: str) -> str:
-        try:
-            result = _run(
-                ssh_command(inventory.core_node, "sh", "-c", command),
-                timeout_seconds=30,
-            )
-            output = result.stdout
-            if result.stderr:
-                output = f"{output}\n[stderr]\n{result.stderr}" if output else f"[stderr]\n{result.stderr}"
-            return output.strip()
-        except Exception as exc:
-            return f"<diagnostic command failed: {exc}>"
-
-    parts.extend(
-        (
-            "=== kubectl get pods ===",
-            safe(
-                f"KUBECONFIG=/etc/kubernetes/admin.conf kubectl get pods -n {KUBERNETES_NAMESPACE} -o wide"
-            ),
-            "",
-            "=== kubectl get events ===",
-            safe(
-                f"KUBECONFIG=/etc/kubernetes/admin.conf kubectl get events -n {KUBERNETES_NAMESPACE} --sort-by=.metadata.creationTimestamp"
-            ),
-            "",
-        )
-    )
-    names = safe(
-        f"KUBECONFIG=/etc/kubernetes/admin.conf kubectl get pods -n {KUBERNETES_NAMESPACE} "
-        f"-l app=srsran,component=ue,synthran.run/id={shlex.quote(network_run_id)} "
-        "-o jsonpath='{.items[*].metadata.name}'"
-    )
-    if not names.startswith("<"):
-        for pod in (name.strip("'\"") for name in names.split() if name):
-            parts.extend(
-                (
-                    f"=== kubectl describe pod {pod} ===",
-                    safe(
-                        f"KUBECONFIG=/etc/kubernetes/admin.conf kubectl describe pod {shlex.quote(pod)} -n {KUBERNETES_NAMESPACE}"
-                    ),
-                    "",
-                    f"=== kubectl logs {pod} -c {EDGE_CONTAINER} --tail=100 ===",
-                    safe(
-                        f"KUBECONFIG=/etc/kubernetes/admin.conf kubectl logs {shlex.quote(pod)} -n {KUBERNETES_NAMESPACE} -c {EDGE_CONTAINER} --tail=100"
-                    ),
-                    "",
-                )
-            )
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(
-            sanitize_deployment_text("\n".join(parts), private_paths),
-            encoding="utf-8",
-            newline="\n",
-        )
-    except OSError:
-        pass
-
-
-def _discover_ue_deployment(inventory: NetworkInventory, network_run_id: str) -> str:
-    payload = _remote_json(
-        inventory,
-        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl get deployments "
-        f"-n {KUBERNETES_NAMESPACE} "
-        f"-l app.kubernetes.io/name=srsran-ue,synthran.run/id={shlex.quote(network_run_id)} -o json",
-        label="srsUE Deployment discovery",
-    )
-    return _one_name(payload, label="run-owned srsUE Deployment")
-
-
-def _interface_counter(
-    inventory: NetworkInventory,
-    pod: str,
-    interface: str,
-    counter: str,
-) -> int:
-    if counter not in {"rx_bytes", "tx_bytes"}:
-        raise ExperimentError("unsupported interface counter")
-    output = _remote(
-        inventory,
-        "sh",
-        "-c",
-        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl exec "
-        f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -c ue -- "
-        f"cat /sys/class/net/{shlex.quote(interface)}/statistics/{counter}",
-        label=f"{interface} {counter} probe",
-    ).strip()
-    if not output.isdigit():
-        raise ExperimentError(f"{interface} {counter} probe returned invalid data")
-    return int(output)
-
-
-def _add_ue_route(inventory: NetworkInventory, pod: str, core_address: str) -> None:
-    destination = f"{core_address}/32"
-    _remote(
-        inventory,
-        "sh",
-        "-c",
-        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl exec "
-        f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -c ue -- "
-        f"ip route replace {shlex.quote(destination)} dev tun_srsue1",
-        label="UE experiment route installation",
-    )
-    route = _remote(
-        inventory,
-        "sh",
-        "-c",
-        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl exec "
-        f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -c ue -- "
-        f"ip -j route get {shlex.quote(core_address)}",
-        label="UE experiment route proof",
-    )
-    try:
-        payload = json.loads(route)
-    except json.JSONDecodeError as exc:
-        raise ExperimentError("UE experiment route proof did not return JSON") from exc
-    if not isinstance(payload, list) or not any(
-        isinstance(item, dict) and item.get("dev") == "tun_srsue1" for item in payload
-    ):
-        raise ExperimentError("central MQTT destination is not routed through tun_srsue1")
-
-
-def _replace_edge_runtime_config(inventory: NetworkInventory, pod: str, config: str) -> None:
-    try:
-        command = ssh_command(
-            inventory.core_node,
-            "sh",
-            "-c",
-            "KUBECONFIG=/etc/kubernetes/admin.conf kubectl exec -i "
-            f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -c {EDGE_CONTAINER} -- "
-            "/bin/sh -c 'cat > /synthran/mosquitto.conf'",
-        )
-    except LivePreflightError as exc:
-        raise ExperimentError(str(exc)) from exc
-    result = _run(command, input_text=config, timeout_seconds=30)
-    if result.returncode != 0:
-        raise ExperimentError("edge MQTT runtime config refresh failed")
-
-
-def _restart_edge_sidecar(inventory: NetworkInventory, pod: str) -> None:
-    _remote(
-        inventory,
-        "sh",
-        "-c",
-        "KUBECONFIG=/etc/kubernetes/admin.conf kubectl exec "
-        f"-n {KUBERNETES_NAMESPACE} {shlex.quote(pod)} -c {EDGE_CONTAINER} -- "
-        "sh -c 'kill -TERM 1' || true",
-        label="edge MQTT sidecar restart",
     )
 
 
@@ -584,56 +359,85 @@ def _delete_experiment_objects(inventory: NetworkInventory, run_id: str) -> None
     )
 
 
-def _cleanup_live_resources(
-    *,
+def _remote_path_exists(
     inventory: NetworkInventory,
-    lock: DependencyLock,
-    scenario: ExperimentScenario,
-    ue_deployment: str | None,
-    cleanup_errors: Sequence[str] = (),
-) -> ExperimentCheck:
-    errors = list(cleanup_errors)
-    rollout_restored = False
-    if ue_deployment is not None:
-        try:
-            _kubectl_patch_deployment(
-                inventory,
-                ue_deployment,
-                render_edge_cleanup_patch(),
-                label="srsUE sidecar cleanup",
-            )
-            _wait_rollout(inventory, ue_deployment, label="srsUE cleanup rollout")
-            rollout_restored = True
-        except Exception as exc:
-            errors.append(f"sidecar restore: {exc}")
-    if rollout_restored:
-        try:
-            reconcile_rfsim_runtime(inventory, network_run_id=scenario.network_run_id)
-        except Exception as exc:
-            errors.append(f"RFSIM runtime restore: {exc}")
+    path: str,
+    *,
+    timeout_seconds: int = 10,
+) -> bool:
     try:
-        _delete_experiment_objects(inventory, scenario.run_id)
-    except Exception as exc:
-        errors.append(f"run-scoped object cleanup: {exc}")
+        command = ssh_command(inventory.core_node, "test", "-f", path)
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    return _run(command, timeout_seconds=timeout_seconds).returncode == 0
+
+
+def _remote_process_reap(
+    inventory: NetworkInventory,
+    *,
+    patterns: Sequence[str],
+    orphan_only: bool,
+    label: str,
+) -> None:
+    """Terminate only remote processes whose complete cmdline matches a pattern."""
+
+    if not patterns:
+        return
+    script = r'''
+import json, os, re, signal, sys, time
+patterns = [re.compile(value) for value in json.loads(sys.argv[1])]
+orphan_only = sys.argv[2] == '1'
+
+def matches():
+    result = []
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit() or int(entry) <= 1:
+            continue
+        pid = int(entry)
+        try:
+            raw = open(f'/proc/{pid}/cmdline', 'rb').read()
+            cmd = ' '.join(part.decode('utf-8', 'replace') for part in raw.split(b'\0') if part)
+            status = open(f'/proc/{pid}/status', encoding='utf-8', errors='replace').read().splitlines()
+        except OSError:
+            continue
+        if not cmd or not any(pattern.search(cmd) for pattern in patterns):
+            continue
+        ppid = None
+        for line in status:
+            if line.startswith('PPid:'):
+                try: ppid = int(line.split()[1])
+                except (IndexError, ValueError): ppid = None
+                break
+        if orphan_only and ppid != 1:
+            continue
+        result.append(pid)
+    return result
+
+for signum, delay in ((signal.SIGTERM, 1.5), (signal.SIGKILL, 0.5)):
+    targets = matches()
+    if not targets:
+        raise SystemExit(0)
+    for pid in targets:
+        try: os.kill(pid, signum)
+        except (ProcessLookupError, PermissionError): pass
+    deadline = time.monotonic() + delay
+    while time.monotonic() < deadline:
+        if not matches():
+            raise SystemExit(0)
+        time.sleep(0.1)
+raise SystemExit(4 if matches() else 0)
+'''.strip()
     try:
-        restored = verify_network_path(
-            inventory=inventory,
-            lock=lock,
-            run_id=scenario.network_run_id,
-            timeout_seconds=120,
+        command = ssh_command(
+            inventory.core_node,
+            "python3",
+            "-c",
+            script,
+            json.dumps(list(patterns)),
+            "1" if orphan_only else "0",
         )
-        if not restored.ready:
-            errors.append("accepted network session did not revalidate after cleanup")
-    except Exception as exc:
-        errors.append(f"accepted network revalidation: {exc}")
-    if errors:
-        return ExperimentCheck(
-            "cleanup-base-network",
-            False,
-            "cleanup failed closed: " + "; ".join(errors),
-        )
-    return ExperimentCheck(
-        "cleanup-base-network",
-        True,
-        "experiment resources removed and accepted network session revalidated",
-    )
+    except LivePreflightError as exc:
+        raise ExperimentError(str(exc)) from exc
+    result = _run(command, timeout_seconds=15)
+    if result.returncode != 0:
+        raise ExperimentError(f"{label} failed")
