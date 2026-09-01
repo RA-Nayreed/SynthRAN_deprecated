@@ -1,6 +1,6 @@
 {
   "schema": "synthran/dependencies/v1alpha1",
-  "resolved_at_utc": "2026-08-31T11:18:00Z",
+  "resolved_at_utc": "2026-09-01T03:50:00Z",
   "git": {
     "fiveg_ansible": {
       "url": "https://github.com/RA-Nayreed/5g-Ansible.git",
@@ -17,26 +17,6 @@
       "sync": true,
       "role": "Ambient IoT discrete-event source model",
       "license": "BSD-3-Clause"
-    },
-    "open5gs_k8s": {
-      "url": "https://github.com/sopnode/open5gs-k8s.git",
-      "commit": "e53601e5209425867413d45d3d01ed9a1b696de7",
-      "source_ref": "develop",
-      "checkout": "open5gs-k8s",
-      "sync": false,
-      "role": "transitive 5g_ansible Open5GS deployment",
-      "license": "MIT",
-      "ansible_variable": "repo_branch"
-    },
-    "srsran_helm": {
-      "url": "https://github.com/turletti/srsran-helm.git",
-      "commit": "8dfb9890d127734cdcd6eee9df8c5d09b1a8076a",
-      "source_ref": "csi",
-      "checkout": "srsran-helm",
-      "sync": false,
-      "role": "transitive 5g_ansible srsRAN deployment",
-      "license": "NOASSERTION",
-      "ansible_variable": "version"
     }
   },
   "containers": {
@@ -232,7 +212,7 @@
       },
       "ansible-core": {
         "version": "2.20.5",
-        "role": "Golden path controller and isolated wrapper execution",
+        "role": "5g-Ansible controller runtime",
         "license": "GPL-3.0-or-later"
       },
       "simpy": {
