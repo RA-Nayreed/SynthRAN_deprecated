@@ -1,4 +1,4 @@
-"""Amber IoT workload execution through the accepted physical R2Lab path."""
+"""Amber IoT workload execution through an upstream-provisioned physical path."""
 
 from __future__ import annotations
 
@@ -56,12 +56,7 @@ from synthran.r2lab.iot_transport import (
     R2LabIoTTransportAdapter,
     R2LabIoTTransportSession,
 )
-from synthran.r2lab.resources import load_topology
-from synthran.r2lab.ue import (
-    PhysicalWorkloadContext,
-    PhysicalWorkloadResult,
-    verify_current_n3xx_n2,
-)
+from synthran.r2lab.ue import PhysicalWorkloadContext, PhysicalWorkloadResult
 
 
 PHYSICAL_IOT_SCHEMA = "synthran/r2lab-iot-workload/v2alpha1"
@@ -82,7 +77,6 @@ class PhysicalIoTConfig:
     known_hosts: Path
     workload_id: str
     run_root: Path
-    physical_run_root: Path
     collection_seconds: int = 180
     minimum_per_sensor: int = 3
     iot_profile: str = TRANSPORT_PROFILE
@@ -172,16 +166,11 @@ def _cleanup_central_port(
 def _network_reproof(
     *,
     config: PhysicalIoTConfig,
-    context: PhysicalWorkloadContext,
     profile: Any,
     central_address: str,
 ) -> bool:
-    if not verify_current_n3xx_n2(
-        run_id=context.run_id,
-        known_hosts=config.known_hosts,
-        run_root=config.physical_run_root,
-    ):
-        return False
+    """Re-prove only the experiment-side UE route; deployment health is upstream."""
+
     _prove_ue_route(config.slice_name, profile, central_address)
     return True
 
@@ -204,22 +193,6 @@ def execute_physical_iot_workload(
         raise R2LabIoTWorkloadError("physical IoT context must use wwan0")
 
     profile = _validate_ue(context.ue)
-    topology = load_topology(
-        run_root=config.physical_run_root,
-        run_id=context.run_id,
-    ).validate()
-    if topology.ue != context.ue:
-        raise R2LabIoTWorkloadError(
-            "physical IoT context does not match the persisted UE selection"
-        )
-    if (
-        config.inventory.core_node.name != topology.core_node
-        or config.inventory.ran_node.name != topology.ran_node
-    ):
-        raise R2LabIoTWorkloadError(
-            "physical IoT inventory does not match the persisted compute topology"
-        )
-
     source_spec = IoTSourceSpec(
         run_id=config.workload_id,
         network_run_id=context.run_id,
@@ -437,13 +410,12 @@ def execute_physical_iot_workload(
             )
         delivery_reproof = _network_reproof(
             config=config,
-            context=context,
             profile=profile,
             central_address=central_address,
         )
         if not delivery_reproof:
             raise R2LabIoTWorkloadError(
-                "physical N2 path was not valid after Amber telemetry delivery"
+                "physical UE route was not valid after Amber telemetry delivery"
             )
 
         write_parquet(records, parquet_path)
@@ -501,12 +473,11 @@ def execute_physical_iot_workload(
         try:
             cleanup_reproof = _network_reproof(
                 config=config,
-                context=context,
                 profile=profile,
                 central_address=central_address,
             )
             if not cleanup_reproof:
-                cleanup_errors.append("physical N2 path was not valid after cleanup")
+                cleanup_errors.append("physical UE route was not valid after cleanup")
         except Exception as exc:
             cleanup_errors.append(f"physical path cleanup reproof: {exc}")
 
@@ -593,7 +564,7 @@ def execute_physical_iot_workload(
 
 
 def build_physical_iot_executor(config: PhysicalIoTConfig):
-    """Return the executor consumed by the canonical physical workload handoff."""
+    """Return the physical Amber executor for one upstream deployment inventory."""
 
     config.validate()
 
